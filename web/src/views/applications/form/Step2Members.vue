@@ -1,14 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Plus, UserFilled } from '@element-plus/icons-vue'
+import { Delete, Plus } from '@element-plus/icons-vue'
 import NcCard from '@/components/NcCard.vue'
-import {
-  applyApplicantToMember,
-  createHeadMember,
-  createMember,
-  createSupporter,
-} from './formModel'
+import { createMember, createSupporter } from './formModel'
 import {
   DISABILITY_LEVEL_OPTIONS,
   DISABILITY_TYPE_OPTIONS,
@@ -39,6 +34,11 @@ const props = defineProps<{
 
 const members = computed(() => props.form.members)
 const supporters = computed(() => props.form.supporters)
+
+/** 户主（申请人）信息只在第 1 步维护，旧版共同生活成员列表排除户主。 */
+const visibleMembers = computed(() =>
+  members.value.filter((item) => !item.isHouseholdHead && !item.isApplicant),
+)
 
 const duplicateIdCards = computed<Set<string>>(() => {
   const counts = new Map<string, number>()
@@ -113,32 +113,13 @@ function handleDiseaseInput(member: ApplicationFormMember): void {
   member.isSevereDisease = Boolean(member.diseaseName.trim())
 }
 
-function setHead(member: ApplicationFormMember): void {
-  for (const item of members.value) {
-    if (item === member) {
-      item.isHouseholdHead = true
-      item.relation = '户主'
-    } else {
-      item.isHouseholdHead = false
-      if (item.relation === '户主') item.relation = '其他'
-    }
-  }
-  ElMessage.success(`已将「${member.name || '该成员'}」设为户主`)
-}
-
 function addMember(): void {
-  const isFirst = members.value.length === 0
-  members.value.push(
-    createMember({
-      relation: isFirst ? '户主' : '其他',
-      isHouseholdHead: isFirst,
-    }),
-  )
+  members.value.push(createMember({ relation: '其他' }))
 }
 
 async function removeMember(member: ApplicationFormMember): Promise<void> {
-  if (members.value.length <= 1) {
-    ElMessage.warning('至少保留一名家庭成员（户主），不能全部删除')
+  if (member.isHouseholdHead || member.isApplicant) {
+    ElMessage.warning('户主信息请在第 1 步修改，不能在此删除')
     return
   }
 
@@ -160,17 +141,7 @@ async function removeMember(member: ApplicationFormMember): Promise<void> {
   const index = members.value.indexOf(member)
   if (index < 0) return
 
-  const wasHead = member.isHouseholdHead
   members.value.splice(index, 1)
-
-  if (wasHead) {
-    const next = members.value[0]
-    if (next) {
-      next.isHouseholdHead = true
-      next.relation = '户主'
-      ElMessage.info(`户主已顺延为「${next.name || '下一位成员'}」`)
-    }
-  }
 }
 
 /** 自动/手动把第 1 步申请人同步到户主。 */
@@ -197,33 +168,6 @@ function syncHeadFromApplicant(): void {
 
     headSyncState.set(member, { name: member.name, idCard: member.idCard })
   }
-}
-
-function fillHeadFromApplicant(): void {
-  const basic = props.form.basic
-  if (!basic.applicantName.trim() && !basic.applicantIdCard.trim()) {
-    ElMessage.warning('请先在第 1 步填写申请人姓名与身份证号')
-    return
-  }
-
-  let head = members.value.find((item) => item.isHouseholdHead)
-  if (!head) head = members.value.find((item) => item.isApplicant)
-
-  if (!head) {
-    head = createHeadMember(basic)
-    members.value.unshift(head)
-  } else {
-    for (const member of members.value) {
-      if (member !== head) member.isApplicant = false
-    }
-    head.isHouseholdHead = true
-    head.isApplicant = true
-    head.relation = '户主'
-    applyApplicantToMember(head, basic)
-  }
-
-  headSyncState.set(head, { name: head.name, idCard: head.idCard })
-  ElMessage.success('已按申请人信息填充户主')
 }
 
 /** 载入的旧表单若没有户主，则把申请人或第一位成员补为户主。 */
@@ -290,40 +234,28 @@ onMounted(() => {
   <div class="step-members">
     <NcCard title="共同生活成员">
       <template #actions>
-        <el-button :icon="UserFilled" @click="fillHeadFromApplicant">户主 = 申请人</el-button>
         <el-button type="primary" :icon="Plus" @click="addMember">新增人员</el-button>
       </template>
 
-      <el-empty v-if="members.length === 0" description="暂无共同生活成员，点击右上角“新增人员”添加">
+      <el-empty v-if="visibleMembers.length === 0" description="暂无共同生活成员，点击右上角“新增人员”添加">
         <el-button type="primary" :icon="Plus" @click="addMember">新增人员</el-button>
       </el-empty>
 
       <div v-else class="member-list">
         <article
-          v-for="(member, index) in members"
+          v-for="(member, index) in visibleMembers"
           :key="rowKey(member)"
           class="member-card"
-          :class="{ 'is-head': member.isHouseholdHead }"
         >
           <header class="member-card__head">
             <div class="member-card__title">
               <span class="member-index">成员 {{ index + 1 }}</span>
-              <span v-if="member.isHouseholdHead" class="badge badge--head">户主</span>
-              <span v-if="member.isApplicant" class="badge">申请人</span>
               <span v-if="member.hasDisability" class="badge badge--warn">残疾</span>
               <span v-if="member.isSevereDisease" class="badge badge--warn">重病</span>
               <strong class="member-name">{{ member.name || '未命名成员' }}</strong>
             </div>
 
             <div class="member-card__actions">
-              <el-button
-                v-if="!member.isHouseholdHead"
-                size="small"
-                text
-                @click="setHead(member)"
-              >
-                设为户主
-              </el-button>
               <el-button
                 size="small"
                 text
