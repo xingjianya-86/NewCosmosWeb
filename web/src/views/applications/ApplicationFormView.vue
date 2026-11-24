@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Delete, Refresh } from '@element-plus/icons-vue'
+import { ArrowLeft, Delete, Document, FolderOpened, Refresh } from '@element-plus/icons-vue'
 import {
   classifyApplication,
   completeApplication,
@@ -13,7 +13,6 @@ import {
   updateApplicationForm,
 } from '@/api/applicationForm'
 import { getErrorMessage } from '@/api/http'
-import NcPageHeader from '@/components/NcPageHeader.vue'
 import Step1Basic from './form/Step1Basic.vue'
 import Step2Members from './form/Step2Members.vue'
 import Step3Economy from './form/Step3Economy.vue'
@@ -26,15 +25,14 @@ import { validateBasic } from './form/validation'
 interface FormStep {
   value: number
   label: string
-  hint: string
 }
 
 const STEPS: FormStep[] = [
-  { value: 1, label: '基本信息', hint: '申请人、户籍与申请说明' },
-  { value: 2, label: '家庭成员', hint: '共同生活成员与赡养人' },
-  { value: 3, label: '经济状况', hint: '收入、支出与土地情况' },
-  { value: 4, label: '入户调查', hint: '调查记录与佐证材料' },
-  { value: 5, label: '分类认定', hint: '认定结果与保障金额' },
+  { value: 1, label: '基本信息' },
+  { value: 2, label: '家庭成员' },
+  { value: 3, label: '经济状况' },
+  { value: 4, label: '入户调查' },
+  { value: 5, label: '分类认定' },
 ]
 
 const route = useRoute()
@@ -70,9 +68,6 @@ const assetCheckId = computed(() => {
 })
 
 const currentStep = computed(() => form.value.currentStep)
-const currentStepMeta = computed(
-  () => STEPS.find((step) => step.value === currentStep.value) ?? STEPS[0],
-)
 const basicIssues = computed(() => validateBasic(form.value.basic))
 const step1Valid = computed(() => basicIssues.value.length === 0)
 /** 编辑模式下必须等 GET 成功后再允许保存，避免把空表单 POST 成新申请。 */
@@ -80,11 +75,23 @@ const formReady = computed(
   () => isNew.value || (form.value.id > 0 && form.value.id === applicationId.value),
 )
 
-const headerDescription = computed(() => {
-  if (isNew.value) return '新建低收入人口认定申请 · 保存草稿后生成申请编号'
-  const no = form.value.applicationNo || `#${form.value.id}`
-  return `申请编号 ${no} · ${form.value.statusText || form.value.status || '草稿'} · 第 ${currentStep.value} / 5 步`
+/** 草稿可编辑；已提交等状态按旧版“查看”模式处理，仅隐藏编辑动作，步骤仍可回看。 */
+const isViewMode = computed(
+  () => !isNew.value && !!form.value.status && form.value.status !== 'Draft',
+)
+const modeLabel = computed(() => (isViewMode.value ? '查看' : '编辑'))
+const statusLabel = computed(() => {
+  if (form.value.statusText) return form.value.statusText
+  if (!form.value.status || form.value.status === 'Draft') return '草稿'
+  return form.value.status
 })
+const canDelete = computed(
+  () =>
+    !isNew.value &&
+    form.value.id > 0 &&
+    !isViewMode.value &&
+    (form.value.status === 'Draft' || !form.value.status),
+)
 
 /** 已完成的步骤可回看；向前切换要求第 1 步基本信息通过校验。 */
 function canEnterStep(step: number): boolean {
@@ -210,7 +217,7 @@ function nextStep(): void {
 
 /** 先保存再分类认定，兼容接口返回完整表单或仅 classification。 */
 async function handleClassify(): Promise<void> {
-  if (classifying.value || completing.value) return
+  if (isViewMode.value || classifying.value || completing.value) return
   classifying.value = true
   actionError.value = ''
   try {
@@ -235,7 +242,7 @@ async function handleClassify(): Promise<void> {
 
 /** 先保存再完成认定，成功后回到工作流列表。 */
 async function handleComplete(): Promise<void> {
-  if (completing.value || classifying.value) return
+  if (isViewMode.value || completing.value || classifying.value) return
 
   try {
     await ElMessageBox.confirm(
@@ -303,6 +310,24 @@ function backToWorkflow(): void {
   void router.push('/applications')
 }
 
+/** 旧版 Head 返回键与底部“放弃申请”同义：确认后离开，未保存内容丢弃。 */
+async function handleAbandon(): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      '确定要放弃本次办理吗？已录入但未保存的信息将会丢失。',
+      '放弃办理',
+      {
+        type: 'warning',
+        confirmButtonText: '放弃办理',
+        cancelButtonText: '继续填写',
+      },
+    )
+  } catch {
+    return
+  }
+  backToWorkflow()
+}
+
 function reload(): void {
   void loadForm()
 }
@@ -325,45 +350,59 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="nc-page form-page">
-    <NcPageHeader
-      title="低收入人口认定办理"
-      :description="headerDescription"
-      kicker="低收入人口认定 / 五步办理"
-    >
-      <template #actions>
-        <el-button :icon="ArrowLeft" @click="backToWorkflow">返回工作流</el-button>
-        <el-button v-if="!isNew" :icon="Refresh" :loading="loading" @click="reload">刷新</el-button>
+  <div class="form-page">
+    <!-- 顶部标题栏：旧版 Primary 横条 + 返回 + 图标 + 标题/副标题 + 模式状态 -->
+    <header class="form-hero">
+      <div class="form-hero__main">
         <el-button
-          v-if="!isNew && form.id > 0 && (form.status === 'Draft' || !form.status)"
-          type="danger"
-          plain
+          class="hero-back"
+          :icon="ArrowLeft"
+          circle
+          aria-label="返回工作流"
+          title="返回工作流"
+          @click="handleAbandon"
+        />
+        <el-icon class="hero-icon" :size="34"><Document /></el-icon>
+        <div class="hero-text">
+          <h1 class="hero-title">低收入人口认定申请</h1>
+          <p class="hero-subtitle">家庭申请 · 信息录入 · 分类认定</p>
+        </div>
+      </div>
+
+      <div class="form-hero__meta">
+        <span v-if="!isNew" class="hero-no">{{ form.applicationNo || `#${form.id}` }}</span>
+        <span class="hero-chip">{{ statusLabel }}</span>
+        <span class="hero-chip hero-chip--mode">{{ modeLabel }}</span>
+        <el-button
+          v-if="!isNew"
+          class="hero-action"
+          :icon="Refresh"
+          circle
+          :loading="loading"
+          aria-label="刷新"
+          title="刷新"
+          @click="reload"
+        />
+        <el-button
+          v-if="canDelete"
+          class="hero-action"
           :icon="Delete"
+          circle
+          aria-label="删除申请"
+          title="删除申请"
           @click="handleDelete"
-        >
-          删除
-        </el-button>
-      </template>
-    </NcPageHeader>
+        />
+      </div>
+    </header>
 
-    <el-alert
-      v-if="assetCheckId && isNew"
-      class="asset-alert"
-      type="info"
-      :closable="false"
-      show-icon
-      :title="`本次申请关联资产核对记录 #${assetCheckId}`"
-    >
-      资产核对数据不会自动写入本表单，请据实录入家庭成员与经济状况。
-    </el-alert>
-
-    <div class="form-layout">
-      <nav class="step-rail" aria-label="办理步骤">
-        <ol class="step-list">
-          <li v-for="step in STEPS" :key="step.value">
+    <!-- 步骤卡片条：旧版横向 5 卡 + 连接线 -->
+    <section class="form-steps" aria-label="办理步骤">
+      <div class="step-scroll">
+        <div class="step-track">
+          <template v-for="(step, index) in STEPS" :key="step.value">
             <button
               type="button"
-              class="step-item"
+              class="step-card"
               :class="{
                 'is-active': currentStep === step.value,
                 'is-done': currentStep > step.value,
@@ -372,32 +411,34 @@ onMounted(() => {
               :aria-current="currentStep === step.value ? 'step' : undefined"
               @click="goToStep(step.value)"
             >
-              <span class="step-no">{{ String(step.value).padStart(2, '0') }}</span>
-              <span class="step-text">
-                <strong>{{ step.label }}</strong>
-                <small>{{ step.hint }}</small>
-              </span>
+              <span class="step-card__no">{{ step.value }}</span>
+              <span class="step-card__label">{{ step.label }}</span>
             </button>
-          </li>
-        </ol>
-
-        <div class="rail-meta">
-          <div>
-            <span>申请编号</span>
-            <strong>{{ form.applicationNo || '保存草稿后生成' }}</strong>
-          </div>
-          <div>
-            <span>办理状态</span>
-            <strong>{{ form.statusText || form.status || '草稿' }}</strong>
-          </div>
-          <div>
-            <span>家庭人数</span>
-            <strong>{{ form.members.length }} 人</strong>
-          </div>
+            <span
+              v-if="index < STEPS.length - 1"
+              class="step-link"
+              :class="{ 'is-done': currentStep > step.value }"
+              aria-hidden="true"
+            />
+          </template>
         </div>
-      </nav>
+      </div>
+    </section>
 
+    <!-- 内容区：左侧当前步骤 + 右侧 320px 来源数据栏 -->
+    <div class="form-body">
       <section class="form-main" aria-live="polite">
+        <el-alert
+          v-if="assetCheckId && isNew"
+          class="asset-alert"
+          type="info"
+          :closable="false"
+          show-icon
+          :title="`本次申请关联资产核对记录 #${assetCheckId}`"
+        >
+          资产核对数据不会自动写入本表单，请据实录入家庭成员与经济状况。
+        </el-alert>
+
         <el-alert
           v-if="loadError"
           class="form-alert"
@@ -423,12 +464,6 @@ onMounted(() => {
         </div>
 
         <template v-else>
-          <header class="step-heading">
-            <p class="step-heading__kicker">STEP {{ currentStep }} / 5</p>
-            <h2 class="step-heading__title">{{ currentStepMeta.label }}</h2>
-            <p class="step-heading__hint">{{ currentStepMeta.hint }}</p>
-          </header>
-
           <Step1Basic v-if="currentStep === 1" :form="form" />
           <Step2Members v-else-if="currentStep === 2" :form="form" />
           <Step3Economy
@@ -450,46 +485,81 @@ onMounted(() => {
           />
         </template>
       </section>
+
+      <aside class="form-aside" aria-label="来源数据">
+        <div class="aside-head">
+          <el-icon :size="18"><FolderOpened /></el-icon>
+          <strong>来源数据</strong>
+        </div>
+
+        <div class="aside-body">
+          <p v-if="assetCheckId" class="aside-note">已关联资产核对记录 #{{ assetCheckId }}</p>
+          <div class="aside-empty">
+            <el-icon :size="38"><FolderOpened /></el-icon>
+            <span>{{ assetCheckId ? '来源字段待接入' : '暂无来源数据' }}</span>
+          </div>
+        </div>
+
+        <div class="aside-actions">
+          <strong class="aside-subtitle">字段选择</strong>
+          <el-button plain disabled title="资产核对字段选择暂未接入 Web 端">全选</el-button>
+          <el-button type="primary" disabled title="资产核对字段选择暂未接入 Web 端">
+            填充选中
+          </el-button>
+          <div class="aside-divider" aria-hidden="true" />
+          <strong class="aside-subtitle">家庭成员</strong>
+          <el-button type="primary" disabled title="暂无可导入的家庭成员来源">
+            导入全部家庭成员
+          </el-button>
+        </div>
+      </aside>
     </div>
 
-    <footer class="action-bar">
-      <div class="action-bar__info">
-        <span class="action-bar__step">第 {{ currentStep }} / 5 步</span>
-        <span v-if="step1Valid" class="action-bar__state is-ok">基本信息已完善</span>
-        <span v-else class="action-bar__state is-warn">基本信息未完善</span>
-        <span v-if="saving" class="action-bar__state">正在保存…</span>
+    <!-- 底部按钮栏：放弃申请 / 保存草稿 / 上一步 / 下一步 / 提交 -->
+    <footer class="form-actions">
+      <div class="form-actions__cell">
+        <el-button v-if="!isViewMode" class="action-abandon" plain @click="handleAbandon">
+          放弃申请
+        </el-button>
       </div>
-
-      <div class="action-bar__buttons">
+      <div class="form-actions__cell">
         <el-button
+          v-if="!isViewMode"
           :loading="saving"
           :disabled="classifying || completing || !formReady"
           @click="saveDraft"
         >
           保存草稿
         </el-button>
+      </div>
+      <div class="form-actions__cell">
         <el-button
-          :disabled="currentStep <= 1 || saving || classifying || completing"
+          v-if="currentStep > 1"
+          :disabled="saving || classifying || completing"
           @click="prevStep"
         >
-          上一步
+          ← 上一步
         </el-button>
+      </div>
+      <div class="form-actions__cell">
         <el-button
           v-if="currentStep < 5"
           type="primary"
           :disabled="saving || classifying || completing"
           @click="nextStep"
         >
-          下一步
+          下一步 →
         </el-button>
+      </div>
+      <div class="form-actions__cell form-actions__cell--submit">
         <el-button
-          v-else
-          type="primary"
+          v-if="currentStep >= 5 && !isViewMode"
+          class="action-submit"
           :loading="completing"
           :disabled="saving || classifying"
           @click="handleComplete"
         >
-          完成认定 / 生成档案
+          提交
         </el-button>
       </div>
     </footer>
@@ -500,167 +570,247 @@ onMounted(() => {
 .form-page {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding-bottom: 8px;
-}
-
-.asset-alert,
-.form-alert {
-  margin: 0;
-}
-
-.form-layout {
-  display: grid;
-  grid-template-columns: 236px minmax(0, 1fr);
-  align-items: start;
-  gap: 16px;
-}
-
-/* ── 左侧步骤条 ─────────────────────────────────────────────── */
-.step-rail {
-  position: sticky;
-  top: 12px;
-  border: 1px solid var(--nc-line);
-  border-radius: var(--nc-radius-sm);
-  background-color: var(--nc-paper-2);
-  box-shadow: var(--nc-shadow-xs);
-}
-
-.step-list {
+  width: 100%;
+  max-width: none;
+  min-height: 100%;
   margin: 0;
   padding: 0;
-  list-style: none;
+  background-color: var(--nc-paper);
 }
 
-.step-item {
+/* ── 顶部标题栏（旧版 Primary 横条） ─────────────────────────── */
+.form-hero {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  width: 100%;
-  padding: 12px 13px;
-  border: none;
-  border-bottom: 1px solid var(--nc-line-faint);
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  background-color: var(--nc-seal);
+  box-shadow: 0 4px 8px rgba(127, 35, 27, 0.3);
+  color: #fff;
+}
+
+.form-hero__main {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.form-hero__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.form-hero :deep(.hero-back.el-button) {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  margin: 0;
+  border-color: rgba(255, 255, 255, 0.5);
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.form-hero :deep(.hero-back.el-button:hover) {
+  border-color: #fff;
+  background-color: #fff;
+  color: var(--nc-seal);
+}
+
+.hero-icon {
+  flex: none;
+  color: #fff;
+}
+
+.hero-text {
+  min-width: 0;
+}
+
+.hero-title {
+  margin: 0;
+  color: #fff;
+  font-family: var(--nc-font-serif);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: 0.04em;
+}
+
+.hero-subtitle {
+  margin: 2px 0 0;
+  color: var(--nc-seal-soft);
+  font-size: 14px;
+  line-height: 1.5;
+  opacity: 0.9;
+}
+
+.hero-no {
+  padding-right: 8px;
+  border-right: 1px solid rgba(255, 255, 255, 0.35);
+  color: rgba(255, 255, 255, 0.78);
+  font-family: var(--nc-font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.hero-chip {
+  flex: none;
+  padding: 5px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 2px;
+  background-color: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.hero-chip--mode {
+  border-color: #fff;
+  background-color: #fff;
+  color: var(--nc-seal);
+  font-weight: 700;
+}
+
+.form-hero :deep(.hero-action.el-button) {
+  width: 32px;
+  height: 32px;
+  margin: 0;
+  border-color: rgba(255, 255, 255, 0.35);
   background-color: transparent;
-  color: var(--nc-ink-2);
+  color: #fff;
+}
+
+.form-hero :deep(.hero-action.el-button:hover) {
+  border-color: #fff;
+  background-color: #fff;
+  color: var(--nc-seal);
+}
+
+/* ── 步骤卡片条 ───────────────────────────────────────────────── */
+.form-steps {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--nc-line-faint);
+  background-color: #fff;
+  box-shadow: 0 1px 3px rgba(23, 19, 16, 0.03);
+}
+
+.step-scroll {
+  width: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.step-track {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+}
+
+.step-card {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 10px 16px;
+  border: 1px solid var(--nc-line);
+  border-radius: 2px;
+  background-color: #fff;
+  color: var(--nc-muted-2);
   font-family: inherit;
-  text-align: left;
   cursor: pointer;
   transition:
     background-color var(--nc-transition),
+    border-color var(--nc-transition),
     color var(--nc-transition),
     box-shadow var(--nc-transition);
 }
 
-.step-item:hover {
-  background-color: var(--nc-paper-3);
+.step-card:hover {
+  border-color: var(--nc-seal-light);
 }
 
-.step-item.is-active {
-  background-color: var(--nc-seal-wash);
+.step-card.is-done {
+  border-color: var(--nc-seal);
+  background-color: var(--nc-seal-soft);
   color: var(--nc-seal-dark);
-  box-shadow: inset 3px 0 0 var(--nc-seal);
 }
 
-.step-item.is-locked {
+.step-card.is-active {
+  border-color: var(--nc-seal);
+  background-color: var(--nc-seal);
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(127, 35, 27, 0.25);
+}
+
+.step-card.is-locked {
   opacity: 0.55;
   cursor: not-allowed;
 }
 
-.step-item.is-locked:hover {
-  background-color: transparent;
+.step-card.is-locked:hover {
+  border-color: var(--nc-line);
 }
 
-.step-no {
-  display: grid;
-  flex: none;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 1px solid var(--nc-line);
-  border-radius: 50%;
-  background-color: var(--nc-paper-soft);
-  color: var(--nc-muted-2);
+.step-card__no {
   font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-xs);
+  font-size: 18px;
   font-weight: 700;
+  line-height: 1.2;
 }
 
-.step-item.is-active .step-no {
-  border-color: var(--nc-seal);
-  background-color: var(--nc-seal);
-  color: #fff;
-}
-
-.step-item.is-done .step-no {
-  border-color: var(--nc-pine);
-  background-color: var(--nc-pine);
-  color: #fff;
-}
-
-.step-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.step-text strong {
-  color: inherit;
-  font-family: var(--nc-font-serif);
-  font-size: var(--nc-text-base);
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  line-height: 1.4;
-}
-
-.step-text small {
-  overflow: hidden;
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-  line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rail-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px 13px;
-  border-top: 1px solid var(--nc-line);
-  background-color: var(--nc-paper-soft);
-}
-
-.rail-meta div {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-}
-
-.rail-meta span {
-  flex: none;
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-}
-
-.rail-meta strong {
-  overflow: hidden;
-  color: var(--nc-ink-2);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-xs);
+.step-card__label {
+  font-size: 17px;
   font-weight: 600;
-  text-overflow: ellipsis;
+  line-height: 1.35;
+  letter-spacing: 0.02em;
   white-space: nowrap;
 }
 
-/* ── 右侧内容 ───────────────────────────────────────────────── */
+.step-link {
+  flex: 0 0 24px;
+  align-self: center;
+  height: 2px;
+  margin: 0 4px;
+  background-color: var(--nc-line-strong);
+}
+
+.step-link.is-done {
+  background-color: var(--nc-seal);
+}
+
+/* ── 内容区 ───────────────────────────────────────────────────── */
+.form-body {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  align-items: stretch;
+  min-height: 0;
+}
+
 .form-main {
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+  padding: 16px;
+}
+
+.asset-alert,
+.form-alert {
+  margin: 0;
 }
 
 .loading-card {
@@ -670,177 +820,202 @@ onMounted(() => {
   background-color: var(--nc-paper-2);
 }
 
-.step-heading {
-  padding: 2px 2px 0;
-}
-
-.step-heading__kicker {
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-xs);
-  font-weight: 600;
-  letter-spacing: 0.18em;
-}
-
-.step-heading__title {
-  margin-top: 3px;
-  color: var(--nc-ink);
-  font-family: var(--nc-font-serif);
-  font-size: var(--nc-text-xl);
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  line-height: 1.4;
-}
-
-.step-heading__hint {
-  margin-top: 4px;
-  color: var(--nc-muted-2);
-  font-size: var(--nc-text-sm);
-  line-height: 1.6;
-}
-
-/* ── 底部固定操作栏 ─────────────────────────────────────────── */
-.action-bar {
-  position: sticky;
-  bottom: 0;
-  z-index: 8;
+/* ── 右侧来源数据栏（旧版 320px） ─────────────────────────────── */
+.form-aside {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 2px;
-  padding: 11px 16px;
-  border: 1px solid var(--nc-line);
-  border-top: 2px solid var(--nc-seal);
-  border-radius: var(--nc-radius-sm);
-  background-color: var(--nc-paper-2);
-  box-shadow: 0 -6px 18px rgba(23, 19, 16, 0.08);
-}
-
-.action-bar__info {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
   min-width: 0;
+  border-left: 1px solid var(--nc-line);
+  background-color: #fff;
 }
 
-.action-bar__step {
-  color: var(--nc-ink-2);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-xs);
-  font-weight: 700;
-  letter-spacing: 0.1em;
-}
-
-.action-bar__state {
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-}
-
-.action-bar__state.is-ok {
-  color: var(--nc-pine);
-}
-
-.action-bar__state.is-warn {
+.aside-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--nc-line);
+  background-color: var(--nc-paper-soft);
   color: var(--nc-seal);
 }
 
-.action-bar__buttons {
-  display: flex;
-  flex: none;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
+.aside-head strong {
+  color: var(--nc-ink);
+  font-size: 17px;
+  font-weight: 700;
 }
 
-@media (max-width: 1023px) {
-  .form-layout {
+.aside-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.aside-note {
+  margin: 0;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--nc-line-faint);
+  background-color: var(--nc-seal-wash);
+  color: var(--nc-seal-dark);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.aside-empty {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px 20px;
+  color: var(--nc-disabled);
+  font-size: 14px;
+}
+
+.aside-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border-top: 1px solid var(--nc-line-faint);
+}
+
+.aside-actions :deep(.el-button) {
+  width: 100%;
+  margin-left: 0;
+}
+
+.aside-divider {
+  height: 1px;
+  margin: 4px 0;
+  background-color: var(--nc-line);
+}
+
+.aside-subtitle {
+  margin-top: 4px;
+  color: var(--nc-ink);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+/* ── 底部按钮栏 ───────────────────────────────────────────────── */
+.form-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 8;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px 20px;
+  background-color: #fff;
+  box-shadow: 0 -2px 4px rgba(23, 19, 16, 0.1);
+}
+
+.form-actions__cell {
+  display: flex;
+  min-width: 0;
+}
+
+.form-actions__cell :deep(.el-button) {
+  width: 100%;
+  min-width: 100px;
+  margin-left: 0;
+}
+
+.form-actions :deep(.action-abandon) {
+  border-color: rgba(127, 35, 27, 0.45);
+  color: var(--nc-seal-dark);
+}
+
+.form-actions :deep(.action-abandon:hover) {
+  border-color: var(--nc-seal);
+  background-color: var(--nc-seal-wash);
+  color: var(--nc-seal-dark);
+}
+
+.form-actions :deep(.action-submit) {
+  border-color: var(--nc-pine);
+  background-color: var(--nc-pine);
+  color: #fff;
+}
+
+.form-actions :deep(.action-submit:hover) {
+  border-color: var(--nc-pine-light);
+  background-color: var(--nc-pine-light);
+  color: #fff;
+}
+
+/* ── 响应式 ───────────────────────────────────────────────────── */
+@media (max-width: 1100px) {
+  .form-body {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .step-rail {
-    position: static;
-  }
-
-  .step-list {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-  }
-
-  .step-item {
-    flex-direction: column;
-    gap: 5px;
-    border-right: 1px solid var(--nc-line-faint);
-    border-bottom: none;
-  }
-
-  .step-item.is-active {
-    box-shadow: inset 0 -3px 0 var(--nc-seal);
-  }
-
-  .step-text small {
+  .form-aside {
     display: none;
   }
+}
 
-  .rail-meta {
-    flex-direction: row;
-    flex-wrap: wrap;
-    gap: 6px 20px;
+@media (max-width: 900px) {
+  .step-track {
+    min-width: 760px;
   }
 
-  .rail-meta div {
-    gap: 6px;
+  .step-card {
+    flex: 0 0 136px;
   }
 }
 
 @media (max-width: 767px) {
-  .form-page {
-    gap: 11px;
+  .form-hero {
+    align-items: flex-start;
+    padding: 14px 12px;
   }
 
-  .step-list {
-    display: flex;
-    overflow-x: auto;
-    scrollbar-width: thin;
+  .form-hero__main {
+    gap: 12px;
   }
 
-  .step-item {
-    flex: none;
-    min-width: 116px;
-    flex-direction: row;
-    align-items: center;
-    padding: 10px 11px;
+  .hero-title {
+    font-size: 18px;
   }
 
-  .step-text small {
+  .hero-subtitle {
+    font-size: 13px;
+  }
+
+  .form-hero__meta {
+    justify-content: flex-start;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .hero-no {
     display: none;
   }
 
-  .rail-meta {
-    display: none;
+  .form-steps {
+    padding: 12px;
   }
 
-  .action-bar {
-    flex-direction: column;
-    align-items: stretch;
+  .form-main {
+    padding: 12px;
+  }
+
+  .form-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
     padding: 10px 12px;
   }
 
-  .action-bar__info {
-    justify-content: space-between;
-    gap: 6px;
+  .form-actions__cell:empty {
+    display: none;
   }
 
-  .action-bar__buttons {
-    width: 100%;
-    flex-wrap: nowrap;
-  }
-
-  .action-bar__buttons :deep(.el-button) {
-    flex: 1;
-    min-width: 0;
-    margin-left: 0;
+  .form-actions__cell--submit {
+    grid-column: 1 / -1;
   }
 }
 </style>

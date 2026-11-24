@@ -22,6 +22,8 @@ public static class ApplicationFormEndpoints
         app.MapPost("/api/applications/{id}/classify", ClassifyAsync);
         app.MapPost("/api/applications/{id}/complete", CompleteAsync);
         app.MapPost("/api/applications/{id}/visits", AddVisitAsync);
+        app.MapGet("/api/applications/{id}/imports/subsidies", GetSubsidyImportsAsync);
+        app.MapGet("/api/applications/{id}/imports/land-confirmation", GetLandConfirmationImportsAsync);
         app.MapDelete("/api/applications/{id}", DeleteAsync);
         return app;
     }
@@ -214,6 +216,74 @@ public static class ApplicationFormEndpoints
 
         var result = await forms.AddVisitAsync(
             applicationId, request, user.Id, OperatorName(user), ct);
+        return result.IsFailure
+            ? MapResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    // ───────────────────────────── Step3 导入（只读） ─────────────────────────────
+
+    /// <summary>
+    /// 补贴导入：返回申请人 + 共同生活成员名下的年度种植补贴，前端放入表单后随 PUT /form 保存。
+    /// </summary>
+    private static async Task<IResult> GetSubsidyImportsAsync(
+        string id,
+        HttpContext context,
+        ApplicationFormService forms,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.INCOME_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetUserId() is not { } userId)
+        {
+            return Unauthorized(context);
+        }
+
+        if (ParseId(id) is not { } applicationId)
+        {
+            return InvalidId(context);
+        }
+
+        var result = await forms.GetSubsidyImportsAsync(applicationId, userId, ct);
+        return result.IsFailure
+            ? MapResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// 土地确权导入：返回申请人 + 共同生活成员姓名匹配的确权地块，前端放入表单后随 PUT /form 保存。
+    /// </summary>
+    private static async Task<IResult> GetLandConfirmationImportsAsync(
+        string id,
+        HttpContext context,
+        ApplicationFormService forms,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.INCOME_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetUserId() is not { } userId)
+        {
+            return Unauthorized(context);
+        }
+
+        if (ParseId(id) is not { } applicationId)
+        {
+            return InvalidId(context);
+        }
+
+        var result = await forms.GetLandConfirmationImportsAsync(applicationId, userId, ct);
         return result.IsFailure
             ? MapResult(context, result)
             : Results.Json(result.Value);

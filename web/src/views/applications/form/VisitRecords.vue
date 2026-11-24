@@ -19,6 +19,26 @@ const VISIT_RESULT_OPTIONS = [
   { label: '无法调查', value: '无法调查' },
 ]
 
+/** 历史数据可能存英文枚举，展示时统一转中文。 */
+const VISIT_RESULT_NAMES: Record<string, string> = {
+  True: '属实',
+  False: '不属实',
+  BasicTrue: '基本属实',
+  Unknown: '无法调查',
+  Visited: '已回访',
+  PhoneVisited: '电话回访',
+  Unreachable: '未联系上',
+  NotRequired: '无需回访',
+}
+
+function visitResultText(value: string | null | undefined): string {
+  const text = (value ?? '').trim()
+  if (!text) return '—'
+  const mapped = VISIT_RESULT_NAMES[text]
+  if (mapped) return mapped
+  return /[\u4e00-\u9fa5]/.test(text) ? text : '其他'
+}
+
 interface VisitDraft {
   visitAt: string
   visitBy: string
@@ -121,12 +141,9 @@ async function submitVisit(): Promise<void> {
 </script>
 
 <template>
-  <NcCard
-    title="走访记录"
-    subtitle="按走访时间倒序展示；新增记录单独保存，不影响其他表单内容。"
-  >
+  <NcCard title="走访记录">
     <template #actions>
-      <span class="section-meta">{{ sortedRecords.length }} 条</span>
+      <span class="record-count">{{ sortedRecords.length }} 条</span>
     </template>
 
     <el-alert
@@ -137,6 +154,8 @@ async function submitVisit(): Promise<void> {
       show-icon
       title="新申请需先保存草稿，生成申请编号后才能添加走访记录。"
     />
+
+    <h3 class="visit-section__title">走访历史</h3>
 
     <el-empty
       v-if="sortedRecords.length === 0"
@@ -157,9 +176,9 @@ async function submitVisit(): Promise<void> {
           <template #default="{ row }">{{ row.visitBy || '—' }}</template>
         </el-table-column>
 
-        <el-table-column label="结果" width="96">
+        <el-table-column label="走访结果" width="108">
           <template #default="{ row }">
-            <span class="visit-result">{{ row.visitResult || '—' }}</span>
+            <span class="visit-result">{{ visitResultText(row.visitResult) }}</span>
           </template>
         </el-table-column>
 
@@ -174,7 +193,7 @@ async function submitVisit(): Promise<void> {
         <li v-for="record in sortedRecords" :key="record.id" class="visit-card">
           <div class="visit-card__head">
             <span class="mono">{{ formatDateTime(record.visitAt) }}</span>
-            <span class="visit-result">{{ record.visitResult || '—' }}</span>
+            <span class="visit-result">{{ visitResultText(record.visitResult) }}</span>
           </div>
           <div class="visit-card__row">
             <span>走访人</span>
@@ -188,7 +207,7 @@ async function submitVisit(): Promise<void> {
     </template>
 
     <div class="visit-form">
-      <h3 class="visit-form__title">新增走访记录</h3>
+      <h3 class="visit-section__title">新增走访</h3>
 
       <div class="field-grid">
         <div class="field">
@@ -257,7 +276,7 @@ async function submitVisit(): Promise<void> {
             maxlength="500"
             show-word-limit
             resize="vertical"
-            placeholder="记录走访情况、见证人及需要说明的事项（500 字以内）"
+            placeholder="记录走访情况、见证人及需要说明的事项"
             :disabled="busy || submitting"
           />
         </div>
@@ -271,32 +290,34 @@ async function submitVisit(): Promise<void> {
           :disabled="!canSubmit"
           @click="submitVisit"
         >
-          添加走访记录
+          保存走访
         </el-button>
-        <el-button
-          :icon="RefreshRight"
-          :disabled="busy || submitting"
-          @click="resetDraft"
-        >
+        <el-button :icon="RefreshRight" :disabled="busy || submitting" @click="resetDraft">
           重置
         </el-button>
-        <span class="action-note">走访记录提交后立即生效；其他字段修改请使用底部「保存草稿」。</span>
       </div>
     </div>
   </NcCard>
 </template>
 
 <style scoped>
-.section-meta {
+.record-count {
   color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
   font-size: var(--nc-text-xs);
-  letter-spacing: 0.1em;
   white-space: nowrap;
 }
 
 .visit-tip {
   margin-bottom: 12px;
+}
+
+.visit-section__title {
+  margin-bottom: 11px;
+  color: var(--nc-ink-2);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-base);
+  font-weight: 700;
+  letter-spacing: 0.03em;
 }
 
 .visit-empty {
@@ -311,10 +332,8 @@ async function submitVisit(): Promise<void> {
 .visit-table :deep(.el-table__header th) {
   background-color: var(--nc-paper-3);
   color: var(--nc-muted-2);
-  font-family: var(--nc-font-mono);
-  font-size: 10px;
+  font-size: var(--nc-text-xs);
   font-weight: 600;
-  letter-spacing: 0.08em;
 }
 
 .visit-table :deep(.el-table__cell) {
@@ -382,9 +401,7 @@ async function submitVisit(): Promise<void> {
 
 .visit-card__row span {
   color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
+  font-size: var(--nc-text-xs);
 }
 
 .visit-card__row strong {
@@ -410,18 +427,9 @@ async function submitVisit(): Promise<void> {
   border-top: 1px dashed var(--nc-line);
 }
 
-.visit-form__title {
-  margin-bottom: 11px;
-  color: var(--nc-ink-2);
-  font-family: var(--nc-font-serif);
-  font-size: var(--nc-text-base);
-  font-weight: 700;
-  letter-spacing: 0.03em;
-}
-
 .field-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 13px 16px;
 }
 
@@ -501,19 +509,6 @@ async function submitVisit(): Promise<void> {
   margin-top: 14px;
 }
 
-.action-note {
-  margin-left: auto;
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-  line-height: 1.6;
-}
-
-@media (max-width: 1099px) {
-  .field-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
 @media (max-width: 767px) {
   .field-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -530,12 +525,6 @@ async function submitVisit(): Promise<void> {
 
   .visit-actions .el-button {
     flex: 1 1 auto;
-  }
-
-  .action-note {
-    flex-basis: 100%;
-    margin-left: 0;
-    text-align: center;
   }
 }
 </style>

@@ -1,6 +1,12 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import { InfoFilled } from '@element-plus/icons-vue'
+import {
+  getApplicationLandConfirmationImports,
+  getApplicationSubsidyImports,
+} from '@/api/applicationImports'
+import { getErrorMessage } from '@/api/http'
 import NcCard from '@/components/NcCard.vue'
 import NcStat from '@/components/NcStat.vue'
 import { formatMoney } from '../format'
@@ -8,6 +14,8 @@ import EconomicLedgerTable from './EconomicLedgerTable.vue'
 import {
   LEDGER_GROUPS,
   createLedgerRow,
+  mergeLandConfirmationImports,
+  mergeSubsidyImports,
   type EditableLedgerKey,
   type LedgerConfig,
   type LedgerGroup,
@@ -19,6 +27,11 @@ const props = defineProps<{ form: ApplicationFormModel; busy?: boolean }>()
 const economy = computed(() => props.form.economy)
 const members = computed(() => props.form.members)
 const groups = LEDGER_GROUPS
+
+const importingSubsidies = ref(false)
+const importingLand = ref(false)
+const subsidyOpenSignal = ref(0)
+const landOpenSignal = ref(0)
 
 /** 兼容后端未回填或返回 null 的明细数组；首次访问时补成空数组。 */
 function ledgerRows(key: EditableLedgerKey): Record<string, unknown>[] {
@@ -45,10 +58,6 @@ function groupCount(group: LedgerGroup): number {
   return group.ledgers.reduce((sum, ledger) => sum + ledgerRows(ledger.key).length, 0)
 }
 
-const detailCount = computed(() =>
-  groups.reduce((sum, group) => sum + groupCount(group), 0),
-)
-
 const landConfirmationCount = computed(() => {
   const rows = props.form.economicDetails.landConfirmationGroups
   return Array.isArray(rows) ? rows.length : 0
@@ -56,28 +65,102 @@ const landConfirmationCount = computed(() => {
 
 function groupTone(group: LedgerGroup): 'income' | 'expense' | 'asset' {
   if (group.key === 'expense') return 'expense'
-  if (group.key === 'assets') return 'asset'
+  if (group.key === 'property') return 'asset'
   return 'income'
+}
+
+function importLabelFor(key: EditableLedgerKey): string {
+  if (key === 'subsidies') return '导入农业补贴'
+  if (key === 'landRegistrations') return '导入土地确权台账'
+  return ''
+}
+
+function importingFor(key: EditableLedgerKey): boolean {
+  if (key === 'subsidies') return importingSubsidies.value
+  if (key === 'landRegistrations') return importingLand.value
+  return false
+}
+
+function openSignalFor(key: EditableLedgerKey): number {
+  if (key === 'subsidies') return subsidyOpenSignal.value
+  if (key === 'landRegistrations') return landOpenSignal.value
+  return 0
+}
+
+function handleImport(key: EditableLedgerKey): void {
+  if (key === 'subsidies') {
+    void importSubsidies()
+  } else if (key === 'landRegistrations') {
+    void importLandConfirmation()
+  }
+}
+
+/** 旧版导入依赖申请已落库（按申请人/成员查库），未保存时先提示保存草稿。 */
+function ensureSaved(): boolean {
+  if (props.form.id > 0) return true
+  ElMessage.warning('请先保存草稿，再导入台账数据')
+  return false
+}
+
+async function importSubsidies(): Promise<void> {
+  if (!ensureSaved()) return
+
+  importingSubsidies.value = true
+  try {
+    const records = await getApplicationSubsidyImports(props.form.id)
+    if (records.length === 0) {
+      ElMessage.info('未找到农业补贴数据')
+      return
+    }
+
+    const result = mergeSubsidyImports(ledgerRows('subsidies'), records)
+    subsidyOpenSignal.value += 1
+
+    if (result.added > 0) {
+      const skipped = result.skipped > 0 ? `，跳过重复 ${result.skipped} 条` : ''
+      ElMessage.success(`已导入 ${result.added} 条农业补贴${skipped}`)
+    } else {
+      ElMessage.info(`未新增补贴记录，${result.skipped} 条均已在台账中`)
+    }
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '导入农业补贴失败'))
+  } finally {
+    importingSubsidies.value = false
+  }
+}
+
+async function importLandConfirmation(): Promise<void> {
+  if (!ensureSaved()) return
+
+  importingLand.value = true
+  try {
+    const records = await getApplicationLandConfirmationImports(props.form.id)
+    if (records.length === 0) {
+      ElMessage.info('未找到土地确权台账数据')
+      return
+    }
+
+    const result = mergeLandConfirmationImports(ledgerRows('landRegistrations'), records)
+    landOpenSignal.value += 1
+
+    if (result.added > 0) {
+      const skipped = result.skipped > 0 ? `，跳过重复 ${result.skipped} 条` : ''
+      ElMessage.success(
+        `已导入 ${result.added} 条土地确权记录（${result.memberCount} 户）${skipped}`,
+      )
+    } else {
+      ElMessage.info(`未新增土地确权记录，${result.skipped} 条均已在台账中`)
+    }
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '导入土地确权台账失败'))
+  } finally {
+    importingLand.value = false
+  }
 }
 </script>
 
 <template>
   <div class="step-economy">
-    <div class="ledger-intro">
-      <div class="ledger-intro__main">
-        <strong>按明细台账录入经济状况</strong>
-        <p>
-          各收入、支出与财产分项逐条登记；成员类台账可直接从第 2 步家庭成员中选择。
-          合计与人均不在此填写，保存后由服务端按 Core 口径重算。
-        </p>
-      </div>
-      <div class="ledger-intro__meta">
-        <span>已录明细</span>
-        <strong>{{ detailCount }}</strong>
-        <span>条</span>
-      </div>
-    </div>
-
     <NcCard
       v-for="group in groups"
       :key="group.key"
@@ -101,12 +184,17 @@ function groupTone(group: LedgerGroup): 'income' | 'expense' | 'asset' {
           :default-open="ledger.defaultOpen"
           :add-label="ledger.addLabel ?? '新增一行'"
           :tone="groupTone(group)"
+          :import-label="importLabelFor(ledger.key)"
+          :importing="importingFor(ledger.key)"
+          :open-signal="openSignalFor(ledger.key)"
           @add="addLedgerRow(ledger)"
           @remove="removeLedgerRow(ledger, $event)"
+          @import="handleImport(ledger.key)"
         />
 
-        <p v-if="group.key === 'assets' && landConfirmationCount > 0" class="aside-note">
-          已载入 {{ landConfirmationCount }} 组土地确权数据，暂不在本页编辑，保存时按原数据回写。
+        <p v-if="group.key === 'land' && landConfirmationCount > 0" class="aside-note">
+          已载入 {{ landConfirmationCount }} 组旧版土地确权归户表数据，本页暂不编辑分组，保存时按原数据回写；
+          上方导入的确权台账已按成员追加到土地登记明细。
         </p>
       </div>
     </NcCard>

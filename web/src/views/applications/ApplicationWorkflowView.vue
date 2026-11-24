@@ -303,7 +303,7 @@ onMounted(() => {
     <NcPageHeader
       title="业务申请工作流"
       description="查看各阶段业务状态，办理与档案制作"
-      kicker="SOCIAL ASSISTANCE / 业务申请"
+      kicker="救助业务 / 业务申请"
     >
       <template #actions>
         <el-button :icon="ArrowLeft" @click="router.push('/social-assistance')">返回工作台</el-button>

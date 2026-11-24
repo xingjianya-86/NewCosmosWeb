@@ -127,18 +127,15 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
 </script>
 
 <template>
-  <NcCard
-    title="照料人"
-    subtitle="特困供养申请填写照料护理人信息；新增后随表单一起保存，无需单独提交。"
-  >
+  <NcCard title="照料人">
     <template #actions>
-      <span class="section-meta">{{ caregivers.length }} 人</span>
+      <span class="caregiver-count">{{ caregivers.length }} 人</span>
       <el-button type="primary" :icon="Plus" :disabled="busy" @click="addCaregiver">
         新增照料人
       </el-button>
     </template>
 
-    <el-empty v-if="caregivers.length === 0" description="暂无照料人，如为特困供养申请请新增">
+    <el-empty v-if="caregivers.length === 0" description="暂无照料人">
       <el-button type="primary" :icon="Plus" :disabled="busy" @click="addCaregiver">
         新增照料人
       </el-button>
@@ -164,43 +161,10 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
           </el-button>
         </header>
 
+        <h3 class="caregiver-section">个人信息</h3>
         <div class="caregiver-grid">
           <label class="field">
-            <span class="field__label">姓名 <i>*</i></span>
-            <el-input
-              v-model="caregiver.name"
-              maxlength="30"
-              placeholder="照料人姓名"
-              clearable
-              :disabled="busy"
-            />
-          </label>
-
-          <label class="field">
-            <span class="field__label">身份证号</span>
-            <el-input
-              v-model="caregiver.idCard"
-              maxlength="18"
-              placeholder="18 位身份证号"
-              clearable
-              :disabled="busy"
-              @blur="handleIdCardBlur(caregiver)"
-            />
-          </label>
-
-          <label class="field">
-            <span class="field__label">联系电话</span>
-            <el-input
-              v-model="caregiver.phone"
-              maxlength="20"
-              placeholder="手机或固定电话"
-              clearable
-              :disabled="busy"
-            />
-          </label>
-
-          <label class="field">
-            <span class="field__label">与被照料人关系</span>
+            <span class="field__label">家庭关系</span>
             <el-select
               v-model="caregiver.relationship"
               filterable
@@ -216,6 +180,29 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
                 :value="item.value"
               />
             </el-select>
+          </label>
+
+          <label class="field">
+            <span class="field__label">姓名 <i>*</i></span>
+            <el-input
+              v-model="caregiver.name"
+              maxlength="30"
+              placeholder="姓名"
+              clearable
+              :disabled="busy"
+            />
+          </label>
+
+          <label class="field">
+            <span class="field__label">身份证号</span>
+            <el-input
+              v-model="caregiver.idCard"
+              maxlength="18"
+              placeholder="18 位身份证号"
+              clearable
+              :disabled="busy"
+              @blur="handleIdCardBlur(caregiver)"
+            />
           </label>
 
           <label class="field">
@@ -240,6 +227,17 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
               placeholder="岁"
               :disabled="busy"
               @update:model-value="caregiver.age = $event ?? null"
+            />
+          </label>
+
+          <label class="field">
+            <span class="field__label">联系方式</span>
+            <el-input
+              v-model="caregiver.phone"
+              maxlength="20"
+              placeholder="手机或固定电话"
+              clearable
+              :disabled="busy"
             />
           </label>
 
@@ -323,7 +321,10 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
               />
             </el-select>
           </label>
+        </div>
 
+        <h3 class="caregiver-section">健康状况</h3>
+        <div class="caregiver-grid">
           <label class="field">
             <span class="field__label">健康状况</span>
             <el-select
@@ -344,7 +345,7 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
           </label>
 
           <label class="field">
-            <span class="field__label">就业状态</span>
+            <span class="field__label">就业状况</span>
             <el-select
               v-model="caregiver.employmentStatus"
               filterable
@@ -363,7 +364,7 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
           </label>
 
           <label class="field">
-            <span class="field__label">主要收入来源</span>
+            <span class="field__label">收入来源</span>
             <el-input
               v-model="caregiver.mainIncomeSource"
               maxlength="60"
@@ -395,17 +396,6 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
             />
           </label>
 
-          <label class="field field--full">
-            <span class="field__label">家庭住址</span>
-            <el-input
-              v-model="caregiver.address"
-              maxlength="200"
-              placeholder="照料人现居住地址"
-              clearable
-              :disabled="busy"
-            />
-          </label>
-
           <label class="field">
             <span class="field__label">开户行</span>
             <el-input
@@ -418,11 +408,22 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
           </label>
 
           <label class="field">
-            <span class="field__label">银行账号</span>
+            <span class="field__label">银行卡号</span>
             <el-input
               v-model="caregiver.bankAccount"
               maxlength="40"
               placeholder="补贴发放账号"
+              clearable
+              :disabled="busy"
+            />
+          </label>
+
+          <label class="field field--full">
+            <span class="field__label">家庭住址</span>
+            <el-input
+              v-model="caregiver.address"
+              maxlength="200"
+              placeholder="照料人家庭住址"
               clearable
               :disabled="busy"
             />
@@ -434,11 +435,9 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
 </template>
 
 <style scoped>
-.section-meta {
+.caregiver-count {
   color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
   font-size: var(--nc-text-xs);
-  letter-spacing: 0.1em;
   white-space: nowrap;
 }
 
@@ -474,9 +473,7 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
 
 .caregiver-index {
   color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
   font-size: var(--nc-text-xs);
-  letter-spacing: 0.1em;
 }
 
 .caregiver-name {
@@ -502,11 +499,21 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
   white-space: nowrap;
 }
 
+.caregiver-section {
+  margin: 14px 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--nc-line-faint);
+  color: var(--nc-ink-2);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-sm);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
 .caregiver-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 13px 15px;
-  padding-top: 12px;
 }
 
 .field {
@@ -535,12 +542,6 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
 .field :deep(.el-select),
 .field :deep(.el-input-number) {
   width: 100%;
-}
-
-@media (max-width: 1279px) {
-  .caregiver-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 767px) {

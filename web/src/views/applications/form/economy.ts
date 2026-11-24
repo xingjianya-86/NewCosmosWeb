@@ -1,3 +1,7 @@
+import type {
+  LandConfirmationImportRecord,
+  SubsidyImportRecord,
+} from '@/api/applicationImports'
 import type { ApplicationFormEconomicDetails } from './types'
 
 /** 可在第 3 步逐项编辑的经济明细台账；土地确权组暂不在此编辑。 */
@@ -23,6 +27,8 @@ export interface LedgerColumn {
   max?: number
   /** 清空时写 null 而不是 0；仅用于 Core 中可空的数值字段。 */
   nullable?: boolean
+  /** 旧数据里英文枚举 key → 中文显示（只影响显示，不回写存储值）。 */
+  labels?: Record<string, string>
   /** 成员选择列写入的成员字段（不配置则不写）。 */
   memberIdKey?: string
   memberIdCardKey?: string
@@ -215,7 +221,8 @@ export const OTHER_INCOME_LEDGER: LedgerConfig = {
 export const SUBSIDY_LEDGER: LedgerConfig = {
   key: 'subsidies',
   title: '农业补贴',
-  hint: '按补贴类型逐条登记面积、单价与折算比例；实际金额由 Core 口径计算。',
+  hint: '按补贴类型逐条登记面积、单价与折算比例；实际金额由 Core 口径计算，可从补贴库按成员一键导入。',
+  defaultOpen: true,
   columns: [
     text('subsidyType', '补贴类型', { placeholder: '地力 / 大豆 / 玉米等', width: 160 }),
     number('area', '面积', { unit: '亩', precision: 2, step: 0.1, width: 110 }),
@@ -396,15 +403,39 @@ export const FINANCIAL_ASSET_LEDGER: LedgerConfig = {
   }),
 }
 
+/** 旧数据可能残留的英文土地用途 key → 中文（Core 实际存中文常量）。 */
+export const LAND_USAGE_LABELS: Record<string, string> = {
+  SELF_FARM: '自行种植',
+  SELF_FARMING: '自行种植',
+  SELF_FARMED: '自行种植',
+  SELFUSE: '自行种植',
+  SUBLEASE: '转包他人',
+  SUBLEASED: '转包他人',
+  TRANSFER: '转包他人',
+  CONTRACT: '承包土地',
+  CONTRACTED: '承包土地',
+}
+
+export function landUsageText(value: unknown): string {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (!raw) return ''
+  return LAND_USAGE_LABELS[raw.toUpperCase()] ?? raw
+}
+
 export const LAND_REGISTRATION_LEDGER: LedgerConfig = {
   key: 'landRegistrations',
-  title: '土地登记',
-  hint: '逐块登记承包地、自种地、转包地等土地信息。',
+  title: '土地登记 / 土地确权',
+  hint: '逐块登记承包地、自种地、转包地等土地信息；土地确权台账可按成员一键导入。',
+  defaultOpen: true,
   columns: [
     text('ownerName', '所有人', { width: 120 }),
     text('ownerIdCard', '身份证号', { width: 190 }),
     text('landType', '土地类型', { placeholder: '耕地 / 林地等', width: 130 }),
-    text('landUsage', '土地用途', { placeholder: '自行种植 / 转包他人 / 承包土地', width: 190 }),
+    text('landUsage', '土地用途', {
+      placeholder: '自行种植 / 转包他人 / 承包土地',
+      width: 190,
+      labels: LAND_USAGE_LABELS,
+    }),
     text('measurementType', '计量方式', { placeholder: '实测 / 台账', width: 130 }),
     number('area', '面积', { unit: '亩', precision: 2, step: 0.1, width: 110 }),
     money('price', '单价', { unit: '元/亩', width: 120 }),
@@ -428,37 +459,215 @@ export const LEDGER_GROUPS: LedgerGroup[] = [
   {
     key: 'income',
     title: '收入明细',
-    subtitle: '工资、经营、财产、转移、其他、补贴与养殖收入逐条登记，汇总由服务端按 Core 口径生成。',
+    subtitle: '工资、经营、财产、转移与其他收入逐条登记，汇总由服务端按 Core 口径生成。',
     ledgers: [
       LABOR_INCOME_LEDGER,
       BUSINESS_INCOME_LEDGER,
       PROPERTY_INCOME_LEDGER,
       TRANSFER_INCOME_LEDGER,
       OTHER_INCOME_LEDGER,
-      SUBSIDY_LEDGER,
-      BREEDING_INCOME_LEDGER,
     ],
   },
   {
+    key: 'land',
+    title: '土地信息',
+    subtitle: '土地确权台账与土地登记逐块核对；确权数据可按成员一键导入后继续逐项编辑。',
+    ledgers: [LAND_REGISTRATION_LEDGER],
+  },
+  {
+    key: 'subsidy',
+    title: '农业补贴',
+    subtitle: '按成员逐条登记补贴类型、面积与折算比例，可从补贴库一键导入。',
+    ledgers: [SUBSIDY_LEDGER],
+  },
+  {
     key: 'expense',
-    title: '刚性支出明细',
+    title: '刚性支出',
     subtitle: '医疗、教育、残疾康复、居住等刚性支出按人员逐条登记，月支出口径。',
     ledgers: [RIGID_EXPENDITURE_LEDGER],
   },
   {
-    key: 'assets',
-    title: '家庭财产与土地',
-    subtitle: '房产、车辆、农机、金融资产与土地登记逐项登记；土地确权数据暂不在此编辑。',
+    key: 'property',
+    title: '财产信息',
+    subtitle: '房产、车辆、农机具与金融资产逐项登记。',
     ledgers: [
       FAMILY_PROPERTY_LEDGER,
       VEHICLE_LEDGER,
       MACHINERY_LEDGER,
       FINANCIAL_ASSET_LEDGER,
-      LAND_REGISTRATION_LEDGER,
     ],
+  },
+  {
+    key: 'other',
+    title: '其他',
+    subtitle: '养殖业收入等其他补充台账，按项目逐条登记。',
+    ledgers: [BREEDING_INCOME_LEDGER],
   },
 ]
 
 export function createLedgerRow(ledger: LedgerConfig): Record<string, unknown> {
   return ledger.create()
+}
+
+/* ------------------------------------------------------------------ *
+ * 旧版导入：农业补贴 / 土地确权台账
+ * ------------------------------------------------------------------ */
+
+export interface ImportMergeResult {
+  /** 实际新增条数。 */
+  added: number
+  /** 因重复而跳过的条数。 */
+  skipped: number
+  /** 接口返回总条数。 */
+  total: number
+}
+
+export interface LandImportMergeResult extends ImportMergeResult {
+  /** 涉及成员（户）数。 */
+  memberCount: number
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
+function textOf(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function numberOf(value: unknown): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+/** 只保留真正的身份证号；旧版土地台账接口曾把承包方姓名回填到 memberIdCard。 */
+function idCardOf(value: unknown): string {
+  const raw = textOf(value)
+  return /^\d{15}(\d{2}[\dXx])?$/.test(raw) ? raw : ''
+}
+
+/** 补贴去重键：补贴类型 + 成员身份证号 + 面积。 */
+export function subsidyImportKey(row: Record<string, unknown>): string {
+  return [
+    textOf(row.subsidyType),
+    textOf(row.memberIdCard),
+    round2(numberOf(row.area)),
+  ].join('|')
+}
+
+/** 把接口返回的补贴记录转为台账行；金额原样保留，面积型行反推单价。 */
+export function createSubsidyRowFromImport(
+  record: SubsidyImportRecord,
+): Record<string, unknown> {
+  const area = round2(numberOf(record.area))
+  const amount = round2(numberOf(record.amount))
+  // 面积型：面积 × 单价 ≈ 导入金额；金额型（面积为 0）保留 OriginalAmount 供 Core 金额型分支计算。
+  const unitPrice = area > 0 && amount > 0 ? round2(amount / area) : 0
+  return {
+    subsidyType: textOf(record.subsidyType),
+    area,
+    unitPrice,
+    count: 1,
+    ratioFactor: 1,
+    originalAmount: amount,
+    amount,
+    memberName: textOf(record.name),
+    memberIdCard: textOf(record.idCard),
+  }
+}
+
+/** 追加补贴（不覆盖已录行），按 subsidyType + memberIdCard + area 去重。 */
+export function mergeSubsidyImports(
+  rows: Record<string, unknown>[],
+  records: SubsidyImportRecord[],
+): ImportMergeResult {
+  const seen = new Set(rows.map(subsidyImportKey))
+  let added = 0
+  let skipped = 0
+
+  for (const record of records) {
+    const key = subsidyImportKey({
+      subsidyType: record.subsidyType,
+      memberIdCard: record.idCard,
+      area: record.area,
+    })
+    if (seen.has(key)) {
+      skipped += 1
+      continue
+    }
+    seen.add(key)
+    rows.push(createSubsidyRowFromImport(record))
+    added += 1
+  }
+
+  return { added, skipped, total: records.length }
+}
+
+/** 土地确权去重键：优先地块编码，否则 所有人 + 地块位置 + 面积。 */
+export function landImportKey(row: Record<string, unknown>): string {
+  const plotCode = textOf(row.plotCode)
+  if (plotCode) return `code:${plotCode}`
+  return [
+    textOf(row.ownerName),
+    textOf(row.location),
+    round2(numberOf(row.area)),
+  ].join('|')
+}
+
+/** 把确权记录转为土地登记行；面积优先实测，其次确权面积，最后合同面积。 */
+export function createLandRegistrationRowFromImport(
+  record: LandConfirmationImportRecord,
+): Record<string, unknown> {
+  const measured = numberOf(record.measuredArea)
+  const confirmed = numberOf(record.landArea)
+  const contracted = numberOf(record.contractArea)
+  const area = round2(measured > 0 ? measured : confirmed > 0 ? confirmed : contracted)
+  const price = round2(numberOf(record.unitPrice))
+  return {
+    ownerName: textOf(record.memberName),
+    ownerIdCard: idCardOf(record.memberIdCard),
+    landType: '确权土地',
+    landUsage: landUsageText(record.landUsage) || '自行种植',
+    measurementType: measured > 0 ? '实测' : '台账',
+    area,
+    price,
+    subtotal: round2(area * price),
+    location: textOf(record.landPlotInfo) || textOf(record.plotCode),
+    // 仅前端去重用；后端土地登记实体无此列，保存时忽略。
+    plotCode: textOf(record.plotCode),
+  }
+}
+
+/** 按成员分组追加土地确权记录，组内按返回顺序，组间按成员首次出现顺序。 */
+export function mergeLandConfirmationImports(
+  rows: Record<string, unknown>[],
+  records: LandConfirmationImportRecord[],
+): LandImportMergeResult {
+  const grouped = new Map<string, LandConfirmationImportRecord[]>()
+  for (const record of records) {
+    const member = textOf(record.memberName) || '未命名成员'
+    const list = grouped.get(member)
+    if (list) list.push(record)
+    else grouped.set(member, [record])
+  }
+
+  const seen = new Set(rows.map(landImportKey))
+  let added = 0
+  let skipped = 0
+
+  for (const group of grouped.values()) {
+    for (const record of group) {
+      const row = createLandRegistrationRowFromImport(record)
+      const key = landImportKey(row)
+      if (seen.has(key)) {
+        skipped += 1
+        continue
+      }
+      seen.add(key)
+      rows.push(row)
+      added += 1
+    }
+  }
+
+  return { added, skipped, total: records.length, memberCount: grouped.size }
 }

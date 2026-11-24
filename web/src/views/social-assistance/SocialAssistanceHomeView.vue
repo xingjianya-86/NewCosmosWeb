@@ -145,7 +145,7 @@ onMounted(() => {
     <NcPageHeader
       title="低收入人口救助帮扶"
       description="低收入人口认定审核确认 · 保障对象动态管理 · 临时救助"
-      kicker="SOCIAL ASSISTANCE / 救助业务"
+      kicker="救助业务"
     >
       <template #actions>
         <el-button :icon="ArrowLeft" @click="router.push('/')">返回工作台</el-button>

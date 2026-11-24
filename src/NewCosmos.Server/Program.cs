@@ -117,6 +117,8 @@ builder.Services.AddSingleton<IClassificationService, ClassificationService>();
 builder.Services.AddSingleton<IFamilyMemberService, FamilyMemberService>();
 builder.Services.AddSingleton<ISupporterService, SupporterService>();
 builder.Services.AddSingleton<ICaregiverService, CaregiverService>();
+builder.Services.AddSingleton<ISubsidyDataService, SubsidyDataService>();
+builder.Services.AddSingleton<ILandContractService, LandContractService>();
 builder.Services.AddSingleton<IHouseholdSurveyService, HouseholdSurveyService>();
 builder.Services.AddSingleton<IVisitRecordService, VisitRecordService>();
 builder.Services.AddSingleton<IEconomicDetailService, EconomicDetailService>();

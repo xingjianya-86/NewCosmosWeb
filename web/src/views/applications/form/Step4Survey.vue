@@ -26,17 +26,10 @@ function setSurveyDate(value: string | number | Date | null): void {
 
 <template>
   <div class="step-survey">
-    <NcCard title="调查信息" subtitle="带 * 为必填项；字段校验与保存由办理流程统一处理。">
-      <template #actions>
-        <span class="section-meta">入户调查</span>
-      </template>
-
+    <NcCard title="调查信息">
       <div class="field-grid">
         <div class="field">
-          <label class="field-label" for="survey-date">
-            <span class="required-mark" aria-hidden="true">*</span>
-            调查日期
-          </label>
+          <label class="field-label" for="survey-date">调查日期</label>
           <el-date-picker
             id="survey-date"
             class="nc-control"
@@ -52,34 +45,43 @@ function setSurveyDate(value: string | number | Date | null): void {
         </div>
 
         <div class="field">
-          <label class="field-label" for="surveyor-name">
-            <span class="required-mark" aria-hidden="true">*</span>
-            调查员姓名
-          </label>
+          <label class="field-label" for="surveyor-name">调查员</label>
           <el-input
             id="surveyor-name"
             v-model="survey.surveyorName"
             class="nc-control"
             maxlength="40"
-            placeholder="填写入户调查员姓名"
+            placeholder="姓名"
             :disabled="busy"
           />
         </div>
 
         <div class="field">
-          <label class="field-label" for="survey-respondent-name">被调查人姓名</label>
+          <label class="field-label" for="surveyor-organization">所属机构</label>
+          <el-input
+            id="surveyor-organization"
+            v-model="survey.surveyorOrganization"
+            class="nc-control"
+            maxlength="120"
+            placeholder="民政机构名称"
+            :disabled="busy"
+          />
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="survey-respondent-name">被调查人</label>
           <el-input
             id="survey-respondent-name"
             v-model="survey.respondentName"
             class="nc-control"
             maxlength="40"
-            placeholder="填写接受调查的被调查人姓名"
+            placeholder="被调查人姓名"
             :disabled="busy"
           />
         </div>
 
         <div class="field">
-          <label class="field-label" for="survey-respondent-relation">与申请人关系</label>
+          <label class="field-label" for="survey-respondent-relation">关系</label>
           <el-select
             id="survey-respondent-relation"
             v-model="survey.respondentRelation"
@@ -90,7 +92,7 @@ function setSurveyDate(value: string | number | Date | null): void {
             clearable
             placeholder="选择或填写关系"
             :disabled="busy"
-            aria-label="与申请人关系"
+            aria-label="关系"
           >
             <el-option
               v-for="item in relationOptions"
@@ -102,10 +104,7 @@ function setSurveyDate(value: string | number | Date | null): void {
         </div>
 
         <div class="field">
-          <label class="field-label" for="survey-conclusion">
-            <span class="required-mark" aria-hidden="true">*</span>
-            调查结论
-          </label>
+          <label class="field-label" for="survey-conclusion">调查结论</label>
           <el-select
             id="survey-conclusion"
             v-model="survey.surveyConclusion"
@@ -122,42 +121,20 @@ function setSurveyDate(value: string | number | Date | null): void {
             />
           </el-select>
         </div>
-
-        <div class="field field--full">
-          <label class="field-label" for="surveyor-organization">
-            <span class="required-mark" aria-hidden="true">*</span>
-            调查机构
-          </label>
-          <el-input
-            id="surveyor-organization"
-            v-model="survey.surveyorOrganization"
-            class="nc-control"
-            maxlength="120"
-            placeholder="填写乡镇（街道）或调查机构名称"
-            :disabled="busy"
-          />
-        </div>
       </div>
     </NcCard>
 
-    <NcCard title="申请原因" subtitle="选择本次认定的申请类别，并说明主要致困原因。">
-      <template #actions>
-        <span class="section-meta">认定类别</span>
-      </template>
-
+    <NcCard title="申请原因">
       <div class="field-grid">
         <div class="field">
-          <label class="field-label" for="survey-reason">
-            <span class="required-mark" aria-hidden="true">*</span>
-            申请原因
-          </label>
+          <label class="field-label" for="survey-reason">申请理由</label>
           <el-select
             id="survey-reason"
             v-model="survey.applicationReason"
             class="nc-control"
-            placeholder="选择申请原因"
+            placeholder="选择申请理由"
             :disabled="busy"
-            aria-label="申请原因"
+            aria-label="申请理由"
           >
             <el-option
               v-for="reason in reasonOptions"
@@ -169,44 +146,40 @@ function setSurveyDate(value: string | number | Date | null): void {
         </div>
 
         <div class="field field--full">
-          <label class="field-label" for="survey-reason-detail">原因说明</label>
+          <label class="field-label" for="survey-reason-detail">原因详情</label>
           <el-input
             id="survey-reason-detail"
             v-model="survey.applicationReasonDetail"
             class="nc-control"
             type="textarea"
-            :rows="4"
+            :rows="5"
             maxlength="500"
             show-word-limit
             resize="vertical"
-            placeholder="说明家庭困难情况、主要致困原因等（500 字以内）"
+            placeholder="选择申请理由后自动填充模板，可编辑修改..."
             :disabled="busy"
           />
         </div>
       </div>
     </NcCard>
 
-    <VisitRecords :form="form" :busy="busy" />
-
-    <NcCard title="调查记录" subtitle="记录入户走访情况与需要说明的事项。">
-      <template #actions>
-        <span class="section-meta">现场记录 / 备注</span>
-      </template>
-
+    <NcCard title="调查记录">
       <div class="field">
-        <label class="field-label" for="survey-notes">调查记录 / 备注</label>
+        <label class="field-label" for="survey-notes">备注</label>
         <el-input
           id="survey-notes"
           v-model="survey.surveyNotes"
           class="nc-control"
           type="textarea"
-          :rows="5"
+          :rows="4"
           resize="vertical"
-          placeholder="记录入户走访情况、家庭实际生活状况及需要说明的事项"
+          placeholder="补充说明（选填）"
           :disabled="busy"
         />
       </div>
     </NcCard>
+
+    <VisitRecords :form="form" :busy="busy" />
   </div>
 </template>
 
@@ -216,20 +189,6 @@ function setSurveyDate(value: string | number | Date | null): void {
   flex-direction: column;
   gap: 14px;
   min-width: 0;
-}
-
-.section-meta {
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-xs);
-  letter-spacing: 0.1em;
-  white-space: nowrap;
-}
-
-.required-mark {
-  margin-right: 3px;
-  color: var(--nc-seal);
-  font-weight: 700;
 }
 
 .field-grid {
@@ -308,11 +267,6 @@ function setSurveyDate(value: string | number | Date | null): void {
 
   .field--full {
     grid-column: auto;
-  }
-
-  .section-meta {
-    font-size: 10px;
-    letter-spacing: 0.06em;
   }
 }
 </style>

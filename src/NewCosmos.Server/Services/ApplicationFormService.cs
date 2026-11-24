@@ -38,6 +38,8 @@ public sealed class ApplicationFormService(
     IHouseholdSurveyService householdSurveys,
     IVisitRecordService visitRecords,
     IEconomicDetailService economicDetails,
+    ISubsidyDataService subsidyData,
+    ILandContractService landContracts,
     DataScopeFilterBuilder dataScope,
     IDatabaseService database,
     ILoggerService logger)
@@ -508,6 +510,88 @@ public sealed class ApplicationFormService(
         return Result.Success(new ApplicationVisitCreatedResult(addResult.Value));
     }
 
+    // ───────────────────────────── Step3 导入 ─────────────────────────────
+
+    /// <summary>
+    /// Step3 补贴导入：按主表申请人 + 共同生活成员（排除赡养行）的身份证查询年度种植补贴。
+    /// 只读，不写库；前端把结果放入 economicDetails.subsidies 后随 PUT /form 保存。
+    /// </summary>
+    public async Task<Result<List<SubsidyImportRecord>>> GetSubsidyImportsAsync(
+        long applicationId,
+        int userId,
+        CancellationToken ct = default)
+    {
+        var appResult = await LoadInScopeAsync(applicationId, userId, ct);
+        if (appResult.IsFailure)
+        {
+            return Result.Failure<List<SubsidyImportRecord>>(appResult.ErrorCode, appResult.Message);
+        }
+
+        var idCards = new List<string>();
+        var seenIdCards = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddDistinct(idCards, seenIdCards, appResult.Value.ApplicantIdCard);
+
+        var membersResult = await familyMembers.GetByApplicationIdAsync(applicationId, ct);
+        if (membersResult.IsFailure)
+        {
+            return Result.Failure<List<SubsidyImportRecord>>(
+                membersResult.ErrorCode!, membersResult.Message!);
+        }
+
+        foreach (var member in membersResult.Value ?? [])
+        {
+            // 赡养人只在 Step3 赡养块维护，不属于共同生活成员，不参与补贴导入。
+            if (IsSupportMember(member))
+            {
+                continue;
+            }
+
+            AddDistinct(idCards, seenIdCards, member.IdCard);
+        }
+
+        return await subsidyData.GetSubsidiesByIdCardsAsync(idCards, ct);
+    }
+
+    /// <summary>
+    /// Step3 土地确权导入：按主表申请人 + 共同生活成员（排除赡养行）姓名查询确权地块。
+    /// 确权底表只有承包人姓名、没有身份证列，故这里只能按姓名匹配。
+    /// 只读，不写库；前端把结果放入 economicDetails 后随 PUT /form 保存。
+    /// </summary>
+    public async Task<Result<List<LandConfirmationRecord>>> GetLandConfirmationImportsAsync(
+        long applicationId,
+        int userId,
+        CancellationToken ct = default)
+    {
+        var appResult = await LoadInScopeAsync(applicationId, userId, ct);
+        if (appResult.IsFailure)
+        {
+            return Result.Failure<List<LandConfirmationRecord>>(appResult.ErrorCode, appResult.Message);
+        }
+
+        var names = new List<string>();
+        var seenNames = new HashSet<string>(StringComparer.Ordinal);
+        AddDistinct(names, seenNames, appResult.Value.ApplicantName);
+
+        var membersResult = await familyMembers.GetByApplicationIdAsync(applicationId, ct);
+        if (membersResult.IsFailure)
+        {
+            return Result.Failure<List<LandConfirmationRecord>>(
+                membersResult.ErrorCode!, membersResult.Message!);
+        }
+
+        foreach (var member in membersResult.Value ?? [])
+        {
+            if (IsSupportMember(member))
+            {
+                continue;
+            }
+
+            AddDistinct(names, seenNames, member.Name);
+        }
+
+        return await landContracts.GetRecordsByNamesAsync(names, ct);
+    }
+
     // ───────────────────────────── 删除草稿 ─────────────────────────────
 
     public async Task<Result> DeleteAsync(
@@ -776,7 +860,7 @@ public sealed class ApplicationFormService(
                 Name = dto.Name ?? string.Empty,
                 IdCard = (dto.IdCard ?? string.Empty).Trim(),
                 Phone = dto.Phone ?? string.Empty,
-                Relationship = dto.Relationship ?? string.Empty,
+                Relationship = ToCoreRelationship(dto.Relationship),
                 Gender = NormalizeGender(dto.Gender),
                 Age = dto.Age,
                 Ethnicity = dto.Ethnicity ?? string.Empty,
@@ -966,7 +1050,7 @@ public sealed class ApplicationFormService(
                 ApplicationId = applicationId,
                 Name = dto.Name ?? string.Empty,
                 IdCard = idCard,
-                Relationship = dto.Relation ?? string.Empty,
+                Relationship = ToCoreRelationship(dto.Relation),
                 Gender = NormalizeGender(dto.Gender),
                 Age = dto.Age,
                 MonthlySupportFee = dto.MonthlySupportFee ?? 0m,
@@ -1125,9 +1209,9 @@ public sealed class ApplicationFormService(
 
         // Step1 扩展字段（户主本人）。成员块若同时携带户主行，ApplyHeadMemberToApplication
         // 会在其后覆盖健康/疾病/残疾三项，保证两处编辑口径一致。
-        application.EducationLevel = basic.EducationLevel ?? string.Empty;
-        application.MaritalStatus = basic.MaritalStatus ?? string.Empty;
-        application.PoliticalStatus = basic.PoliticalStatus ?? string.Empty;
+        application.EducationLevel = ToCoreEducationLevel(basic.EducationLevel);
+        application.MaritalStatus = ToCoreMaritalStatus(basic.MaritalStatus);
+        application.PoliticalStatus = ToCorePoliticalStatus(basic.PoliticalStatus);
         application.HealthStatus = ToCoreHealthStatus(basic.HealthStatus);
         application.DiseaseName = basic.DiseaseName ?? string.Empty;
         application.DisabilityType = ToCoreDisabilityType(basic.DisabilityType);
@@ -1329,7 +1413,7 @@ public sealed class ApplicationFormService(
             member.Id,
             member.Name ?? string.Empty,
             member.IdCard ?? string.Empty,
-            member.RelationshipToHead ?? string.Empty,
+            ToFormRelationship(member.RelationshipToHead),
             member.Gender ?? string.Empty,
             FormatDate(member.BirthDate),
             member.Age,
@@ -1337,7 +1421,7 @@ public sealed class ApplicationFormService(
             member.Phone ?? string.Empty,
             member.HukouType ?? string.Empty,
             ToFormHealthStatus(member.HealthStatus),
-            member.EmploymentStatus ?? string.Empty,
+            ToFormEmploymentStatus(member.EmploymentStatus),
             member.WorkUnit ?? string.Empty,
             member.MainIncomeSource ?? string.Empty,
             member.AnnualIncome,
@@ -1351,9 +1435,9 @@ public sealed class ApplicationFormService(
             member.DiseaseName ?? string.Empty,
             member.IsSevereDisease,
             member.IsLaborExempt,
-            member.EducationLevel ?? string.Empty,
-            member.MaritalStatus ?? string.Empty,
-            member.PoliticalStatus ?? string.Empty,
+            ToFormEducationLevel(member.EducationLevel),
+            ToFormMaritalStatus(member.MaritalStatus),
+            ToFormPoliticalStatus(member.PoliticalStatus),
             member.HukouAddress ?? string.Empty,
             member.HomeAddress ?? string.Empty,
             member.DiseaseCategory ?? string.Empty,
@@ -1368,7 +1452,7 @@ public sealed class ApplicationFormService(
             supporter.Id,
             supporter.Name ?? string.Empty,
             supporter.IdCard ?? string.Empty,
-            supporter.Relationship ?? string.Empty,
+            ToFormRelationship(supporter.Relationship),
             supporter.Gender ?? string.Empty,
             supporter.Age,
             supporter.AnnualSupportFee,
@@ -1389,7 +1473,7 @@ public sealed class ApplicationFormService(
             ApplicationId = applicationId,
             Name = (member.Name ?? string.Empty).Trim(),
             IdCard = (member.IdCard ?? string.Empty).Trim(),
-            Relation = member.Relation ?? string.Empty,
+            Relation = ToCoreRelationship(member.Relation),
             Gender = NormalizeGender(member.Gender),
             Age = member.Age,
             BirthDate = ParseDate(member.BirthDate),
@@ -1408,9 +1492,9 @@ public sealed class ApplicationFormService(
             DiseaseName = member.DiseaseName ?? string.Empty,
             IsSevereDisease = member.IsSevereDisease,
             IsLaborExempt = member.IsLaborExempt,
-            EducationLevel = member.EducationLevel ?? string.Empty,
-            MaritalStatus = member.MaritalStatus ?? string.Empty,
-            PoliticalStatus = member.PoliticalStatus ?? string.Empty,
+            EducationLevel = ToCoreEducationLevel(member.EducationLevel),
+            MaritalStatus = ToCoreMaritalStatus(member.MaritalStatus),
+            PoliticalStatus = ToCorePoliticalStatus(member.PoliticalStatus),
             DiseaseCategory = member.DiseaseCategory ?? string.Empty,
             MedicalSelfPaid12m = member.MedicalSelfPaid12m,
             DisabilityCertificateNo = member.DisabilityCertificateNo ?? string.Empty,
@@ -1418,7 +1502,7 @@ public sealed class ApplicationFormService(
             HomeAddress = member.HomeAddress ?? string.Empty,
             IsHouseholdHead = false,
             MemberCategory = MemberCategoryConstants.SHARED_LIVING,
-            EmploymentStatus = member.EmploymentStatus ?? string.Empty,
+            EmploymentStatus = ToCoreEmploymentStatus(member.EmploymentStatus),
             WorkUnit = member.WorkUnit ?? string.Empty,
             MainIncomeSource = member.MainIncomeSource ?? string.Empty,
             AnnualIncome = member.AnnualIncome ?? 0m,
@@ -1567,9 +1651,9 @@ public sealed class ApplicationFormService(
             app.ApplicationReason ?? string.Empty,
             app.ApplicationReasonDetail ?? string.Empty,
             string.Empty,
-            app.EducationLevel ?? string.Empty,
-            app.MaritalStatus ?? string.Empty,
-            app.PoliticalStatus ?? string.Empty,
+            ToFormEducationLevel(app.EducationLevel),
+            ToFormMaritalStatus(app.MaritalStatus),
+            ToFormPoliticalStatus(app.PoliticalStatus),
             ToFormHealthStatus(app.HealthStatus),
             app.DiseaseName ?? string.Empty,
             ToFormDisabilityType(app.DisabilityType),
@@ -1665,6 +1749,21 @@ public sealed class ApplicationFormService(
             MemberCategoryConstants.SUPPORT,
             StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>去空格、去空值、去重后追加，供导入接口拼身份证/姓名清单。</summary>
+    private static void AddDistinct(List<string> values, HashSet<string> seen, string? value)
+    {
+        var trimmed = (value ?? string.Empty).Trim();
+        if (trimmed.Length == 0)
+        {
+            return;
+        }
+
+        if (seen.Add(trimmed))
+        {
+            values.Add(trimmed);
+        }
+    }
+
     /// <summary>
     /// 家庭人数：非赡养成员数（含户主）；若表单未携带户主行则 +1。
     /// 最低 1，避免主表 family_size=0 影响分类/人均口径。
@@ -1725,6 +1824,120 @@ public sealed class ApplicationFormService(
         return prefix + detail;
     }
 
+    // ── 旧版字典 key ↔ 中文显示值（表单只显示中文，落库保留 key） ────────────────
+    private static string ToFormEducationLevel(string? value) => value?.Trim() switch
+    {
+        "Illiterate" => "文盲/半文盲",
+        "Primary" => "小学",
+        "JuniorHigh" => "初中",
+        "SeniorHigh" => "高中/中专",
+        "College" => "大专",
+        "Bachelor" => "本科",
+        "Postgraduate" => "研究生及以上",
+        var other => other ?? string.Empty
+    };
+
+    private static string ToCoreEducationLevel(string? value) => value?.Trim() switch
+    {
+        "文盲/半文盲" => "Illiterate",
+        "小学" => "Primary",
+        "初中" => "JuniorHigh",
+        "高中/中专" => "SeniorHigh",
+        "大专" => "College",
+        "本科" => "Bachelor",
+        "研究生及以上" => "Postgraduate",
+        var other => other ?? string.Empty
+    };
+
+    private static string ToFormMaritalStatus(string? value) => value?.Trim() switch
+    {
+        "Single" => "未婚",
+        "Married" => "已婚",
+        "Widowed" => "丧偶",
+        "Divorced" => "离婚",
+        "Other" => "其他",
+        var other => other ?? string.Empty
+    };
+
+    private static string ToCoreMaritalStatus(string? value) => value?.Trim() switch
+    {
+        "未婚" => "Single",
+        "已婚" => "Married",
+        "丧偶" => "Widowed",
+        "离婚" => "Divorced",
+        "其他" => "Other",
+        var other => other ?? string.Empty
+    };
+
+    private static string ToFormPoliticalStatus(string? value) => value?.Trim() switch
+    {
+        "CPCMember" => "中共党员",
+        "CYLMembers" or "CYLCadre" => "共青团员",
+        "Masses" => "群众",
+        "DemocraticParty" => "民主党派",
+        "Other" => "其他",
+        var other => other ?? string.Empty
+    };
+
+    private static string ToCorePoliticalStatus(string? value) => value?.Trim() switch
+    {
+        "中共党员" => "CPCMember",
+        "共青团员" => "CYLMembers",
+        "群众" => "Masses",
+        "民主党派" => "DemocraticParty",
+        "其他" => "Other",
+        var other => other ?? string.Empty
+    };
+
+    private static string ToFormEmploymentStatus(string? value) => value?.Trim() switch
+    {
+        "Employed" => "在职",
+        "Unemployed" => "失业",
+        "Farming" => "务农",
+        "Student" => "学生",
+        "Retired" => "退休",
+        "Other" => "其他",
+        var other => other ?? string.Empty
+    };
+
+    private static string ToCoreEmploymentStatus(string? value) => value?.Trim() switch
+    {
+        "在职" => "Employed",
+        "失业" => "Unemployed",
+        "务农" => "Farming",
+        "学生" => "Student",
+        "退休" => "Retired",
+        "其他" => "Other",
+        var other => other ?? string.Empty
+    };
+
+    private static string ToFormRelationship(string? value) => value?.Trim() switch
+    {
+        "Head" => "本人/户主",
+        "Spouse" => "配偶",
+        "Son" => "子/婿",
+        "Daughter" => "女/媳",
+        "Grandchild" => "孙子女/外孙子女",
+        "Parent" => "父母/岳父母/公婆",
+        "Grandparent" => "祖父母/外祖父母",
+        "Sibling" => "兄弟姐妹",
+        "Other" => "其他",
+        var other => other ?? string.Empty
+    };
+
+    private static string ToCoreRelationship(string? value) => value?.Trim() switch
+    {
+        "本人/户主" => "Head",
+        "配偶" => "Spouse",
+        "子/婿" => "Son",
+        "女/媳" => "Daughter",
+        "孙子女/外孙子女" => "Grandchild",
+        "父母/岳父母/公婆" => "Parent",
+        "祖父母/外祖父母" => "Grandparent",
+        "兄弟姐妹" => "Sibling",
+        "其他" => "Other",
+        var other => other ?? string.Empty
+    };
     /// <summary>历史数据存在 Male/Female 英文代码，表单统一输出/保存为中文。</summary>
     private static string NormalizeGender(string? value) => value?.Trim() switch
     {

@@ -103,7 +103,7 @@ onMounted(() => {
     <NcPageHeader
       title="家庭经济状况核对"
       description="居民家庭经济状况核对 · 授权报告上传与月度审核"
-      kicker="ASSET VERIFICATION / 救助业务"
+      kicker="救助业务 / 经济状况核对"
     >
       <template #actions>
         <el-button :icon="ArrowLeft" @click="router.push('/')">返回工作台</el-button>

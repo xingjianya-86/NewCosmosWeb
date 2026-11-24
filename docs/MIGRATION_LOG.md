@@ -173,3 +173,14 @@
   - Step1/2 补齐旧版常用字段和选项。
 - 土地确权分组 `landConfirmationGroups` 仍只读保全，暂不在 Web 编辑。
 - 成员 `is_single_rescue`、`self_care_ability` 原表没有列，旧版也不落库；表单可展示但不持久化。
+## P3.3 按 legacy 布局复刻与字典中文化（2026-11-25）
+
+- 认定表单外壳改为旧版结构：顶部 Primary 横条 + 横向五步卡片 + 连接线 + 内容区（右 320px 来源数据栏）+ 底部「放弃申请/保存草稿/上一步/下一步/提交」。
+- Step1/2 按旧版分组重排：户籍/居住地址、申请人信息、健康残疾、其他；家庭成员个人信息/健康就业/地址/认定分组；桌面 2–3 列，地址独占行。
+- Step2 关系、学历、婚姻、政治面貌、就业状态等旧字典 key 在服务端转换为中文显示，保存时转回 key；支持赡养人关系中文显示。
+- Step3 增加「导入农业补贴」「导入土地确权台账」：
+  - `GET /api/applications/{id}/imports/subsidies`
+  - `GET /api/applications/{id}/imports/land-confirmation`
+  - 按旧版从 `ISubsidyDataService` / `ILandContractService` 取数，不采用文件上传新方案。
+- Step4 增加被调查人/关系/调查结论和走访记录；Step5 增加照料人、赡养人、银行发放信息，分类代码不再显示英文。
+- 移除表单页英文 kicker、分类代码英文和自定义台账导入说明。

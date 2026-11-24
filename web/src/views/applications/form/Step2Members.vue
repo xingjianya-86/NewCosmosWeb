@@ -15,8 +15,10 @@ import {
   DISEASE_CATEGORY_OPTIONS,
   EDUCATION_LEVEL_OPTIONS,
   EMPLOYMENT_STATUS_OPTIONS,
+  ETHNICITY_OPTIONS,
   GENDER_OPTIONS,
   HEALTH_STATUS_OPTIONS,
+  HUKOU_TYPE_OPTIONS,
   MARITAL_STATUS_OPTIONS,
   PERSON_TYPE_OPTIONS,
   POLITICAL_STATUS_OPTIONS,
@@ -37,11 +39,6 @@ const props = defineProps<{
 
 const members = computed(() => props.form.members)
 const supporters = computed(() => props.form.supporters)
-
-const memberCount = computed(() => members.value.length)
-const supporterCount = computed(() => supporters.value.length)
-const disabledCount = computed(() => members.value.filter((item) => item.hasDisability).length)
-const headCount = computed(() => members.value.filter((item) => item.isHouseholdHead).length)
 
 const duplicateIdCards = computed<Set<string>>(() => {
   const counts = new Map<string, number>()
@@ -291,45 +288,14 @@ onMounted(() => {
 
 <template>
   <div class="step-members">
-    <div class="summary-strip">
-      <div class="summary-item">
-        <span>家庭人数</span>
-        <strong>{{ memberCount }}</strong>
-      </div>
-      <div class="summary-item">
-        <span>户主</span>
-        <strong :class="{ 'is-warn': headCount !== 1 }">{{ headCount }}</strong>
-      </div>
-      <div class="summary-item">
-        <span>残疾成员</span>
-        <strong>{{ disabledCount }}</strong>
-      </div>
-      <div class="summary-item">
-        <span>赡养 / 抚养人</span>
-        <strong>{{ supporterCount }}</strong>
-      </div>
-    </div>
-
-    <el-alert
-      v-if="memberCount > 0 && headCount !== 1"
-      class="head-warning"
-      type="warning"
-      :closable="false"
-      show-icon
-      title="家庭须且仅须有一名户主，请点击成员卡片上的「设为户主」。"
-    />
-
-    <NcCard
-      title="共同生活成员"
-      subtitle="家庭人数随成员数量自动更新；身份证号用于计算性别、出生日期与年龄。"
-    >
+    <NcCard title="共同生活成员">
       <template #actions>
         <el-button :icon="UserFilled" @click="fillHeadFromApplicant">户主 = 申请人</el-button>
-        <el-button type="primary" :icon="Plus" @click="addMember">新增成员</el-button>
+        <el-button type="primary" :icon="Plus" @click="addMember">新增人员</el-button>
       </template>
 
-      <el-empty v-if="members.length === 0" description="暂无共同生活成员">
-        <el-button type="primary" :icon="Plus" @click="addMember">新增成员</el-button>
+      <el-empty v-if="members.length === 0" description="暂无共同生活成员，点击右上角“新增人员”添加">
+        <el-button type="primary" :icon="Plus" @click="addMember">新增人员</el-button>
       </el-empty>
 
       <div v-else class="member-list">
@@ -370,350 +336,399 @@ onMounted(() => {
             </div>
           </header>
 
-          <div class="member-grid">
-            <label class="field">
-              <span class="field__label">姓名 <i>*</i></span>
-              <el-input v-model="member.name" maxlength="30" placeholder="成员姓名" clearable />
-            </label>
+          <section class="member-section">
+            <h4 class="member-section__title">个人信息</h4>
+            <div class="member-grid">
+              <label class="field">
+                <span class="field__label">姓名 <i>*</i></span>
+                <el-input v-model="member.name" maxlength="30" placeholder="请输入成员姓名" clearable />
+              </label>
 
-            <label class="field" :class="{ 'field--error': Boolean(memberIdIssue(member)) }">
-              <span class="field__label">身份证号</span>
-              <el-input
-                v-model="member.idCard"
-                maxlength="18"
-                placeholder="18 位身份证号"
-                clearable
-                @blur="handleMemberIdBlur(member)"
-              />
-            </label>
-
-            <label class="field">
-              <span class="field__label">与户主关系</span>
-              <el-select v-model="member.relation" filterable allow-create default-first-option>
-                <el-option
-                  v-for="item in RELATION_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
+              <label class="field" :class="{ 'field--error': Boolean(memberIdIssue(member)) }">
+                <span class="field__label">身份证号</span>
+                <el-input
+                  v-model="member.idCard"
+                  maxlength="18"
+                  placeholder="请输入 18 位身份证号"
+                  clearable
+                  @blur="handleMemberIdBlur(member)"
                 />
-              </el-select>
-            </label>
+              </label>
 
-            <label class="field">
-              <span class="field__label">性别</span>
-              <el-select v-model="member.gender" clearable placeholder="身份证自动带出">
-                <el-option
-                  v-for="item in GENDER_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
+              <label class="field">
+                <span class="field__label">与户主关系</span>
+                <el-select v-model="member.relation" filterable allow-create default-first-option>
+                  <el-option
+                    v-for="item in RELATION_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">性别</span>
+                <el-select v-model="member.gender" clearable placeholder="身份证自动带出">
+                  <el-option
+                    v-for="item in GENDER_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">出生日期</span>
+                <el-date-picker
+                  v-model="member.birthDate"
+                  type="date"
+                  value-format="YYYY-MM-DD"
+                  placeholder="请选择出生日期"
+                  @change="handleBirthDateChange(member)"
                 />
-              </el-select>
-            </label>
+              </label>
 
-            <label class="field">
-              <span class="field__label">出生日期</span>
-              <el-date-picker
-                v-model="member.birthDate"
-                type="date"
-                value-format="YYYY-MM-DD"
-                placeholder="选择日期"
-                @change="handleBirthDateChange(member)"
-              />
-            </label>
-
-            <label class="field">
-              <span class="field__label">年龄</span>
-              <el-input-number
-                :model-value="member.age"
-                :min="0"
-                :max="130"
-                :controls="false"
-                placeholder="岁"
-                @update:model-value="member.age = $event ?? null"
-              />
-            </label>
-
-            <label class="field">
-              <span class="field__label">文化程度</span>
-              <el-select
-                v-model="member.educationLevel"
-                filterable
-                allow-create
-                default-first-option
-                clearable
-                placeholder="请选择或输入"
-              >
-                <el-option
-                  v-for="item in EDUCATION_LEVEL_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
+              <label class="field">
+                <span class="field__label">年龄</span>
+                <el-input-number
+                  :model-value="member.age"
+                  :min="0"
+                  :max="130"
+                  :controls="false"
+                  placeholder="岁"
+                  @update:model-value="member.age = $event ?? null"
                 />
-              </el-select>
-            </label>
+              </label>
 
-            <label class="field">
-              <span class="field__label">婚姻状况</span>
-              <el-select
-                v-model="member.maritalStatus"
-                filterable
-                allow-create
-                default-first-option
-                clearable
-                placeholder="请选择或输入"
-              >
-                <el-option
-                  v-for="item in MARITAL_STATUS_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
+              <label class="field">
+                <span class="field__label">民族</span>
+                <el-select v-model="member.ethnicity" filterable allow-create default-first-option clearable>
+                  <el-option
+                    v-for="item in ETHNICITY_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">文化程度</span>
+                <el-select
+                  v-model="member.educationLevel"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入文化程度"
+                >
+                  <el-option
+                    v-for="item in EDUCATION_LEVEL_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">婚姻状况</span>
+                <el-select
+                  v-model="member.maritalStatus"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入婚姻状况"
+                >
+                  <el-option
+                    v-for="item in MARITAL_STATUS_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">政治面貌</span>
+                <el-select
+                  v-model="member.politicalStatus"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入政治面貌"
+                >
+                  <el-option
+                    v-for="item in POLITICAL_STATUS_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">联系电话</span>
+                <el-input v-model="member.phone" maxlength="20" placeholder="请输入手机号或固定电话" clearable />
+              </label>
+
+              <label class="field">
+                <span class="field__label">户口性质</span>
+                <el-select v-model="member.hukouType" placeholder="请选择户口性质">
+                  <el-option
+                    v-for="item in HUKOU_TYPE_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+            </div>
+            <p v-if="memberIdIssue(member)" class="field-error">{{ memberIdIssue(member) }}</p>
+          </section>
+
+          <section class="member-section">
+            <h4 class="member-section__title">健康、就业与收入</h4>
+            <div class="member-grid">
+              <label class="field">
+                <span class="field__label">健康状态</span>
+                <el-select v-model="member.healthStatus" filterable allow-create default-first-option>
+                  <el-option
+                    v-for="item in HEALTH_STATUS_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">就业状态</span>
+                <el-select
+                  v-model="member.employmentStatus"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入就业状态"
+                >
+                  <el-option
+                    v-for="item in EMPLOYMENT_STATUS_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">劳动能力</span>
+                <el-select
+                  :model-value="member.isLaborExempt ? 'none' : 'full'"
+                  @change="setLaborAbility(member, $event)"
+                >
+                  <el-option label="有劳动能力" value="full" />
+                  <el-option label="无劳动能力" value="none" />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">残疾类型</span>
+                <el-select
+                  v-model="member.disabilityType"
+                  clearable
+                  placeholder="无残疾可留空"
+                  @change="handleDisabilityTypeChange(member, $event)"
+                >
+                  <el-option
+                    v-for="item in DISABILITY_TYPE_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">残疾等级</span>
+                <el-select
+                  v-model="member.disabilityLevel"
+                  clearable
+                  :disabled="!member.hasDisability"
+                  placeholder="无残疾可留空"
+                >
+                  <el-option
+                    v-for="item in DISABILITY_LEVEL_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">残疾证号</span>
+                <el-input
+                  v-model="member.disabilityCertificateNo"
+                  maxlength="30"
+                  placeholder="无残疾可留空"
+                  clearable
                 />
-              </el-select>
-            </label>
+              </label>
 
-            <label class="field">
-              <span class="field__label">政治面貌</span>
-              <el-select
-                v-model="member.politicalStatus"
-                filterable
-                allow-create
-                default-first-option
-                clearable
-                placeholder="请选择或输入"
-              >
-                <el-option
-                  v-for="item in POLITICAL_STATUS_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
+              <label class="field">
+                <span class="field__label">重病病种</span>
+                <el-input
+                  v-model="member.diseaseName"
+                  maxlength="60"
+                  placeholder="无重病可留空"
+                  clearable
+                  @input="handleDiseaseInput(member)"
                 />
-              </el-select>
-            </label>
+              </label>
 
-            <label class="field field--wide">
-              <span class="field__label">户籍地址</span>
-              <el-input
-                v-model="member.hukouAddress"
-                maxlength="120"
-                placeholder="户籍所在地址"
-                clearable
-              />
-            </label>
+              <label class="field">
+                <span class="field__label">疾病分类</span>
+                <el-select
+                  v-model="member.diseaseCategory"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入疾病分类"
+                >
+                  <el-option
+                    v-for="item in DISEASE_CATEGORY_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
 
-            <label class="field field--wide">
-              <span class="field__label">现居住地址</span>
-              <el-input
-                v-model="member.homeAddress"
-                maxlength="120"
-                placeholder="现居住地址"
-                clearable
-              />
-            </label>
-
-            <label class="field">
-              <span class="field__label">健康状态</span>
-              <el-select v-model="member.healthStatus" filterable allow-create default-first-option>
-                <el-option
-                  v-for="item in HEALTH_STATUS_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
+              <label class="field">
+                <span class="field__label">前 12 个月医疗自付（元）</span>
+                <el-input-number
+                  :model-value="member.medicalSelfPaid12m"
+                  :min="0"
+                  :precision="2"
+                  :controls="false"
+                  placeholder="0.00"
+                  @update:model-value="member.medicalSelfPaid12m = $event ?? null"
                 />
-              </el-select>
-            </label>
+              </label>
 
-            <label class="field">
-              <span class="field__label">就业状态</span>
-              <el-select
-                v-model="member.employmentStatus"
-                filterable
-                allow-create
-                default-first-option
-                clearable
-              >
-                <el-option
-                  v-for="item in EMPLOYMENT_STATUS_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
+              <label class="field">
+                <span class="field__label">工作单位</span>
+                <el-input v-model="member.workUnit" maxlength="60" placeholder="无工作单位可留空" clearable />
+              </label>
+
+              <label class="field">
+                <span class="field__label">月收入（元）</span>
+                <el-input-number
+                  :model-value="member.monthlyIncomeCapacity"
+                  :min="0"
+                  :precision="2"
+                  :controls="false"
+                  placeholder="0.00"
+                  @update:model-value="member.monthlyIncomeCapacity = $event ?? null"
                 />
-              </el-select>
-            </label>
+              </label>
+            </div>
+          </section>
 
-            <label class="field">
-              <span class="field__label">劳动能力</span>
-              <el-select
-                :model-value="member.isLaborExempt ? 'none' : 'full'"
-                @change="setLaborAbility(member, $event)"
-              >
-                <el-option label="有劳动能力" value="full" />
-                <el-option label="无劳动能力" value="none" />
-              </el-select>
-            </label>
-
-            <label class="field">
-              <span class="field__label">残疾类型</span>
-              <el-select
-                v-model="member.disabilityType"
-                clearable
-                placeholder="无残疾可留空"
-                @change="handleDisabilityTypeChange(member, $event)"
-              >
-                <el-option
-                  v-for="item in DISABILITY_TYPE_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
+          <section class="member-section">
+            <h4 class="member-section__title">户籍与居住地址</h4>
+            <div class="member-grid">
+              <label class="field field--full">
+                <span class="field__label">户籍地址</span>
+                <el-input
+                  v-model="member.hukouAddress"
+                  maxlength="120"
+                  placeholder="请输入户籍所在地址"
+                  clearable
                 />
-              </el-select>
-            </label>
+              </label>
 
-            <label class="field">
-              <span class="field__label">残疾等级</span>
-              <el-select
-                v-model="member.disabilityLevel"
-                clearable
-                :disabled="!member.hasDisability"
-                placeholder="选择等级"
-              >
-                <el-option
-                  v-for="item in DISABILITY_LEVEL_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
+              <label class="field field--full">
+                <span class="field__label">现居住地址</span>
+                <el-input
+                  v-model="member.homeAddress"
+                  maxlength="120"
+                  placeholder="请输入现居住地址"
+                  clearable
                 />
-              </el-select>
-            </label>
+              </label>
+            </div>
+          </section>
 
-            <label class="field">
-              <span class="field__label">残疾证号</span>
-              <el-input
-                v-model="member.disabilityCertificateNo"
-                maxlength="30"
-                placeholder="无残疾可留空"
-                clearable
-              />
-            </label>
+          <section class="member-section">
+            <h4 class="member-section__title">人员认定</h4>
+            <div class="member-grid">
+              <label class="field">
+                <span class="field__label">人员类型</span>
+                <el-select
+                  v-model="member.personType"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入人员类型"
+                >
+                  <el-option
+                    v-for="item in PERSON_TYPE_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
 
-            <label class="field">
-              <span class="field__label">重病病种</span>
-              <el-input
-                v-model="member.diseaseName"
-                maxlength="60"
-                placeholder="无重病可留空"
-                clearable
-                @input="handleDiseaseInput(member)"
-              />
-            </label>
-
-            <label class="field">
-              <span class="field__label">疾病分类</span>
-              <el-select
-                v-model="member.diseaseCategory"
-                filterable
-                allow-create
-                default-first-option
-                clearable
-                placeholder="请选择或输入"
-              >
-                <el-option
-                  v-for="item in DISEASE_CATEGORY_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
+              <label class="field field--switch">
+                <span class="field__label">单人保</span>
+                <el-switch
+                  v-model="member.isSingleRescue"
+                  active-text="是"
+                  inactive-text="否"
+                  inline-prompt
                 />
-              </el-select>
-            </label>
+              </label>
 
-            <label class="field">
-              <span class="field__label">前 12 个月医疗自付（元）</span>
-              <el-input-number
-                :model-value="member.medicalSelfPaid12m"
-                :min="0"
-                :precision="2"
-                :controls="false"
-                placeholder="0.00"
-                @update:model-value="member.medicalSelfPaid12m = $event ?? null"
-              />
-            </label>
-
-            <label class="field">
-              <span class="field__label">月收入能力（元）</span>
-              <el-input-number
-                :model-value="member.monthlyIncomeCapacity"
-                :min="0"
-                :precision="2"
-                :controls="false"
-                placeholder="0.00"
-                @update:model-value="member.monthlyIncomeCapacity = $event ?? null"
-              />
-            </label>
-
-            <label class="field">
-              <span class="field__label">人员类型</span>
-              <el-select
-                v-model="member.personType"
-                filterable
-                allow-create
-                default-first-option
-                clearable
-                placeholder="请选择或输入"
-              >
-                <el-option
-                  v-for="item in PERSON_TYPE_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
-                />
-              </el-select>
-            </label>
-
-            <label class="field">
-              <span class="field__label">自理能力</span>
-              <el-select
-                v-model="member.selfCareAbility"
-                filterable
-                allow-create
-                default-first-option
-                clearable
-                placeholder="请选择或输入"
-              >
-                <el-option
-                  v-for="item in SELF_CARE_ABILITY_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
-                />
-              </el-select>
-            </label>
-
-            <label class="field field--switch">
-              <span class="field__label">单人保</span>
-              <el-switch
-                v-model="member.isSingleRescue"
-                active-text="是"
-                inactive-text="否"
-                inline-prompt
-              />
-            </label>
-          </div>
-
-          <p v-if="memberIdIssue(member)" class="field-error">{{ memberIdIssue(member) }}</p>
+              <label class="field">
+                <span class="field__label">自理能力</span>
+                <el-select
+                  v-model="member.selfCareAbility"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入自理能力"
+                >
+                  <el-option
+                    v-for="item in SELF_CARE_ABILITY_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+            </div>
+          </section>
         </article>
       </div>
     </NcCard>
 
-    <NcCard
-      title="赡养 / 抚养 / 扶养人"
-      subtitle="填写具有法定赡养、抚养、扶养义务的人员及费用。"
-    >
+    <NcCard title="赡养抚养扶养">
       <template #actions>
-        <el-button :icon="Plus" @click="addSupporter">新增赡养人</el-button>
+        <el-button type="primary" :icon="Plus" @click="addSupporter">新增人员</el-button>
       </template>
 
-      <el-empty v-if="supporters.length === 0" description="暂无赡养 / 抚养 / 扶养人">
-        <el-button type="primary" :icon="Plus" @click="addSupporter">新增赡养人</el-button>
+      <el-empty v-if="supporters.length === 0" description="暂无赡养抚养扶养人员，点击右上角“新增人员”添加">
+        <el-button type="primary" :icon="Plus" @click="addSupporter">新增人员</el-button>
       </el-empty>
 
       <div v-else class="supporter-list">
@@ -732,77 +747,97 @@ onMounted(() => {
             </el-button>
           </header>
 
-          <div class="supporter-grid">
-            <label class="field">
-              <span class="field__label">姓名</span>
-              <el-input v-model="supporter.name" maxlength="30" placeholder="姓名" clearable />
-            </label>
+          <section class="member-section">
+            <h4 class="member-section__title">个人信息</h4>
+            <div class="supporter-grid">
+              <label class="field">
+                <span class="field__label">姓名</span>
+                <el-input v-model="supporter.name" maxlength="30" placeholder="请输入姓名" clearable />
+              </label>
 
-            <label class="field">
-              <span class="field__label">身份证号</span>
-              <el-input v-model="supporter.idCard" maxlength="18" placeholder="18 位身份证号" clearable />
-            </label>
+              <label class="field">
+                <span class="field__label">身份证号</span>
+                <el-input v-model="supporter.idCard" maxlength="18" placeholder="请输入 18 位身份证号" clearable />
+              </label>
 
-            <label class="field">
-              <span class="field__label">关系</span>
-              <el-select v-model="supporter.relation" filterable allow-create default-first-option>
-                <el-option
-                  v-for="item in SUPPORT_RELATION_OPTIONS"
-                  :key="item.value"
-                  :label="item.label"
-                  :value="item.value"
+              <label class="field">
+                <span class="field__label">关系</span>
+                <el-select v-model="supporter.relation" filterable allow-create default-first-option>
+                  <el-option
+                    v-for="item in SUPPORT_RELATION_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">性别</span>
+                <el-select v-model="supporter.gender" clearable placeholder="请选择性别">
+                  <el-option
+                    v-for="item in GENDER_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">年龄</span>
+                <el-input-number
+                  :model-value="supporter.age"
+                  :min="0"
+                  :max="130"
+                  :controls="false"
+                  placeholder="岁"
+                  @update:model-value="supporter.age = $event ?? null"
                 />
-              </el-select>
-            </label>
+              </label>
+            </div>
+          </section>
 
-            <label class="field">
-              <span class="field__label">年龄</span>
-              <el-input-number
-                :model-value="supporter.age"
-                :min="0"
-                :max="130"
-                :controls="false"
-                placeholder="岁"
-                @update:model-value="supporter.age = $event ?? null"
-              />
-            </label>
+          <section class="member-section">
+            <h4 class="member-section__title">赡养费用</h4>
+            <div class="supporter-grid">
+              <label class="field">
+                <span class="field__label">年赡养费（元）</span>
+                <el-input-number
+                  :model-value="supporter.annualSupportFee"
+                  :min="0"
+                  :precision="2"
+                  :controls="false"
+                  placeholder="0.00"
+                  @update:model-value="supporter.annualSupportFee = $event ?? null"
+                  @change="handleAnnualSupportChange(supporter, $event)"
+                />
+              </label>
 
-            <label class="field">
-              <span class="field__label">年赡养费（元）</span>
-              <el-input-number
-                :model-value="supporter.annualSupportFee"
-                :min="0"
-                :precision="2"
-                :controls="false"
-                placeholder="0.00"
-                @update:model-value="supporter.annualSupportFee = $event ?? null"
-                @change="handleAnnualSupportChange(supporter, $event)"
-              />
-            </label>
+              <label class="field">
+                <span class="field__label">月赡养费（元）</span>
+                <el-input-number
+                  :model-value="supporter.monthlySupportFee"
+                  :min="0"
+                  :precision="2"
+                  :controls="false"
+                  placeholder="0.00"
+                  @update:model-value="supporter.monthlySupportFee = $event ?? null"
+                  @change="handleMonthlySupportChange(supporter, $event)"
+                />
+              </label>
 
-            <label class="field">
-              <span class="field__label">月赡养费（元）</span>
-              <el-input-number
-                :model-value="supporter.monthlySupportFee"
-                :min="0"
-                :precision="2"
-                :controls="false"
-                placeholder="0.00"
-                @update:model-value="supporter.monthlySupportFee = $event ?? null"
-                @change="handleMonthlySupportChange(supporter, $event)"
-              />
-            </label>
-
-            <label class="field field--switch">
-              <span class="field__label">是否有赡养能力</span>
-              <el-switch
-                v-model="supporter.isSupportAbility"
-                active-text="有"
-                inactive-text="无"
-                inline-prompt
-              />
-            </label>
-          </div>
+              <label class="field field--switch">
+                <span class="field__label">是否有赡养能力</span>
+                <el-switch
+                  v-model="supporter.isSupportAbility"
+                  active-text="有"
+                  inactive-text="无"
+                  inline-prompt
+                />
+              </label>
+            </div>
+          </section>
         </article>
       </div>
     </NcCard>
@@ -814,49 +849,6 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 14px;
-}
-
-.summary-strip {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  border: 1px solid var(--nc-line);
-  border-radius: var(--nc-radius-sm);
-  background-color: var(--nc-paper-2);
-}
-
-.summary-item {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 11px 15px;
-  border-left: 1px solid var(--nc-line-faint);
-}
-
-.summary-item:first-child {
-  border-left: none;
-}
-
-.summary-item span {
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-xs);
-  letter-spacing: 0.08em;
-}
-
-.summary-item strong {
-  color: var(--nc-ink);
-  font-family: var(--nc-font-serif);
-  font-size: 20px;
-  font-weight: 700;
-}
-
-.summary-item strong.is-warn {
-  color: var(--nc-seal);
-}
-
-.head-warning {
-  margin: 0;
 }
 
 .member-list,
@@ -900,7 +892,6 @@ onMounted(() => {
   font-family: var(--nc-font-mono);
   font-size: var(--nc-text-xs);
   letter-spacing: 0.1em;
-  text-transform: uppercase;
 }
 
 .member-name {
@@ -946,18 +937,28 @@ onMounted(() => {
   gap: 2px;
 }
 
-.member-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 13px 15px;
+.member-section {
   padding-top: 12px;
 }
 
+.member-section + .member-section {
+  margin-top: 4px;
+  border-top: 1px dashed var(--nc-line-faint);
+}
+
+.member-section__title {
+  margin-bottom: 10px;
+  color: var(--nc-muted-2);
+  font-size: var(--nc-text-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.member-grid,
 .supporter-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 13px 15px;
-  padding-top: 12px;
 }
 
 .field {
@@ -967,8 +968,8 @@ onMounted(() => {
   min-width: 0;
 }
 
-.field--wide {
-  grid-column: span 2;
+.field--full {
+  grid-column: 1 / -1;
 }
 
 .field__label {
@@ -1004,33 +1005,17 @@ onMounted(() => {
   line-height: 1.5;
 }
 
-@media (max-width: 1279px) {
+@media (min-width: 1440px) {
   .member-grid,
   .supporter-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 767px) {
-  .summary-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .summary-item:nth-child(3) {
-    border-left: none;
-  }
-
-  .summary-item:nth-child(n + 3) {
-    border-top: 1px solid var(--nc-line-faint);
-  }
-
   .member-grid,
   .supporter-grid {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .field--wide {
-    grid-column: span 1;
   }
 
   .member-card__head {

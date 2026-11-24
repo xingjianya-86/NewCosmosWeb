@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { ArrowDown, Delete, Plus } from '@element-plus/icons-vue'
+import { computed, ref, watch } from 'vue'
+import { ArrowDown, Delete, Download, Plus } from '@element-plus/icons-vue'
 import { maskIdCard } from '../format'
 import type { LedgerColumn } from './economy'
 import type { ApplicationFormMember } from './types'
@@ -16,6 +16,12 @@ const props = withDefaults(
     defaultOpen?: boolean
     addLabel?: string
     tone?: 'income' | 'expense' | 'asset'
+    /** 标题区导入按钮文案；留空不显示按钮（对应旧版分组内的「导入」）。 */
+    importLabel?: string
+    /** 导入请求进行中。 */
+    importing?: boolean
+    /** 递增信号：变化时展开台账，让导入结果可见。 */
+    openSignal?: number
   }>(),
   {
     hint: '',
@@ -24,15 +30,26 @@ const props = withDefaults(
     defaultOpen: false,
     addLabel: '新增一行',
     tone: 'income',
+    importLabel: '',
+    importing: false,
+    openSignal: 0,
   },
 )
 
 const emit = defineEmits<{
   (event: 'add'): void
   (event: 'remove', row: Record<string, unknown>): void
+  (event: 'import'): void
 }>()
 
 const expanded = ref(props.defaultOpen)
+
+watch(
+  () => props.openSignal,
+  (value, previous) => {
+    if (value !== previous) expanded.value = true
+  },
+)
 
 /* 行 key：新增/删除行时避免 Vue 复用错位的输入控件。 */
 let keySeed = 0
@@ -69,6 +86,13 @@ function textValue(row: Record<string, unknown>, key: string): string {
   const value = row[key]
   if (value === null || value === undefined) return ''
   return typeof value === 'string' ? value : String(value)
+}
+
+/** 文本列显示值：旧数据里的英文枚举 key 按列映射为中文。 */
+function displayText(row: Record<string, unknown>, column: LedgerColumn): string {
+  const raw = textValue(row, column.key)
+  if (!raw || !column.labels) return raw
+  return column.labels[raw] ?? column.labels[raw.toUpperCase()] ?? raw
 }
 
 function numberValue(row: Record<string, unknown>, key: string): number | undefined {
@@ -202,6 +226,17 @@ function addRow(): void {
 
       <div class="ledger__actions">
         <el-button
+          v-if="importLabel"
+          size="small"
+          text
+          :icon="Download"
+          :loading="importing"
+          :disabled="busy"
+          @click="emit('import')"
+        >
+          {{ importLabel }}
+        </el-button>
+        <el-button
           size="small"
           text
           :icon="Plus"
@@ -297,7 +332,7 @@ function addRow(): void {
                   class="cell-control"
                   size="small"
                   clearable
-                  :model-value="textValue(row, column.key)"
+                  :model-value="displayText(row, column)"
                   :placeholder="column.placeholder"
                   :disabled="busy"
                   @update:model-value="setText(row, column.key, $event)"

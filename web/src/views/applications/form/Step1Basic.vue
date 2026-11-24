@@ -8,7 +8,6 @@ import {
   DISABILITY_TYPE_OPTIONS,
   EDUCATION_LEVEL_OPTIONS,
   ETHNICITY_OPTIONS,
-  GENDER_OPTIONS,
   HEALTH_STATUS_OPTIONS,
   HUKOU_TYPE_OPTIONS,
   MARITAL_STATUS_OPTIONS,
@@ -71,10 +70,68 @@ defineExpose({ validate })
 
 <template>
   <div class="step-basic">
+    <NcCard title="户籍所在地" subtitle="（限本单位管辖范围）">
+      <div class="field-grid">
+        <label class="field">
+          <span class="field__label">省份</span>
+          <el-input v-model="basic.hukouProvince" placeholder="请选择或输入省份" />
+        </label>
+        <label class="field">
+          <span class="field__label">城市</span>
+          <el-input v-model="basic.hukouCity" placeholder="请选择或输入城市" />
+        </label>
+        <label class="field">
+          <span class="field__label">区县</span>
+          <el-input v-model="basic.hukouDistrict" placeholder="请选择或输入区县" />
+        </label>
+        <label class="field">
+          <span class="field__label">乡镇</span>
+          <el-input v-model="basic.hukouTown" placeholder="请选择或输入乡镇" />
+        </label>
+        <label class="field">
+          <span class="field__label">村社区</span>
+          <el-input v-model="basic.hukouVillage" placeholder="请选择或输入村社区" />
+        </label>
+        <label class="field field--full">
+          <span class="field__label">详细地址</span>
+          <el-input v-model="basic.hukouDetailAddress" placeholder="请输入详细地址（如：XX路XX号）" />
+        </label>
+      </div>
+    </NcCard>
+
     <NcCard
-      title="申请人信息"
-      subtitle="带 * 为必填项；身份证自动计算性别与年龄；姓名与身份证可在第 2 步同步为户主。"
+      title="申请人所在地址（家庭住址）"
+      subtitle="居住地全国可选（默认取本单位区划），不受户籍管辖范围限制"
     >
+      <div class="field-grid">
+        <label class="field">
+          <span class="field__label">省份</span>
+          <el-input v-model="basic.province" placeholder="请选择或输入省份" />
+        </label>
+        <label class="field">
+          <span class="field__label">城市</span>
+          <el-input v-model="basic.city" placeholder="请选择或输入城市" />
+        </label>
+        <label class="field">
+          <span class="field__label">区县</span>
+          <el-input v-model="basic.district" placeholder="请选择或输入区县" />
+        </label>
+        <label class="field">
+          <span class="field__label">乡镇社区</span>
+          <el-input v-model="basic.town" placeholder="请选择或输入乡镇社区" />
+        </label>
+        <label class="field">
+          <span class="field__label">村社区</span>
+          <el-input v-model="basic.village" placeholder="请选择或输入村社区" />
+        </label>
+        <label class="field field--full">
+          <span class="field__label">详细地址</span>
+          <el-input v-model="basic.address" placeholder="请输入详细地址（如：XX路XX号）" />
+        </label>
+      </div>
+    </NcCard>
+
+    <NcCard title="申请人信息">
       <el-form
         ref="formRef"
         :model="basic"
@@ -84,18 +141,6 @@ defineExpose({ validate })
         @submit.prevent
       >
         <div class="field-grid">
-          <el-form-item label="户口性质" prop="hukouType">
-            <el-radio-group v-model="basic.hukouType">
-              <el-radio-button
-                v-for="item in HUKOU_TYPE_OPTIONS"
-                :key="item.value"
-                :value="item.value"
-              >
-                {{ item.label }}
-              </el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-
           <el-form-item label="申请人姓名" prop="applicantName">
             <el-input
               v-model="basic.applicantName"
@@ -109,26 +154,36 @@ defineExpose({ validate })
             <el-input
               v-model="basic.applicantIdCard"
               maxlength="18"
-              placeholder="18 位身份证号"
+              placeholder="请输入 18 位身份证号"
+              clearable
+            />
+          </el-form-item>
+
+          <el-form-item label="残疾证号" prop="disabilityCardNo">
+            <el-input
+              v-model="basic.disabilityCardNo"
+              maxlength="30"
+              placeholder="无残疾可留空"
               clearable
             />
           </el-form-item>
 
           <el-form-item label="性别" prop="gender">
-            <el-select v-model="basic.gender" placeholder="身份证自动带出" clearable>
-              <el-option
-                v-for="item in GENDER_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
+            <el-input
+              :model-value="basic.gender"
+              readonly
+              placeholder="身份证自动带出"
+            />
           </el-form-item>
 
           <el-form-item label="年龄">
             <el-input :model-value="ageDisplay" readonly placeholder="身份证自动计算">
               <template #suffix>岁</template>
             </el-input>
+          </el-form-item>
+
+          <el-form-item label="联系电话" prop="phone">
+            <el-input v-model="basic.phone" maxlength="20" placeholder="请输入手机号或固定电话" clearable />
           </el-form-item>
 
           <el-form-item label="民族" prop="ethnicity">
@@ -148,17 +203,33 @@ defineExpose({ validate })
             </el-select>
           </el-form-item>
 
-          <el-form-item label="联系电话" prop="phone">
-            <el-input v-model="basic.phone" maxlength="20" placeholder="手机号或固定电话" clearable />
+          <el-form-item label="婚姻状况" prop="maritalStatus">
+            <el-select
+              v-model="basic.maritalStatus"
+              filterable
+              allow-create
+              default-first-option
+              clearable
+              placeholder="请选择或输入婚姻状况"
+            >
+              <el-option
+                v-for="item in MARITAL_STATUS_OPTIONS"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
           </el-form-item>
 
-          <el-form-item label="残疾证号" prop="disabilityCardNo">
-            <el-input
-              v-model="basic.disabilityCardNo"
-              maxlength="30"
-              placeholder="无残疾可留空"
-              clearable
-            />
+          <el-form-item label="户口性质" prop="hukouType">
+            <el-select v-model="basic.hukouType" placeholder="请选择户口性质">
+              <el-option
+                v-for="item in HUKOU_TYPE_OPTIONS"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
           </el-form-item>
 
           <el-form-item label="文化程度" prop="educationLevel">
@@ -168,28 +239,10 @@ defineExpose({ validate })
               allow-create
               default-first-option
               clearable
-              placeholder="请选择或输入"
+              placeholder="请选择或输入文化程度"
             >
               <el-option
                 v-for="item in EDUCATION_LEVEL_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item label="婚姻状况" prop="maritalStatus">
-            <el-select
-              v-model="basic.maritalStatus"
-              filterable
-              allow-create
-              default-first-option
-              clearable
-              placeholder="请选择或输入"
-            >
-              <el-option
-                v-for="item in MARITAL_STATUS_OPTIONS"
                 :key="item.value"
                 :label="item.label"
                 :value="item.value"
@@ -204,7 +257,7 @@ defineExpose({ validate })
               allow-create
               default-first-option
               clearable
-              placeholder="请选择或输入"
+              placeholder="请选择或输入政治面貌"
             >
               <el-option
                 v-for="item in POLITICAL_STATUS_OPTIONS"
@@ -215,155 +268,111 @@ defineExpose({ validate })
             </el-select>
           </el-form-item>
 
-          <el-form-item label="健康状态" prop="healthStatus">
-            <el-select
-              v-model="basic.healthStatus"
-              filterable
-              allow-create
-              default-first-option
-              clearable
-              placeholder="请选择或输入"
-            >
-              <el-option
-                v-for="item in HEALTH_STATUS_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item label="疾病名称" prop="diseaseName">
+          <el-form-item label="开户行" prop="bankName">
             <el-input
-              v-model="basic.diseaseName"
+              v-model="basic.bankName"
               maxlength="60"
-              placeholder="无疾病可留空"
+              placeholder="请输入银行卡开户行"
               clearable
             />
           </el-form-item>
 
-          <el-form-item label="残疾类型" prop="disabilityType">
-            <el-select
-              v-model="basic.disabilityType"
-              filterable
-              allow-create
-              default-first-option
+          <el-form-item label="银行卡号" prop="bankAccount">
+            <el-input
+              v-model="basic.bankAccount"
+              maxlength="32"
+              placeholder="请输入银行卡号"
               clearable
-              placeholder="无残疾可留空"
-            >
-              <el-option
-                v-for="item in DISABILITY_TYPE_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item label="残疾等级" prop="disabilityLevel">
-            <el-select
-              v-model="basic.disabilityLevel"
-              filterable
-              allow-create
-              default-first-option
-              clearable
-              placeholder="选择等级"
-            >
-              <el-option
-                v-for="item in DISABILITY_LEVEL_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item label="前 12 个月医疗自付（元）" prop="medicalSelfPaid12m">
-            <el-input-number
-              :model-value="basic.medicalSelfPaid12m"
-              :min="0"
-              :precision="2"
-              :controls="false"
-              placeholder="0.00"
-              @update:model-value="basic.medicalSelfPaid12m = $event ?? null"
             />
           </el-form-item>
         </div>
       </el-form>
     </NcCard>
 
-    <NcCard title="户籍地址" subtitle="按省 / 市 / 县 / 乡镇 / 村逐级填写。">
+    <NcCard title="健康与残疾信息">
       <div class="field-grid">
         <label class="field">
-          <span class="field__label">省</span>
-          <el-input v-model="basic.hukouProvince" placeholder="省" />
+          <span class="field__label">健康状态</span>
+          <el-select
+            v-model="basic.healthStatus"
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            placeholder="请选择或输入健康状态"
+          >
+            <el-option
+              v-for="item in HEALTH_STATUS_OPTIONS"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
         </label>
+
         <label class="field">
-          <span class="field__label">市</span>
-          <el-input v-model="basic.hukouCity" placeholder="市" />
+          <span class="field__label">残疾类型</span>
+          <el-select
+            v-model="basic.disabilityType"
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            placeholder="无残疾可留空"
+          >
+            <el-option
+              v-for="item in DISABILITY_TYPE_OPTIONS"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
         </label>
+
         <label class="field">
-          <span class="field__label">县 / 区</span>
-          <el-input v-model="basic.hukouDistrict" placeholder="县 / 区" />
+          <span class="field__label">残疾等级</span>
+          <el-select
+            v-model="basic.disabilityLevel"
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            placeholder="无残疾可留空"
+          >
+            <el-option
+              v-for="item in DISABILITY_LEVEL_OPTIONS"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
         </label>
-        <label class="field">
-          <span class="field__label">乡镇 / 街道</span>
-          <el-input v-model="basic.hukouTown" placeholder="乡镇 / 街道" />
+
+        <label class="field field--full">
+          <span class="field__label">疾病名称</span>
+          <el-input
+            v-model="basic.diseaseName"
+            maxlength="60"
+            placeholder="无疾病可留空"
+            clearable
+          />
         </label>
-        <label class="field">
-          <span class="field__label">村 / 社区</span>
-          <el-input v-model="basic.hukouVillage" placeholder="村 / 社区" />
-        </label>
-        <label class="field field--wide">
-          <span class="field__label">详细地址</span>
-          <el-input v-model="basic.hukouDetailAddress" placeholder="门牌号、组、屯等" />
+
+        <label class="field field--full">
+          <span class="field__label">前 12 个月医疗自付（元）</span>
+          <el-input-number
+            :model-value="basic.medicalSelfPaid12m"
+            :min="0"
+            :precision="2"
+            :controls="false"
+            placeholder="0.00"
+            @update:model-value="basic.medicalSelfPaid12m = $event ?? null"
+          />
         </label>
       </div>
     </NcCard>
 
-    <NcCard title="现居住地址" subtitle="与户籍地址不一致时据实填写。">
-      <div class="field-grid">
-        <label class="field">
-          <span class="field__label">省</span>
-          <el-input v-model="basic.province" placeholder="省" />
-        </label>
-        <label class="field">
-          <span class="field__label">市</span>
-          <el-input v-model="basic.city" placeholder="市" />
-        </label>
-        <label class="field">
-          <span class="field__label">县 / 区</span>
-          <el-input v-model="basic.district" placeholder="县 / 区" />
-        </label>
-        <label class="field">
-          <span class="field__label">乡镇 / 街道</span>
-          <el-input v-model="basic.town" placeholder="乡镇 / 街道" />
-        </label>
-        <label class="field">
-          <span class="field__label">村 / 社区</span>
-          <el-input v-model="basic.village" placeholder="村 / 社区" />
-        </label>
-        <label class="field field--wide">
-          <span class="field__label">详细地址</span>
-          <el-input v-model="basic.address" placeholder="门牌号、组、屯等" />
-        </label>
-      </div>
-    </NcCard>
-
-    <NcCard title="银行账户" subtitle="用于救助资金发放。">
-      <div class="field-grid">
-        <label class="field field--wide">
-          <span class="field__label">开户行</span>
-          <el-input v-model="basic.bankName" placeholder="如：中国农业银行林口县支行" />
-        </label>
-        <label class="field">
-          <span class="field__label">银行账号</span>
-          <el-input v-model="basic.bankAccount" maxlength="32" placeholder="银行卡号" />
-        </label>
-      </div>
-    </NcCard>
-
-    <NcCard title="申请说明" subtitle="说明申请原因与家庭主要困难。">
+    <NcCard title="其他信息">
       <div class="field-grid">
         <label class="field">
           <span class="field__label">申请原因</span>
@@ -372,7 +381,7 @@ defineExpose({ validate })
             filterable
             allow-create
             default-first-option
-            placeholder="请选择或输入"
+            placeholder="请选择或输入申请原因"
           >
             <el-option
               v-for="item in APPLICATION_REASON_OPTIONS"
@@ -383,7 +392,7 @@ defineExpose({ validate })
           </el-select>
         </label>
 
-        <label class="field field--wide">
+        <label class="field field--full">
           <span class="field__label">原因说明</span>
           <el-input
             v-model="basic.applicationReasonDetail"
@@ -395,7 +404,7 @@ defineExpose({ validate })
           />
         </label>
 
-        <label class="field field--wide">
+        <label class="field field--full">
           <span class="field__label">备注</span>
           <el-input
             v-model="basic.remark"
@@ -429,12 +438,12 @@ defineExpose({ validate })
 
 .field-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px 18px;
 }
 
-.field--wide {
-  grid-column: span 2;
+.field--full {
+  grid-column: 1 / -1;
 }
 
 .field {
@@ -452,17 +461,14 @@ defineExpose({ validate })
 }
 
 .field :deep(.el-select),
-.field :deep(.el-date-editor) {
+.field :deep(.el-date-editor),
+.field :deep(.el-input-number) {
   width: 100%;
 }
 
-@media (max-width: 1279px) {
+@media (min-width: 1440px) {
   .field-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .field--wide {
-    grid-column: span 2;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -470,10 +476,6 @@ defineExpose({ validate })
   .field-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 13px;
-  }
-
-  .field--wide {
-    grid-column: span 1;
   }
 }
 </style>
