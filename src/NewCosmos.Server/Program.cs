@@ -86,6 +86,7 @@ builder.Services.AddScoped<IUserService, UserService>();
 // Server 侧聚合服务。
 builder.Services.AddScoped<PrinterBindingService>();
 builder.Services.AddScoped<AgentDeviceService>();
+builder.Services.AddScoped<ApplicationQueryService>();
 builder.Services.AddSingleton<DatabaseMigrator>();
 
 var app = builder.Build();
@@ -109,6 +110,7 @@ app.UseMiddleware<SessionAuthenticationMiddleware>();
 app.MapAuthEndpoints();
 app.MapPrinterEndpoints();
 app.MapAgentEndpoints();
+app.MapApplicationEndpoints();
 app.MapSystemEndpoints();
 
 if (serverOptions.AutoMigrate)

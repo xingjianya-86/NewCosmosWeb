@@ -26,6 +26,18 @@ const router = createRouter({
           meta: { title: '首页' },
         },
         {
+          path: 'applications',
+          name: 'applications',
+          component: () => import('@/views/applications/ApplicationListView.vue'),
+          meta: { title: '申请管理' },
+        },
+        {
+          path: 'applications/:id',
+          name: 'application-detail',
+          component: () => import('@/views/applications/ApplicationDetailView.vue'),
+          meta: { title: '申请详情' },
+        },
+        {
           path: 'printers',
           name: 'printers',
           component: () => import('@/views/PrintersView.vue'),

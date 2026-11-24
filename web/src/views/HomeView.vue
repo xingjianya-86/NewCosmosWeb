@@ -4,13 +4,13 @@ import type { Component } from 'vue'
 import {
   ArrowRight,
   Clock,
+  Document,
   FolderOpened,
   Monitor,
   OfficeBuilding,
   Printer,
   Refresh,
   Setting,
-  Tickets,
   User,
 } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
@@ -113,12 +113,6 @@ const infoItems = computed<InfoItem[]>(() => [
 
 const quickItems: QuickItem[] = [
   {
-    title: '打印中心',
-    description: '发起打印任务并在绑定设备执行',
-    icon: Tickets,
-    tone: 'seal',
-  },
-  {
     title: '文档中心',
     description: '救助档案与业务附件统一管理',
     icon: FolderOpened,
@@ -202,6 +196,15 @@ async function refreshSession(): Promise<void> {
           <span class="quick-text">
             <strong>打印机绑定</strong>
             <small>管理本账号的设备与打印机</small>
+          </span>
+          <el-icon class="quick-arrow"><ArrowRight /></el-icon>
+        </RouterLink>
+
+        <RouterLink to="/applications" class="quick-card tone-pine">
+          <span class="quick-icon"><el-icon :size="22"><Document /></el-icon></span>
+          <span class="quick-text">
+            <strong>申请管理</strong>
+            <small>查看社会救助申请与家庭成员</small>
           </span>
           <el-icon class="quick-arrow"><ArrowRight /></el-icon>
         </RouterLink>

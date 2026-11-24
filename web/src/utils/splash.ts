@@ -1,19 +1,18 @@
 export const SPLASH_SEEN_KEY = 'nc.splash.seen'
 
-/** URL ?nosplash=1 或本次会话已播过时，不再启动动画。 */
+/** URL ?nosplash=1 时跳过启动动画。 */
 export function isSplashSuppressed(): boolean {
   if (typeof window === 'undefined') return true
-
-  const params = new URLSearchParams(window.location.search)
-  if (params.get('nosplash') === '1') return true
-
-  try {
-    return window.sessionStorage.getItem(SPLASH_SEEN_KEY) === '1'
-  } catch {
-    return false
-  }
+  return new URLSearchParams(window.location.search).get('nosplash') === '1'
 }
 
+/** URL ?splash=1 时强制重播（即使已登录）。 */
+export function isSplashForced(): boolean {
+  if (typeof window === 'undefined') return false
+  return new URLSearchParams(window.location.search).get('splash') === '1'
+}
+
+/** 保留给后续“每会话只播一次”策略；当前未登录每次启动都播。 */
 export function markSplashSeen(): void {
   try {
     window.sessionStorage.setItem(SPLASH_SEEN_KEY, '1')

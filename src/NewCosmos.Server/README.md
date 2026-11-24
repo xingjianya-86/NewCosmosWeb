@@ -1,6 +1,7 @@
 # NewCosmos.Server
 
 NewCosmos Web 的 ASP.NET Core 业务 API。P0 包含：认证、会话、心跳、登出、打印机按账户绑定、Agent 注册/心跳、健康检查。
+P1 起增加社会救助申请只读查询（列表/详情，见下文「P1 申请查询」）。
 
 - 目标框架：`net10.0`
 - 领域服务：引用 `src/NewCosmos.Core/NewCosmos.Core.csproj`
@@ -94,10 +95,29 @@ psql -h 127.0.0.1 -U newcosmos -d newcosmos -f Migrations/001_printer_binding.sq
 | POST | `/api/printers/{id}/default` | Bearer + X-NC-Device |
 | POST | `/api/agent/register` | `X-NC-Agent-Register` |
 | POST | `/api/agent/heartbeat` | `X-NC-Device-Key` |
+| GET | `/api/applications` | Bearer + X-NC-Device |
+| GET | `/api/applications/{id}` | Bearer + X-NC-Device |
 | GET | `/health` | 匿名 |
 | GET | `/info` | 匿名 |
 
 认证头：`Authorization: Bearer <sessionId>`；除匿名端点外还必须携带 `X-NC-Device`，并与创建会话时的 `deviceId` 一致。
+
+## P1 申请查询（只读）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/applications?page=1&pageSize=20&keyword=&status=` | 分页列表；`page` 从 1 开始，`pageSize` 1–100（越界按边界收敛），`keyword` 匹配申请人/家庭成员姓名与身份证，`status` 精确匹配状态码 |
+| GET | `/api/applications/{id}` | 详情（含家庭成员）；不存在返回 404 `NOT_FOUND` |
+
+字段与示例见 `docs/API_CONTRACT_APPLICATIONS.md`。实现约定：
+
+- 列表统一脱敏：`applicantIdCardMasked` 与 `applicantPhone` 走 Core `DataMasker`；完整身份证仅在详情返回。
+- `statusText` 中文映射：`Draft` 草稿、`Submitted` 已提交、`Approved` 已审批、`Completed` 已完成、`Stopped` 已停保、`Refused` 已驳回；其他状态回显原值。
+- 家庭成员 `age` 由 `birth_date` 实时计算周岁；`birthDate` 只输出日期（无时间部分）。
+- 查询只读 `nc_biz_applications` / `nc_biz_family_members`，均带 `deleted_at IS NULL`；列表 SQL 使用 `ApplicationColumns.Full` 显式列，禁止 `SELECT *`，全部值为 `$1..$n` 参数。
+- 未登录返回 401 `AUTH_REQUIRED`；数据库错误返回 500 `DB_ERROR`，未预期异常由统一中间件返回 500 `INTERNAL_ERROR`。
+- **暂无权限码校验**：P1 只校验登录会话，任何登录用户都可查询全部申请的列表与详情；按组织/乡镇的数据范围过滤与 403 权限码待权限中心接入后补齐（`ApplicationEndpoints` 已留 TODO）。
+- 尚未实现保存/提交等写接口（P1 只读阶段）。
 
 ## 打印机绑定规则
 

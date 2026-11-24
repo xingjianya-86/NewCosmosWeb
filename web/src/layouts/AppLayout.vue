@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import type { Component } from 'vue'
 import {
   ArrowDown,
+  Document,
   House,
   Menu as MenuIcon,
   MoreFilled,
@@ -24,6 +25,13 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { name: 'home', path: '/', title: '首页', shortTitle: '首页', icon: House },
+  {
+    name: 'applications',
+    path: '/applications',
+    title: '申请管理',
+    shortTitle: '申请',
+    icon: Document,
+  },
   { name: 'printers', path: '/printers', title: '打印机绑定', shortTitle: '打印机', icon: Printer },
 ]
 
@@ -33,11 +41,18 @@ const auth = useAuthStore()
 
 const drawerVisible = ref(false)
 const pageTitle = computed(() => route.meta.title ?? '')
-const activePath = computed(() => (route.path === '/' ? '/' : route.path))
+const activePath = computed(() => {
+  const matched = navItems.find((item) =>
+    item.path === '/'
+      ? route.path === '/'
+      : route.path === item.path || route.path.startsWith(`${item.path}/`),
+  )
+  return matched?.path ?? route.path
+})
 const avatarText = computed(() => auth.displayName.slice(0, 1).toUpperCase())
 const organization = computed(() => auth.user?.organizationName || '未设置组织')
 const expiresText = computed(() => formatDateTime(auth.expiresAt))
-const isMoreActive = computed(() => !navItems.some((item) => item.path === route.path))
+const isMoreActive = computed(() => !navItems.some((item) => item.path === activePath.value))
 
 const HEARTBEAT_INTERVAL = 60_000
 let heartbeatTimer: number | undefined
