@@ -32,6 +32,18 @@ const router = createRouter({
           meta: { title: '业务申请工作流' },
         },
         {
+          path: 'applications/new',
+          name: 'application-create',
+          component: () => import('@/views/applications/ApplicationFormView.vue'),
+          meta: { title: '低收入人口认定办理' },
+        },
+        {
+          path: 'applications/:id/edit',
+          name: 'application-edit',
+          component: () => import('@/views/applications/ApplicationFormView.vue'),
+          meta: { title: '低收入人口认定办理' },
+        },
+        {
           path: 'applications/:id',
           name: 'application-detail',
           component: () => import('@/views/applications/ApplicationDetailView.vue'),

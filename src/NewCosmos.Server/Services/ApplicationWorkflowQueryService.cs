@@ -302,6 +302,11 @@ public sealed class ApplicationWorkflowQueryService(
                 false,
                 null,
                 false,
+                null,
+                string.Empty,
+                string.Empty,
+                row.Status ?? string.Empty,
+                ApplicationQueryService.ToStatusText(row.Status),
                 null));
         }
 
@@ -404,7 +409,8 @@ public sealed class ApplicationWorkflowQueryService(
 
         var sql =
             $@"SELECT a.id, a.application_no, a.applicant_name, a.applicant_id_card,
-                      a.is_single_rescue, a.status, a.created_at, a.updated_at
+                      a.is_single_rescue, a.status, a.created_at, a.updated_at,
+                      a.classification_result, a.household_monthly_guarantee_amount
                FROM nc_biz_applications a
                {where}
                ORDER BY COALESCE(a.updated_at, a.created_at) DESC, a.id DESC
@@ -455,7 +461,14 @@ public sealed class ApplicationWorkflowQueryService(
                 graceEnd != default,
                 graceEnd == default ? null : $"渐退期至 {graceEnd:yyyy-MM-dd}",
                 false,
-                null));
+                null,
+                row.ClassificationResult ?? string.Empty,
+                string.IsNullOrEmpty(row.ClassificationResult)
+                    ? string.Empty
+                    : ClassificationConstants.ConvertFromCode(row.ClassificationResult),
+                row.Status ?? string.Empty,
+                ApplicationQueryService.ToStatusText(row.Status),
+                row.HouseholdMonthlyGuaranteeAmount));
         }
 
         var totalPages = (int)((totalCount + pageSize - 1) / pageSize);
@@ -552,6 +565,8 @@ public sealed class WorkflowApplicationRow
     public string? Status { get; set; }
     public DateTime? CreatedAt { get; set; }
     public DateTime? UpdatedAt { get; set; }
+    public string? ClassificationResult { get; set; }
+    public decimal? HouseholdMonthlyGuaranteeAmount { get; set; }
 }
 
 public sealed class WorkflowGraceRow

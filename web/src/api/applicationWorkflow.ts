@@ -21,3 +21,8 @@ export function listWorkflow(params: ListWorkflowParams): Promise<WorkflowListRe
     .get<WorkflowListResponse>('/social-assistance/workflow', { params })
     .then((response) => response.data)
 }
+
+/** 删除草稿申请（仅草稿阶段可用）。 */
+export async function deleteApplication(id: number): Promise<void> {
+  await apiHttp.delete(`/applications/${encodeURIComponent(String(id))}`)
+}

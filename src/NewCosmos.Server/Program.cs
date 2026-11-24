@@ -54,7 +54,7 @@ builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy => policy
         .WithOrigins(serverOptions.CorsOrigins)
-        .WithMethods("GET", "POST", "DELETE", "OPTIONS")
+        .WithMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
         .WithHeaders("Authorization", "Content-Type", "X-NC-Device", "X-NC-Device-Key")
         .WithExposedHeaders("traceId"));
 });
@@ -106,6 +106,21 @@ builder.Services.AddSingleton<IElderlyApplicationService, ElderlyApplicationServ
 builder.Services.AddSingleton<ICollegeStudentService, CollegeStudentService>();
 builder.Services.AddSingleton<IAssetVerificationService, AssetVerificationService>();
 
+// 低收入人口认定表单：复用 Core 业务服务，禁止在 Server 重抄收入/分类/保障金公式。
+builder.Services.AddSingleton<IPdfVerificationService, PdfVerificationService>();
+builder.Services.AddSingleton<ICapabilityAssessmentService, CapabilityAssessmentService>();
+builder.Services.AddSingleton<IGuaranteeAmountService, GuaranteeAmountService>();
+builder.Services.AddSingleton<IIncomeCalculationService, IncomeCalculationService>();
+builder.Services.AddSingleton<IOtherDifficultyLedgerService, OtherDifficultyLedgerService>();
+builder.Services.AddSingleton<IApplicationStatusService, ApplicationStatusService>();
+builder.Services.AddSingleton<IClassificationService, ClassificationService>();
+builder.Services.AddSingleton<IFamilyMemberService, FamilyMemberService>();
+builder.Services.AddSingleton<ISupporterService, SupporterService>();
+builder.Services.AddSingleton<IHouseholdSurveyService, HouseholdSurveyService>();
+builder.Services.AddSingleton<IEconomicDetailService, EconomicDetailService>();
+builder.Services.AddSingleton<IApplicationService, ApplicationService>();
+builder.Services.AddScoped<ApplicationFormService>();
+
 // Server 侧聚合服务。
 builder.Services.AddScoped<PrinterBindingService>();
 builder.Services.AddScoped<AgentDeviceService>();
@@ -139,6 +154,7 @@ app.MapApplicationEndpoints();
 app.MapDashboardEndpoints();
 app.MapSocialAssistanceEndpoints();
 app.MapApplicationWorkflowEndpoints();
+app.MapApplicationFormEndpoints();
 app.MapElderlyEndpoints();
 app.MapAssetVerificationEndpoints();
 app.MapSystemEndpoints();

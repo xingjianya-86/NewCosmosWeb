@@ -134,3 +134,26 @@
   - `GET /api/social-assistance/workflow?tab=0..4&page&pageSize&keyword`
   - 入口 `INCOME_VIEW`；资产 Tab 额外 `ASSET_VIEW`；全部叠加数据范围。
 - 按钮保留旧版外观：`查看档案` 可用；照片、档案制作、改期、编辑、删除点击提示「下一批开放」，不伪造写操作。
+## P3 低收入人口认定五步表单（2026-11-25）
+
+- 新增 `/applications/new`、`/applications/:id/edit` 五步认定表单：
+  - Step1 基本信息：申请人、户籍/居住地址、银行账户、申请原因。
+  - Step2 家庭成员：共同生活成员增删、户主同步、身份证校验、赡养/抚养/扶养人。
+  - Step3 经济状况：工资/经营/财产/转移/其他收入、赡养费、土地、补贴、刚性支出；收入由服务端 Core 口径重算。
+  - Step4 入户调查：调查日期/调查员/机构、申请原因、调查记录。
+  - Step5 分类认定：调用 Core `IClassificationService`，展示分类、是否符合、判定依据、月保障金/分类施保/护理补贴/合计、渐退期。
+- 新增接口：
+  - `GET /api/applications/{id}/form`
+  - `POST /api/applications/form`
+  - `PUT /api/applications/{id}/form`
+  - `POST /api/applications/{id}/classify`
+  - `POST /api/applications/{id}/complete`
+  - `DELETE /api/applications/{id}`
+  - 权限：VIEW/CREATE/EDIT/DELETE + 数据范围；创建人取登录会话。
+- 工作流按钮接线：
+  - 草稿「编辑」、已建档「档案制作」→ 表单编辑；
+  - 资产核查「档案制作」→ 新建表单（assetCheckId 提示）；
+  - 草稿「删除」→ 删除接口；
+  - 已完结卡片增加原分类、实际状态、月保障金。
+- 已用真实库冒烟：创建草稿 → 读取 → 分类认定 → 完成归档 → 删除草稿均通过；测试记录已清理。
+- 说明：本批 Step3 只保存收入/支出汇总，未逐项写入旧版经济明细子表；后续可继续补工资/经营/财产/土地逐项台账。

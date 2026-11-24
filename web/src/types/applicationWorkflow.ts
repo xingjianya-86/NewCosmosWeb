@@ -31,6 +31,11 @@ export interface WorkflowItem {
   graceNote: string | null
   hasBatchHint: boolean
   batchHintText: string | null
+  classificationResult: string
+  classificationText: string
+  archiveStatus: string
+  archiveStatusText: string
+  householdMonthlyGuaranteeAmount: number | null
 }
 
 export interface WorkflowListResponse {

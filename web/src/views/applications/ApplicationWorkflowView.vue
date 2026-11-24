@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowLeft,
   Calendar,
@@ -14,7 +14,7 @@ import {
   Search,
 } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
-import { getWorkflowSummary, listWorkflow } from '@/api/applicationWorkflow'
+import { deleteApplication, getWorkflowSummary, listWorkflow } from '@/api/applicationWorkflow'
 import type { WorkflowItem, WorkflowSummary } from '@/types/applicationWorkflow'
 import NcPageHeader from '@/components/NcPageHeader.vue'
 
@@ -219,7 +219,56 @@ function handleAction(action: CardAction, item: WorkflowItem): void {
     return
   }
 
+  if (action.key === 'edit' && item.kind === 'application') {
+    void router.push(`/applications/${item.id}/edit`)
+    return
+  }
+
+  if (action.key === 'archive') {
+    if (item.kind === 'asset') {
+      void router.push({
+        path: '/applications/new',
+        query: { assetCheckId: String(item.id) },
+      })
+    } else {
+      void router.push(`/applications/${item.id}/edit`)
+    }
+    return
+  }
+
+  if (action.key === 'delete' && activeTab.value === 2 && item.kind === 'application') {
+    void handleDelete(item)
+    return
+  }
+
   ElMessage.info(`「${action.label}」将在下一批开放`)
+}
+
+async function handleDelete(item: WorkflowItem): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除「${item.name}」的申请草稿吗？删除后不可恢复。`,
+      '删除草稿',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+
+  try {
+    await deleteApplication(item.id)
+    ElMessage.success('草稿已删除')
+    if (items.value.length === 1 && page.value > 1) {
+      page.value -= 1
+    }
+    await Promise.all([loadSummary(), load()])
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '删除失败'))
+  }
 }
 
 function formatTime(value: string | null): string {
@@ -228,6 +277,14 @@ function formatTime(value: string | null): string {
   if (Number.isNaN(date.getTime())) return value
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function formatAmount(value: number | null): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—'
+  return `${value.toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })} 元`
 }
 
 function addressText(item: WorkflowItem): string {
@@ -361,6 +418,24 @@ onMounted(() => {
               <span>申请添加时间</span>
               <strong>{{ formatTime(item.createdAt) }}</strong>
             </div>
+            <template v-if="item.kind === 'application'">
+              <div v-if="activeTab === 4">
+                <span>原分类</span>
+                <strong>{{ item.classificationText || '—' }}</strong>
+              </div>
+              <div v-if="activeTab === 4">
+                <span>状态</span>
+                <strong>{{ item.archiveStatusText || '—' }}</strong>
+              </div>
+              <div v-if="activeTab === 4">
+                <span>月保障金</span>
+                <strong>{{ formatAmount(item.householdMonthlyGuaranteeAmount) }}</strong>
+              </div>
+              <div v-else-if="item.classificationText">
+                <span>原分类</span>
+                <strong>{{ item.classificationText }}</strong>
+              </div>
+            </template>
           </div>
 
           <div v-if="item.kind === 'asset'" class="workflow-card__address">

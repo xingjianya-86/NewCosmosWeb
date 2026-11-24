@@ -35,7 +35,12 @@ public sealed record WorkflowItemDto(
     bool HasGraceNote,
     string? GraceNote,
     bool HasBatchHint,
-    string? BatchHintText);
+    string? BatchHintText,
+    string ClassificationResult,
+    string ClassificationText,
+    string ArchiveStatus,
+    string ArchiveStatusText,
+    decimal? HouseholdMonthlyGuaranteeAmount);
 
 public sealed record WorkflowListResponse(
     IReadOnlyList<WorkflowItemDto> Items,
