@@ -128,7 +128,7 @@ watchEffect(() => {
 
       <div class="placeholder-actions">
         <RouterLink to="/" class="primary-link">返回工作台</RouterLink>
-        <RouterLink to="/applications" class="plain-link">前往申请管理</RouterLink>
+        <RouterLink to="/applications" class="plain-link">前往业务申请</RouterLink>
       </div>
     </section>
   </div>

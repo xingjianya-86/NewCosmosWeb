@@ -110,6 +110,7 @@ builder.Services.AddSingleton<IAssetVerificationService, AssetVerificationServic
 builder.Services.AddScoped<PrinterBindingService>();
 builder.Services.AddScoped<AgentDeviceService>();
 builder.Services.AddScoped<ApplicationQueryService>();
+builder.Services.AddScoped<ApplicationWorkflowQueryService>();
 builder.Services.AddScoped<DataScopeFilterBuilder>();
 builder.Services.AddSingleton<DatabaseMigrator>();
 
@@ -137,6 +138,7 @@ app.MapAgentEndpoints();
 app.MapApplicationEndpoints();
 app.MapDashboardEndpoints();
 app.MapSocialAssistanceEndpoints();
+app.MapApplicationWorkflowEndpoints();
 app.MapElderlyEndpoints();
 app.MapAssetVerificationEndpoints();
 app.MapSystemEndpoints();

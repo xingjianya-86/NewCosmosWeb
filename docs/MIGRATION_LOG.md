@@ -119,3 +119,18 @@
   - 村经办人（role=VILLAGE_CLERK，org village_id=910470）数据范围实测：申请 4、 高龄 6、核对 27，与库内该村数量一致；
   - 三个模块首页与列表已截图走查。
 - 部署：`.2` 服务器镜像 `newcosmos-server:20261124235325`，`/info` 返回 `2.0.20261124`；Web 新 assets 与 `.1` index 已更新（`index-Xyi0EXhz.js`）。
+## P2.1 业务申请工作流与全宽布局（2026-11-25）
+
+- 全局业务页取消 `1180px` 居中限宽：`--nc-content-max` 改为 `100%`，`.nc-page` 内边距统一 20px；2016px 窗口下内容区由 1180px 恢复为约 1806px，与旧桌面端一致。
+- 删除旧 `web/src/views/applications/ApplicationListView.vue`（通用申请档案表格）。
+- `/applications` 改为「业务申请工作流」，1:1 对齐 legacy `Pages/SocialAssistance/ApplicationWorkflowPage.xaml`：
+  - 五阶段 Tab：已提交经济核对 / 有报告未建档 / 草稿 / 已建档未提交 / 已完结；
+  - 阶段计数徽标、全宽搜索、整行流程卡（姓名/状态/身份证/关系或编号/申请时间/家庭地址）、分页；
+  - 资产核查两个 Tab 仅统计户主（`is_head=true`），计数实测 17 / 48；
+  - 草稿 2、已建档未提交 1、已完结 50；
+  - 资产关系代码映射为中文（Head→本人/户主，Spouse→配偶等）；渐退期角标从 `nc_biz_grace_periods` 读取。
+- 新增接口：
+  - `GET /api/social-assistance/workflow/summary`
+  - `GET /api/social-assistance/workflow?tab=0..4&page&pageSize&keyword`
+  - 入口 `INCOME_VIEW`；资产 Tab 额外 `ASSET_VIEW`；全部叠加数据范围。
+- 按钮保留旧版外观：`查看档案` 可用；照片、档案制作、改期、编辑、删除点击提示「下一批开放」，不伪造写操作。

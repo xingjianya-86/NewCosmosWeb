@@ -28,8 +28,8 @@ const router = createRouter({
         {
           path: 'applications',
           name: 'applications',
-          component: () => import('@/views/applications/ApplicationListView.vue'),
-          meta: { title: '低收入人口救助帮扶' },
+          component: () => import('@/views/applications/ApplicationWorkflowView.vue'),
+          meta: { title: '业务申请工作流' },
         },
         {
           path: 'applications/:id',
