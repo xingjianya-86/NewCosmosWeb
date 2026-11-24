@@ -1,0 +1,1836 @@
+using System.Text;
+using System.Text.Json;
+using NewCosmos.Constants;
+using NewCosmos.Helpers;
+using NewCosmos.Models.Entities;
+using NewCosmos.Models.Enums;
+using NewCosmos.Models.Results;
+using NewCosmos.Services.Core;
+using NewCosmos.Services.Database;
+using NewCosmos.Services.Domain.SocialAssistance;
+using NewCosmos.Services.Domain.TempRelief;
+using NewCosmos.Services.System;
+
+namespace NewCosmos.Services.Domain.Reporting;
+
+public partial class MonthlyReportService
+{
+
+    /// <summary>
+    /// 分类施保增发（低保导入库）：本月年满 60 周岁（身份证生日落在 [本月1日, 下月1日)）且
+    /// 未享受分类施保（total_classified_amount=0）的成员所在家庭，户级每户一页。
+    /// 户级入选判断 + Count/Amount/ClassifiedType 以"符合增发条件的成员"为准（保持月报补充设定口径）；
+    /// 家庭成员明细（Members 1~6）展示该户非户主成员（户主信息已在表头上方单独填写，与档案模板15 同语义）。
+    /// 加发额度 = 符合人数 × 分类施保标准（Rural/Urban，IStandardConfigService，失败回退 104/142）。
+    /// 首次调用实时计算并落库快照（nc_biz_monthly_classified_adds）；当月已落库后直接读库返回，
+    /// 锁死当月快照，保证重复打印一致且可历史溯源。
+    /// </summary>
+    public async Task<Result<List<MonthlyClassifiedAddRow>>> GetClassifiedSubsidyAddRowsAsync(int year, int month, CancellationToken ct = default)
+    {
+        // 已落库快照优先（当月确定后锁死，重复打印不重算、不受低保导入库后续变化影响）
+        var saved = await GetClassifiedSubsidyAddsHistoryAsync(year, month, ct);
+        if (saved.IsFailure)
+            return Result.Failure<List<MonthlyClassifiedAddRow>>(saved.ErrorCode!, saved.Message!);
+        if (saved.Value is { Count: > 0 })
+            return saved;
+
+        var computed = await ComputeClassifiedSubsidyAddRowsAsync(year, month, ct);
+        if (computed.IsFailure)
+            return computed;
+        var rows = computed.Value ?? new List<MonthlyClassifiedAddRow>();
+        if (rows.Count == 0)
+            return Result.Success(rows);
+
+        var saveResult = await SaveClassifiedSubsidyAddsAsync(year, month, "全部", rows, ct);
+        if (saveResult.IsFailure)
+            return Result.Failure<List<MonthlyClassifiedAddRow>>(saveResult.ErrorCode!, saveResult.Message!);
+
+        LogInfo($"分类施保增发明细落库: {year}年{month}月 {rows.Count} 户");
+        return Result.Success(rows);
+    }
+
+    /// <summary>
+    /// 显式落库分类施保增发明细快照（幂等：同 year+month+applicant_id_card 冲突则忽略）。返回是否产生新写入。
+    /// </summary>
+    public async Task<Result<bool>> SaveClassifiedSubsidyAddsAsync(int year, int month, string town, List<MonthlyClassifiedAddRow> rows, CancellationToken ct = default)
+    {
+        if (rows == null || rows.Count == 0)
+            return Result.Success(false);
+
+        var inserted = 0;
+        const int chunkSize = 400; // 18 参数/行 × 400 ≈ 7200，低于 PG 单语句 65535 参数上限
+
+        for (var start = 0; start < rows.Count; start += chunkSize)
+        {
+            var chunk = rows.Skip(start).Take(chunkSize).ToList();
+            var (valuesClause, args) = MultiRowValuesBuilder.Build(chunk.Count, 18, i =>
+            {
+                var r = chunk[i];
+                var membersJson = JsonSerializer.Serialize(r.Members ?? new List<MonthlyClassifiedMember>());
+                return new object?[]
+                {
+                    year, month, town,
+                    r.Classification ?? "最低生活保障对象",
+                    r.IsRural,
+                    r.ApplicantIdCard ?? "",
+                    r.ApplicantName ?? "",
+                    r.ApplicantGender ?? "",
+                    r.ApplicantBirthDate ?? "",
+                    r.Nationality ?? "",
+                    r.HealthStatus ?? "",
+                    int.TryParse(r.FamilySize, out var fs) ? fs : 0,
+                    r.Phone ?? "",
+                    r.Address ?? "",
+                    r.ClassifiedType ?? "",
+                    r.Count,
+                    r.Amount,
+                    membersJson
+                };
+            }, o =>
+            {
+                var p = o;
+                var sb = new StringBuilder("(");
+                for (var k = 0; k < 18; k++)
+                {
+                    if (k > 0) sb.Append(", ");
+                    sb.Append('$').Append(p + k);
+                }
+                sb.Append("::jsonb, NOW())");
+                return sb.ToString();
+            });
+
+            var chunkSql = @"INSERT INTO nc_biz_monthly_classified_adds
+                (year, month, town, category, is_rural, applicant_id_card, applicant_name, applicant_gender,
+                 applicant_birth_date, nationality, health_status, family_size, phone, address,
+                 classified_type, count, amount, members_json, created_at)
+                VALUES " + valuesClause + @"
+                ON CONFLICT (year, month, applicant_id_card) DO NOTHING
+                RETURNING id";
+            var result = await _db.QueryAsync<long>(chunkSql, ct, args);
+            if (result.IsFailure)
+                return Result.Failure<bool>(result.ErrorCode!, result.Message!);
+            inserted += result.Value?.Count ?? 0;
+        }
+
+        return Result.Success(inserted > 0);
+    }
+
+    /// <summary>
+    /// 分类施保增发明细历史溯源（读 nc_biz_monthly_classified_adds 快照，按 applicant_name 排序）
+    /// </summary>
+    public async Task<Result<List<MonthlyClassifiedAddRow>>> GetClassifiedSubsidyAddsHistoryAsync(int year, int month, CancellationToken ct = default)
+    {
+        var sql = @"SELECT category, is_rural, applicant_id_card, applicant_name, applicant_gender,
+                           applicant_birth_date, nationality, health_status, family_size, phone, address,
+                           classified_type, count, amount, members_json
+                    FROM nc_biz_monthly_classified_adds
+                    WHERE year = $1 AND month = $2
+                    ORDER BY applicant_name";
+        var result = await _db.QueryAsync<ClassifiedAddSnapshotRow>(sql, ct, year, month);
+        if (result.IsFailure)
+            return Result.Failure<List<MonthlyClassifiedAddRow>>(result.ErrorCode!, result.Message!);
+
+        var rows = new List<MonthlyClassifiedAddRow>();
+        foreach (var s in result.Value ?? new List<ClassifiedAddSnapshotRow>())
+        {
+            var members = new List<MonthlyClassifiedMember>();
+            if (!string.IsNullOrWhiteSpace(s.MembersJson))
+            {
+                try
+                {
+                    members = JsonSerializer.Deserialize<List<MonthlyClassifiedMember>>(s.MembersJson)
+                              ?? new List<MonthlyClassifiedMember>();
+                }
+                catch (JsonException)
+                {
+                    LogWarn($"分类施保增发快照 members_json 解析失败: Year={year} Month={month} Applicant={DataMasker.MaskIdCard(s.ApplicantIdCard ?? string.Empty)}");
+                }
+            }
+            rows.Add(new MonthlyClassifiedAddRow
+            {
+                Classification = s.Category ?? "",
+                ApplicantName = s.ApplicantName ?? "",
+                ApplicantGender = s.ApplicantGender ?? "",
+                ApplicantBirthDate = s.ApplicantBirthDate ?? "",
+                Nationality = s.Nationality ?? "",
+                HealthStatus = s.HealthStatus ?? "",
+                FamilySize = s.FamilySize?.ToString() ?? "",
+                Phone = s.Phone ?? "",
+                Address = s.Address ?? "",
+                ApplicantIdCard = s.ApplicantIdCard ?? "",
+                ClassifiedType = s.ClassifiedType ?? "",
+                Count = s.Count ?? 0,
+                Amount = s.Amount ?? 0,
+                Members = members
+            });
+        }
+        return Result.Success(rows);
+    }
+
+    /// <summary>
+    /// 实时计算分类施保增发明细（CTE 先定位符合条件户，再查出这些户的全部成员；满 60 周岁在内存精确判定）
+    /// </summary>
+    private async Task<Result<List<MonthlyClassifiedAddRow>>> ComputeClassifiedSubsidyAddRowsAsync(int year, int month, CancellationToken ct = default)
+    {
+        var monthStart = new DateTime(year, month, 1);               // 本月1日
+        var monthEnd = monthStart.AddMonths(1);                      // 下月1日（满 60 周岁生日不在此区间）
+
+        // [索引豁免] EXTRACT(MONTH FROM birth_date)=$1 是"生日月份匹配"（任意年份的该月）语义，
+        // 不存在等价的时间范围改写；CTE 粗筛 + 内存精确判定满 60，低频且数据规模有限。
+        var sql = @"WITH matched AS (
+                         SELECT DISTINCT p.family_id
+                         FROM nc_biz_rural_subsistence_persons p
+                         JOIN nc_biz_rural_subsistence_families f ON f.id = p.family_id
+                         WHERE COALESCE(p.total_classified_amount, 0) = 0
+                           AND p.birth_date IS NOT NULL
+                           AND EXTRACT(MONTH FROM p.birth_date) = $1::int
+                           -- [索引豁免] 出生月筛选无对应列；月报名单为月度低频、台账行数有限
+                         UNION
+                         SELECT DISTINCT p.family_id
+                         FROM nc_biz_urban_subsistence_persons p
+                         JOIN nc_biz_urban_subsistence_families f ON f.id = p.family_id
+                         WHERE COALESCE(p.total_classified_amount, 0) = 0
+                           AND p.birth_date IS NOT NULL
+                           AND EXTRACT(MONTH FROM p.birth_date) = $1::int
+                           -- [索引豁免] 出生月筛选无对应列；月报名单为月度低频、台账行数有限
+                     )
+                     SELECT '最低生活保障对象' AS category,
+                            f.applicant_name, f.applicant_id_card, f.phone, f.family_size,
+                            f.address, f.district, f.street, f.community,
+                            p.name AS member_name, p.gender, p.birth_date, p.ethnicity,
+                            p.health_status, p.disability_type, p.disability_level, p.relationship, p.annual_income, p.id_card AS member_id_card,
+                            COALESCE(p.total_classified_amount, 0) AS total_classified_amount,
+                            TRUE AS is_rural
+                     FROM nc_biz_rural_subsistence_families f
+                     JOIN nc_biz_rural_subsistence_persons p ON p.family_id = f.id
+                     WHERE f.id IN (SELECT family_id FROM matched)
+                     UNION ALL
+                     SELECT '最低生活保障对象' AS category,
+                            f.applicant_name, f.applicant_id_card, f.phone, f.family_size,
+                            f.address, f.district, f.street, f.community,
+                            p.name AS member_name, p.gender, p.birth_date, p.ethnicity,
+                            p.health_status, p.disability_type, p.disability_level, p.relationship, p.monthly_income * 12 AS annual_income, p.id_card AS member_id_card,
+                            COALESCE(p.total_classified_amount, 0) AS total_classified_amount,
+                            FALSE AS is_rural
+                     FROM nc_biz_urban_subsistence_families f
+                     JOIN nc_biz_urban_subsistence_persons p ON p.family_id = f.id
+                     WHERE f.id IN (SELECT family_id FROM matched)";
+        var result = await _db.QueryAsync<ClassifiedAddPersonRow>(sql, ct, month);
+        if (result.IsFailure)
+            return Result.Failure<List<MonthlyClassifiedAddRow>>(result.ErrorCode!, result.Message!);
+
+        // 初次享受日期统一：导入库建档户取纳入时间、其余取首次审批时间（LoadApprovalDateMapAsync），与施保金减发同口径（不影响字段展示，仅留档）
+        var persons = result.Value ?? new List<ClassifiedAddPersonRow>();
+
+        // 符合增发条件成员：身份证生日（回退 birth_date）落在 [本月1日, 下月1日) 且未享受分类施保，
+        // 与分类施保减发（满 18 周岁）同构；仅用于户级入选判断与 Count/Amount/ClassifiedType。
+        var qualified = persons
+            .Where(m => m.TotalClassifiedAmount == 0
+                        && (IdCardValidator.ExtractBirthDate(m.MemberIdCard ?? "") ?? m.BirthDate) is { } birth
+                        && birth.AddYears(60) >= monthStart
+                        && birth.AddYears(60) < monthEnd)
+            .ToList();
+        if (qualified.Count == 0)
+            return Result.Success(new List<MonthlyClassifiedAddRow>());
+
+        var rows = new List<MonthlyClassifiedAddRow>();
+        var grouped = persons.GroupBy(p => (Category: p.Category ?? "", ApplicantIdCard: p.ApplicantIdCard ?? "", IsRural: p.IsRural));
+
+        // 分类施保标准（农村/城市，单点取自 IStandardConfigService，与 ClassificationService 同源；失败显式失败，不用过期回退值）
+        var ruralStandardResult = await _standardConfigService.GetStandardValueAsync("ClassifiedSubsidyStandard", "Rural", ct: ct);
+        var urbanStandardResult = await _standardConfigService.GetStandardValueAsync("ClassifiedSubsidyStandard", "Urban", ct: ct);
+        if (ruralStandardResult.IsFailure || urbanStandardResult.IsFailure
+            || ruralStandardResult.Value <= 0 || urbanStandardResult.Value <= 0)
+        {
+            var failMsg = ruralStandardResult.IsFailure ? ruralStandardResult.Message : urbanStandardResult.Message;
+            LogError($"分类施保标准读取失败: {failMsg}");
+            return Result.Failure<List<MonthlyClassifiedAddRow>>(ErrorCodes.CONFIG_NOT_FOUND,
+                $"分类补贴标准配置缺失：{failMsg}。请在「数据中心-标准配置管理」中维护。");
+        }
+        var ruralStandard = ruralStandardResult.Value;
+        var urbanStandard = urbanStandardResult.Value;
+
+        foreach (var group in grouped)
+        {
+            var list = group.OrderBy(m => m.Relationship == "Head" ? 0 : 1)
+                            .ThenBy(m => RelationOrder(m.Relationship ?? ""))
+                            .ThenBy(m => m.BirthDate ?? DateTime.MaxValue)
+                            .ThenBy(m => m.MemberIdCard ?? "")
+                            .ToList();
+
+            // 户级入选判断 + Count/Amount/ClassifiedType 以"符合增发条件成员"为准（月报补充设定口径）
+            var qualifiedInFamily = qualified
+                .Where(q => q.ApplicantIdCard == group.Key.ApplicantIdCard && q.IsRural == group.Key.IsRural)
+                .ToList();
+            if (qualifiedInFamily.Count == 0)
+                continue;
+
+            var head = list.FirstOrDefault(m => m.Relationship == "Head") ?? list.FirstOrDefault() ?? list[0];
+            var isRural = group.Key.IsRural;
+            var standard = isRural ? ruralStandard : urbanStandard;
+
+            var row = new MonthlyClassifiedAddRow
+            {
+                ApplicantName = group.First().ApplicantName ?? "",
+                ApplicantGender = head.Gender ?? "",
+                ApplicantBirthDate = FormatChineseDate(head.BirthDate),
+                Nationality = MapEthnicity(head.Ethnicity ?? ""),
+                HealthStatus = MapHealthStatus(head.HealthStatus ?? ""),
+                Classification = group.Key.Category ?? "",
+                FamilySize = (group.First().FamilySize ?? 0).ToString(),
+                Phone = group.First().Phone ?? "",
+                Address = JoinFullAddress(group.First().District, group.First().Street ?? group.First().Town, group.First().Community, group.First().Address),
+                ApplicantIdCard = head.MemberIdCard ?? group.Key.ApplicantIdCard ?? "",
+                ClassifiedType = BuildClassifiedType(qualifiedInFamily, monthStart),
+                Count = qualifiedInFamily.Count,
+                Amount = qualifiedInFamily.Count * standard,
+                IsRural = group.Key.IsRural,
+                Members = list.Where(m => m.Relationship != "Head")
+                              .Take(6)
+                              .Select(m => new MonthlyClassifiedMember
+                {
+                    Name = m.MemberName ?? "",
+                    Gender = m.Gender ?? "",
+                    BirthDate = FormatChineseDate(m.BirthDate),
+                    Relation = MapFamilyRelationship(m.Relationship ?? ""),
+                    Health = MapHealthStatus(m.HealthStatus ?? ""),
+                    MonthlyIncome = Math.Round((m.AnnualIncome ?? 0) / 12m, 2, MidpointRounding.AwayFromZero),
+                    AnnualIncome = m.AnnualIncome ?? 0
+                }).ToList()
+            };
+            rows.Add(row);
+        }
+
+        return Result.Success(rows.OrderBy(r => r.Classification).ThenBy(r => r.ApplicantName).ToList());
+    }
+
+    /// <summary>
+    /// 民族码 → 中文（与 nc_dict_items Ethnicities 字典一致；未知回退原值）
+    /// </summary>
+    private static string MapEthnicity(string code)
+        => code switch
+        {
+            "Han" => "汉族",
+            "Mongol" => "蒙古族",
+            "Hui" => "回族",
+            "Tibetan" => "藏族",
+            "Uyghur" => "维吾尔族",
+            "Miao" => "苗族",
+            "Yi" => "彝族",
+            "Zhuang" => "壮族",
+            "Bouyei" => "布依族",
+            "Korean" => "朝鲜族",
+            "Manchu" => "满族",
+            "Dong" => "侗族",
+            "Yao" => "瑶族",
+            "Bai" => "白族",
+            "Tujia" => "土家族",
+            "Hani" => "哈尼族",
+            "Dai" => "傣族",
+            "Li" => "黎族",
+            "Other" => "其他",
+            _ => code
+        };
+
+    /// <summary>
+    /// 与户主关系码 → 中文（与 nc_dict_items FamilyRelationships 字典一致；未知回退原值）
+    /// </summary>
+    private static string MapFamilyRelationship(string code)
+        => code switch
+        {
+            "Head" => "本人/户主",
+            "Spouse" => "配偶",
+            "Son" => "子/婿",
+            "Daughter" => "女/媳",
+            "Grandchild" => "孙子女/外孙子女",
+            "Parent" => "父母/岳父母/公婆",
+            "Grandparent" => "祖父母/外祖父母",
+            "Sibling" => "兄弟姐妹",
+            "Other" => "其他",
+            _ => code
+        };
+
+    /// <summary>
+    /// 成员排序权重（户主之后：配偶→子女→父母→祖辈→孙辈→兄弟姐妹→其他）
+    /// </summary>
+    private static int RelationOrder(string relationship)
+        => relationship switch
+        {
+            "Spouse" => 1,
+            "Son" or "Daughter" => 2,
+            "Parent" => 3,
+            "Grandparent" => 4,
+            "Grandchild" => 5,
+            "Sibling" => 6,
+            _ => 7
+        };
+
+    /// <summary>
+    /// 日期 → yyyy年MM月dd日（空值回退空串）
+    /// </summary>
+    private static string FormatChineseDate(DateTime? date)
+        => date.HasValue ? date.Value.ToString("yyyy年MM月dd日") : string.Empty;
+
+    /// <summary>
+    /// 拆分导入库成员（分号分隔；含户主本人，去重）
+    /// </summary>
+    private static List<(string Name, string IdCard)> ParseShiBaoMembers(ShiBaoFamilyRow family)
+    {
+        var members = new List<(string Name, string IdCard)>();
+        if (!string.IsNullOrWhiteSpace(family.ApplicantIdCard))
+            members.Add((family.ApplicantName?.Trim() ?? "", family.ApplicantIdCard.Trim()));
+
+        var names = (family.MemberNames ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var ids = (family.MemberIdCards ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (names.Length == 0 && ids.Length == 0) return members;
+
+        for (var i = 0; i < Math.Max(names.Length, ids.Length); i++)
+        {
+            var name = i < names.Length ? names[i] : "";
+            var id = i < ids.Length ? ids[i] : "";
+            if (string.IsNullOrWhiteSpace(id)) continue;
+            if (members.Any(x => string.Equals(x.IdCard, id, StringComparison.OrdinalIgnoreCase))) continue;
+            members.Add((name, id));
+        }
+        return members;
+    }
+
+    public async Task<Result<List<MonthlyDeathRow>>> GetDeathRowsAsync(int year, int month, string town, string? category = null, CancellationToken ct = default)
+    {
+        var cycle = await GetCycleRangeAsync(year, month, ct);
+        if (cycle.IsFailure) return Result.Failure<List<MonthlyDeathRow>>(cycle.ErrorCode!, cycle.Message!);
+        var c = cycle.Value;
+
+        var codes = CategoryCodes(category);
+        var parameters = new List<object> { c.Start, c.End, town ?? "" };
+        var categorySql = string.Empty;
+        if (codes != null)
+        {
+            parameters.Add(codes);
+            categorySql = " AND a.classification_result = ANY($4::text[])";
+        }
+
+        // 死亡记录表无乡镇列，乡镇过滤借道 nc_biz_applications.town（join application_id）
+        // 2026-11-08 P1-7 双源合并：「只申报未办变更」的死亡也计入月报死亡人数——
+        //   源① nc_biz_death_records（既有口径，已办变更）；
+        //   源② nc_biz_death_declarations（未作废、且该身份证在源①无任何登记 → NOT EXISTS 按人去重防双计，
+        //       归属月份以登记为准、无登记时以申报为准）。
+        //   申报无关联档案时：户主列回落死者本人、乡镇借道 nc_regions_towns（town_id）、分类为空
+        //   （带分类过滤时无档案申报天然被排除——无分类可归组）。
+        var sql = $@"(
+            SELECT a.applicant_name AS head_name, a.applicant_id_card AS head_id_card,
+                   a.address, d.member_name AS deceased_name, d.member_id_card,
+                   d.death_date, d.new_head_name,
+                   a.classification_result, a.district, a.town, a.community
+            FROM nc_biz_death_records d
+            LEFT JOIN nc_biz_applications a ON d.application_id = a.id
+            WHERE d.death_date >= $1 AND d.death_date < $2
+              AND ($3 = '' OR a.town = $3)
+              {categorySql}
+        )
+        UNION ALL
+        (
+            SELECT COALESCE(a.applicant_name, s.deceased_name) AS head_name,
+                   COALESCE(a.applicant_id_card, s.deceased_id_card) AS head_id_card,
+                   a.address, s.deceased_name, s.deceased_id_card,
+                   s.death_date, ''::text AS new_head_name,
+                   a.classification_result, a.district,
+                   COALESCE(a.town, rt.town_name) AS town, a.community
+            FROM nc_biz_death_declarations s
+            LEFT JOIN nc_biz_applications a ON a.id = s.application_id AND a.deleted_at IS NULL
+            LEFT JOIN nc_regions_towns rt ON rt.id = s.town_id
+            WHERE s.death_date >= $1 AND s.death_date < $2
+              AND s.deleted_at IS NULL AND s.status <> 'Revoked'
+              AND NOT EXISTS (SELECT 1 FROM nc_biz_death_records d2
+                              WHERE d2.member_id_card = s.deceased_id_card)
+              AND ($3 = '' OR COALESCE(a.town, rt.town_name) = $3)
+              {categorySql}
+        )
+        ORDER BY death_date ASC";
+        var result = await _db.QueryAsync<DeathRow>(sql, ct, parameters.ToArray());
+        if (result.IsFailure)
+            return Result.Failure<List<MonthlyDeathRow>>(result.ErrorCode!, result.Message!);
+
+        var rows = result.Value ?? new List<DeathRow>();
+        var dateMapResult = await LoadApprovalDateMapAsync(rows.Select(r => r.HeadIdCard), ct);
+        if (dateMapResult.IsFailure)
+            return Result.Failure<List<MonthlyDeathRow>>(dateMapResult.ErrorCode!, dateMapResult.Message!);
+        var dateMap = dateMapResult.Value;
+        var cycleEnd = c.End.AddDays(-1);
+
+        var outRows = new List<MonthlyDeathRow>();
+        foreach (var item in rows)
+        {
+            var enjoy = dateMap.TryGetValue(item.HeadIdCard ?? "", out var dt) ? dt : cycleEnd.ToString("yyyy-MM-dd");
+            outRows.Add(new MonthlyDeathRow
+            {
+                HeadName = item.HeadName ?? "",
+                HeadIdCard = item.HeadIdCard ?? "",
+                Address = JoinFullAddress(item.District, item.Town, item.Community, item.Address),
+                DeceasedName = item.DeceasedName ?? "",
+                DeceasedDate = item.DeathDate?.ToString("yyyy-MM-dd") ?? "",
+                EnjoyDate = enjoy,
+                NewHeadName = item.NewHeadName ?? "",
+                CategoryCode = item.ClassificationResult ?? "",
+                IsRural = ClassificationConstants.IsCodeRural(item.ClassificationResult ?? "")
+            });
+        }
+        return Result.Success(outRows);
+    }
+
+    /// <summary>
+    /// 退出对象兜底纠治表（表 7）。
+    /// 退出对象识别（本月周期）：停保(status=ApplicationStatusCodes.STOPPED，排除停旧建新接续与真·首拒档) + 渐退期满(grace_periods.end_date，仅已生效档案) + 经济复核降档(change_records.triggered_grace_period，排除户主死亡/分类施保减除)。
+    /// 核查列：给予渐退期(事件日期落在渐退期内，连带下游接续档案匹配)；纳入低保/特困/低保边缘/刚性支出(本户原档案当前生效分类)；直接退出(均否)。
+    /// 同人去重：一人多档案退出（旧档链停+新档再停）按身份证收敛为一行（停保>渐退期满>经济复核降档，同型取最晚事件）。
+    /// 户主死亡：退保原因记"人员死亡"，家属兜底（渐退期/纳入类别）按下游接续档案如实体现，不再短路硬编码"直接退出"。
+    /// </summary>
+    public async Task<Result<List<MonthlyExitRectificationRow>>> GetExitRectificationRowsAsync(int year, int month, string town, string? category = null, CancellationToken ct = default)
+    {
+        var cycle = await GetCycleRangeAsync(year, month, ct);
+        if (cycle.IsFailure) return Result.Failure<List<MonthlyExitRectificationRow>>(cycle.ErrorCode!, cycle.Message!);
+        var c = cycle.Value;
+
+        // 渐退期满按"期满所在自然月"判定（期满落在哪个月就进哪个月的表）：
+        // 停保/经济复核降档仍走 B 线周期 [7/16, 8/16)，渐退期满走当月 1 日~次月 1 日。
+        // 否则 8/30 期满的户会被排到 9 月表，8 月纠治表缺漏渐退期满对象。
+        // 渐退期满事件的"退出前类别"取进入渐退期时类别（change_records 反推），
+        // 而非当前分类——渐退期内经济复核降档（如 低保→边缘）属退出后变化，类别列仍显原类别。
+        var monthStart = new DateTime(year, month, 1);
+        var monthEnd = monthStart.AddMonths(1);
+
+        // 1. 识别本月退出事件（三源 UNION）
+        var eventSql = $@"
+            SELECT x.application_id, x.event_date, x.event_type, x.exit_reason, x.old_classification, x.head_id_card
+            FROM (
+                SELECT a.id AS application_id, a.stop_date AS event_date, '停保' AS event_type,
+                       COALESCE(a.stop_reason, '') AS exit_reason,
+                       a.classification_result AS old_classification,
+                       a.applicant_id_card AS head_id_card
+                FROM nc_biz_applications a
+                WHERE a.status = $6 AND a.stop_date >= $1 AND a.stop_date < $2
+                  AND a.deleted_at IS NULL AND ($3 = '' OR a.town = $3)
+                  -- 停旧建新接续（同大类继续享受）不算退出对象
+                  {StoppedArchiveFilter.NotRebuildContinuationSql("a")}
+                  -- 真·首拒（从未审批享受、链上无在保前分类）不是退出对象（app110 实测错例）
+                  {StoppedArchiveFilter.NotFirstRefusalSql("a")}
+                UNION ALL
+                SELECT c.application_id, c.change_date AS event_date, '经济复核降档' AS event_type,
+                       '经济复核转低收入' AS exit_reason, c.old_classification,
+                       a.applicant_id_card AS head_id_card
+                FROM nc_biz_change_records c
+                JOIN nc_biz_applications a ON c.application_id = a.id AND a.deleted_at IS NULL
+                WHERE c.triggered_grace_period = TRUE AND c.change_date >= $1 AND c.change_date < $2
+                  AND c.deleted_at IS NULL
+                  -- 排除户主死亡/分类施保减除（死亡已有停保事件行，避免误标经济复核降档）
+                  AND c.change_type NOT IN ($7, $8)
+                UNION ALL
+                SELECT g.application_id, g.end_date AS event_date, '渐退期满' AS event_type,
+                       '渐退期满重新核算' AS exit_reason,
+                       COALESCE(
+                           (SELECT c.new_classification FROM nc_biz_change_records c
+                            WHERE c.application_id = g.application_id AND c.deleted_at IS NULL
+                              AND c.change_date < g.start_date
+                              AND c.new_classification IS NOT NULL AND c.new_classification <> ''
+                            ORDER BY c.change_date DESC, c.id DESC LIMIT 1),
+                           (SELECT c.old_classification FROM nc_biz_change_records c
+                            WHERE c.application_id = g.application_id AND c.deleted_at IS NULL
+                              AND c.change_date <= g.end_date
+                              AND c.old_classification IS NOT NULL AND c.old_classification <> ''
+                            ORDER BY c.change_date ASC, c.id ASC LIMIT 1),
+                           a.classification_result) AS old_classification,
+                       a.applicant_id_card AS head_id_card
+                FROM nc_biz_grace_periods g
+                LEFT JOIN nc_biz_applications a ON g.application_id = a.id
+                WHERE g.end_date >= $4 AND g.end_date < $5 AND g.deleted_at IS NULL
+                  -- 仅统计已生效档案：Draft 新档（户主死亡停旧建新待认定）渐退期满不构成退出事件
+                  AND a.status IN ($9, $10)
+            ) x
+            ORDER BY x.event_date, x.application_id;
+";
+        var eventResult = await _db.QueryAsync<ExitEventRow>(eventSql, ct, c.Start, c.End, town ?? "", monthStart, monthEnd,
+            ApplicationStatusCodes.STOPPED, DictionaryConstants.ChangeType.HOUSEHOLD_DEATH, DictionaryConstants.ChangeType.CLASSIFIED_SUBSIDY_REDUCE,
+            ApplicationStatusCodes.APPROVED, ApplicationStatusCodes.COMPLETED);
+        if (eventResult.IsFailure)
+            return Result.Failure<List<MonthlyExitRectificationRow>>(eventResult.ErrorCode!, eventResult.Message!);
+
+        var events = eventResult.Value ?? new List<ExitEventRow>();
+        if (events.Count == 0)
+            return Result.Success(new List<MonthlyExitRectificationRow>());
+
+        // 2. 批量查申请详情（户主信息/当前分类/当前状态）——先于同人去重取，
+        //    供「按退出前分类」过滤使用（事件 old_classification 为空时回退档案当前分类）。
+        // 注意：MemberCountSql 自带 AS family_size 别名，勿再追加别名（重复 AS 会触发 42601）
+        var eventAppIds = events
+            .Where(e => e.ApplicationId.HasValue)
+            .Select(e => e.ApplicationId!.Value)
+            .Distinct()
+            .ToArray();
+        var detailSql = $@"SELECT a.id, a.applicant_name, a.applicant_id_card,
+                                  {MemberCountSql("a")},
+                                  a.classification_result, a.status
+                           FROM nc_biz_applications a
+                           WHERE a.id = ANY($1) AND a.deleted_at IS NULL";
+        var detailResult = await _db.QueryAsync<ExitDetailRow>(detailSql, ct, eventAppIds);
+        if (detailResult.IsFailure)
+            return Result.Failure<List<MonthlyExitRectificationRow>>(detailResult.ErrorCode!, detailResult.Message!);
+        var details = (detailResult.Value ?? new List<ExitDetailRow>())
+            .ToDictionary(d => d.Id, d => d);
+
+        // 按退出前分类过滤：必须在同人去重之前——同一人跨类别有多条事件时，
+        // 先去重会让低优先级类别的事件被高优先级类别吞掉，导致该分类分表漏人。
+        // category 为空 = 「全部」汇总，不过滤（含停止码/空分类行，保持原行为）。
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            events = events
+                .Where(e => MonthlyReportCategoryConstants.Matches(category, ResolveEventClassificationCode(e, details)))
+                .ToList();
+            if (events.Count == 0)
+                return Result.Success(new List<MonthlyExitRectificationRow>());
+        }
+
+        // 同人去重（2026-10 改）：一人多档案退出（旧档链停 + 新档复核不合格又停）按档案去重会漏出两行
+        // （贺满程 82/83、梁玉祥 93/94 实测错例）——按身份证收敛为一行：
+        // 停保 > 渐退期满 > 经济复核降档，同类型取最晚事件（真正的最终退出）；身份证为空按档案独立成行防误合并。
+        var distinctEvents = events
+            .Where(e => e.ApplicationId.HasValue)
+            .GroupBy(e => string.IsNullOrWhiteSpace(e.HeadIdCard)
+                ? $"APP:{e.ApplicationId}"
+                : $"ID:{e.HeadIdCard.Trim()}")
+            .Select(g => g.OrderByDescending(e => e.EventType == "停保")
+                           .ThenByDescending(e => e.EventType == "渐退期满")
+                           .ThenByDescending(e => e.EventDate ?? DateTime.MinValue)
+                           .First())
+            .ToList();
+        var ids = distinctEvents.Select(e => e.ApplicationId).ToArray();
+
+        // 3.5 停旧建新：批量查停保户的下游新档案（original_application_id=本户），
+        //     用于确定"退出后纳入类别"（解维平 44 → 新档案 45 特困）与退保原因；
+        //     同时记下下游档案 ID——渐退期行挂在下游新档案上，"给予渐退期"须连带匹配（见 3.6）。
+        var rebuildMap = new Dictionary<long, (string Class, long NewAppId)>();
+        if (ids.Length > 0)
+        {
+            var rebuildSql = @"SELECT DISTINCT ON (original_application_id) original_application_id, id, classification_result
+                               FROM nc_biz_applications
+                               WHERE original_application_id = ANY($1)
+                               ORDER BY original_application_id, (deleted_at IS NULL) DESC, created_at DESC";
+            var rebuildResult = await _db.QueryAsync<RebuildTargetRow>(rebuildSql, ct, ids);
+            if (rebuildResult.IsFailure)
+                return Result.Failure<List<MonthlyExitRectificationRow>>(rebuildResult.ErrorCode!, rebuildResult.Message!);
+            foreach (var row in rebuildResult.Value ?? new List<RebuildTargetRow>())
+            {
+                if (row.OriginalApplicationId.HasValue)
+                    rebuildMap[row.OriginalApplicationId.Value] = (row.ClassificationResult ?? "", row.Id ?? 0);
+            }
+        }
+
+        // 3.6 批量查渐退期（判定"给予渐退期"）——查询范围含下游接续档案：
+        //     户主死亡/停旧建新的渐退期行挂在下游新档案上（樊万河户 68→80 实测错例：渐退期挂在 80 上，
+        //     只查事件档案 68 会误显"否"）。
+        var chainIds = ids
+            .Where(x => x.HasValue)
+            .Select(x => x!.Value)
+            .Concat(rebuildMap.Values.Where(v => v.NewAppId > 0).Select(v => v.NewAppId))
+            .Distinct()
+            .ToArray();
+        var graceSql = @"SELECT application_id, start_date, end_date
+                         FROM nc_biz_grace_periods
+                         WHERE deleted_at IS NULL AND application_id = ANY($1)";
+        var graceResult = await _db.QueryAsync<ExitGraceRow>(graceSql, ct, chainIds);
+        if (graceResult.IsFailure)
+            return Result.Failure<List<MonthlyExitRectificationRow>>(graceResult.ErrorCode!, graceResult.Message!);
+        var graces = graceResult.Value ?? new List<ExitGraceRow>();
+
+        // 3.7 户主变更识别：该档案存在户主死亡/户主变更变更记录 → 退保原因描述为"停止"
+        var headChangeApps = new HashSet<long>();
+        if (ids.Length > 0)
+        {
+            var headChangeSql = @"SELECT DISTINCT application_id
+                                  FROM nc_biz_change_records
+                                  WHERE change_type = ANY($1) AND deleted_at IS NULL AND application_id = ANY($2)";
+            var headChangeResult = await _db.QueryAsync<HeadChangeAppRow>(headChangeSql, ct,
+                new[] { DictionaryConstants.ChangeType.HOUSEHOLD_DEATH, DictionaryConstants.ChangeType.HOUSEHOLD_HEAD_CHANGE }, ids);
+            if (headChangeResult.IsFailure)
+                return Result.Failure<List<MonthlyExitRectificationRow>>(headChangeResult.ErrorCode!, headChangeResult.Message!);
+            foreach (var row in headChangeResult.Value ?? new List<HeadChangeAppRow>())
+                if (row.ApplicationId.HasValue)
+                    headChangeApps.Add(row.ApplicationId.Value);
+        }
+
+        // 3.8 跨类停保的变更原因类型（CategoryStop 记录）：退保原因前缀"经济复核后/成员变更后"
+        var stopReasonTypeMap = new Dictionary<long, string>();
+        if (ids.Length > 0)
+        {
+            var reasonTypeSql = @"SELECT DISTINCT ON (application_id) application_id, change_reason_type
+                                  FROM nc_biz_change_records
+                                  WHERE change_type = 'CategoryStop' AND deleted_at IS NULL AND application_id = ANY($1)
+                                  ORDER BY application_id, changed_at DESC";
+            var reasonTypeResult = await _db.QueryAsync<ChangeReasonTypeRow>(reasonTypeSql, ct, ids);
+            if (reasonTypeResult.IsFailure)
+                return Result.Failure<List<MonthlyExitRectificationRow>>(reasonTypeResult.ErrorCode!, reasonTypeResult.Message!);
+            foreach (var row in reasonTypeResult.Value ?? new List<ChangeReasonTypeRow>())
+                if (row.ApplicationId.HasValue && !string.IsNullOrWhiteSpace(row.ChangeReasonType))
+                    stopReasonTypeMap[row.ApplicationId.Value] = row.ChangeReasonType!;
+        }
+
+        // 3.9 死亡识别：周期内户主死亡记录（死亡日期落在本月周期内）→ 退保原因记"人员死亡"，
+        //     家属兜底（渐退期/纳入类别）仍按下链档案如实计算（不再短路置"直接退出"）。
+        // 仅认"周期内死亡"：佟淑华户 2 月前户主吴克学死亡但家庭继续保障、8 月渐退期满重新核算纳入低保，
+        // 该户死亡不在本月周期，不会被误判为死亡退出。
+        var deathAppIds = new HashSet<long>();
+        if (ids.Length > 0)
+        {
+            var deathSql = @"SELECT DISTINCT application_id
+                             FROM nc_biz_death_records
+                             WHERE is_household_head = true
+                               AND death_date >= $1 AND death_date < $2
+                               AND application_id = ANY($3)";
+            var deathResult = await _db.QueryAsync<HeadChangeAppRow>(deathSql, ct, c.Start, c.End, ids);
+            if (deathResult.IsFailure)
+                return Result.Failure<List<MonthlyExitRectificationRow>>(deathResult.ErrorCode!, deathResult.Message!);
+            foreach (var row in deathResult.Value ?? new List<HeadChangeAppRow>())
+                if (row.ApplicationId.HasValue)
+                    deathAppIds.Add(row.ApplicationId.Value);
+        }
+
+        var dibaoCodes = CategoryCodes("最低生活保障");
+        var tekuCodes = CategoryCodes("特困人员");
+        var edgeCodes = CategoryCodes("最低生活保障边缘家庭");
+        var rigidCodes = CategoryCodes("刚性支出困难家庭");
+
+        var outRows = new List<MonthlyExitRectificationRow>();
+        foreach (var ev in distinctEvents)
+        {
+            var appId = ev.ApplicationId ?? 0;
+            if (!details.TryGetValue(appId, out var d))
+                continue;
+
+            var categoryCode = ResolveEventClassificationCode(ev, details);
+
+            var isActive = d.Status is ApplicationStatusCodes.APPROVED or ApplicationStatusCodes.COMPLETED;
+
+            // 停旧建新下游档案（纳入类别 + 渐退期连带匹配用）；无下游时 NewAppId=0、Class=""。
+            rebuildMap.TryGetValue(appId, out var rebuild);
+            var rebuildCode = rebuild.Class ?? "";
+            var chainAppIds = rebuild.NewAppId > 0 ? new[] { appId, rebuild.NewAppId } : new[] { appId };
+
+            // 给予渐退期：判定口径 = 渐退期是否覆盖"生效日"。
+            // 生效日 = 事件日期所属 **B 线业务月** 的次月 1 日（与 GracePeriodConstants.CalculatePeriod 同源），
+            // 不是日历月次月1日——樊万河 68 停保 09-22 属 2026-10 业务月，渐退期 11-01 起；
+            // 按日历月会算成 10-01，误判为"未给予渐退期"（2026-10 实测错例）。
+            // 渐退期行可能挂在下游接续新档案上（户主死亡/停旧建新），须连同下游档案一并匹配。
+            // 渐退期满事件本身即"曾给予渐退期"的直接证据（其 end_date 就是渐退末日），直接记"是"。
+            var eventDate = ev.EventDate;
+            var effectiveDate = eventDate.HasValue ? ResolveGraceEffectiveDate(eventDate.Value) : (DateTime?)null;
+            var hasGrace = ev.EventType == "渐退期满"
+                || (effectiveDate.HasValue && graces.Any(g =>
+                    g.ApplicationId.HasValue && chainAppIds.Contains(g.ApplicationId.Value)
+                    && g.StartDate.HasValue && g.EndDate.HasValue
+                    && g.StartDate.Value <= effectiveDate.Value
+                    && g.EndDate.Value >= effectiveDate.Value));
+            var graceText = hasGrace ? "是" : "否";
+
+            // 纳入类别：停旧建新（有下游新档案）优先用新档案分类（如解维平 44→45 特困）；
+            // 否则用当前档案分类（isActive Approved/Completed 才视为纳入）。
+            var intoCategory = !string.IsNullOrEmpty(rebuildCode)
+                ? rebuildCode
+                : (isActive ? d.ClassificationResult ?? "" : "");
+
+            var hasDibao = intoCategory != "" && dibaoCodes != null && dibaoCodes.Contains(intoCategory) ? "是" : "否";
+            var hasTeku = intoCategory != "" && tekuCodes != null && tekuCodes.Contains(intoCategory) ? "是" : "否";
+            var hasEdge = intoCategory != "" && edgeCodes != null && edgeCodes.Contains(intoCategory) ? "是" : "否";
+            var hasRigid = intoCategory != "" && rigidCodes != null && rigidCodes.Contains(intoCategory) ? "是" : "否";
+            var directExit = !hasGrace && hasDibao == "否" && hasTeku == "否" && hasEdge == "否" && hasRigid == "否" ? "是" : "否";
+
+            // 退保原因（事件类型 + 纳入类别，标准化）：
+            // 停保 + 周期内户主死亡 → "人员死亡"（家属兜底按下链档案如实体现，不再短路硬编码，
+            //   旧版曾把渐退期/纳入类别全置否、直接退出=是，掩盖在世家属实际获得的兜底：樊万河户 68→80）
+            // 停保 + 户主变更 → "停止"
+            // 停保 + 停旧建新（经济复核跨类）→ "经济复核后"；停保 + 纯停保 → 保留 stop_reason/停保退出
+            // 经济复核降档（低保→低收入，进渐退期）→ "渐退期满，经经济复核转低收入"
+            // 渐退期满 → "渐退期满，经经济复核转{纳入类别}"
+            var stopReason = ev.EventType switch
+            {
+                "停保" when deathAppIds.Contains(appId) => "人员死亡",
+                "停保" when headChangeApps.Contains(appId) => "停止",
+                "停保" when !string.IsNullOrEmpty(intoCategory) && !string.IsNullOrEmpty(rebuildCode)
+                    => $"{(stopReasonTypeMap.TryGetValue(appId, out var reasonType) ? reasonType : ChangeReasonTypeConstants.EconomicReview)}后 由 {ClassificationConstants.ConvertToMajorCategoryName(categoryCode)}转入{ClassificationConstants.ConvertToMajorCategoryName(intoCategory)}",
+                "停保" => string.IsNullOrWhiteSpace(ev.ExitReason) ? "停保退出" : ev.ExitReason!,
+                "经济复核降档" => "渐退期满，经经济复核转低收入",
+                "渐退期满" when !string.IsNullOrEmpty(intoCategory)
+                    => $"渐退期满，经经济复核转{ClassificationConstants.ConvertFromCode(intoCategory)}",
+                _ => string.IsNullOrWhiteSpace(ev.ExitReason) ? "停保退出" : ev.ExitReason!
+            };
+
+            outRows.Add(new MonthlyExitRectificationRow
+            {
+                Name = d.ApplicantName ?? "",
+                IdCard = d.ApplicantIdCard ?? "",
+                Category = ClassificationConstants.ConvertToMajorCategoryName(categoryCode),
+                FamilySize = (d.FamilySize ?? 0).ToString(),
+                StopMonth = ev.EventDate?.ToString("yyyy年M月") ?? "",
+                StopReason = stopReason,
+                GracePeriod = graceText,
+                IntoDibao = hasDibao,
+                IntoTeku = hasTeku,
+                IntoEdge = hasEdge,
+                IntoRigid = hasRigid,
+                DirectExit = directExit
+            });
+        }
+        return Result.Success(outRows);
+    }
+
+    /// <summary>
+    /// 渐退期判定锚点：事件日期所属 B 线业务月的次月 1 日。
+    /// 与 <see cref="GracePeriodConstants.CalculatePeriod"/> 同源（业务月次月1日起算），
+    /// 禁止用日历月——樊万河 68 停保 09-22 属 10 月业务，渐退期 11-01 起，按日历月会误判。
+    /// </summary>
+    private DateTime ResolveGraceEffectiveDate(DateTime eventDate)
+    {
+        var business = _timelineService.GetTimelineForDate(eventDate, TimelineType.BusinessProcess);
+        return new DateTime(business.Year, business.Month, 1).AddMonths(1);
+    }
+
+    /// <summary>
+    /// 退出事件「退出前分类」：事件快照 old_classification 优先；空时回退档案当前分类
+    /// （与输出行「类别」列同源，分类过滤与展示口径一致）。
+    /// </summary>
+    private static string ResolveEventClassificationCode(ExitEventRow ev, Dictionary<long, ExitDetailRow> details)
+    {
+        if (!string.IsNullOrEmpty(ev.OldClassification))
+            return ev.OldClassification!;
+
+        return ev.ApplicationId.HasValue && details.TryGetValue(ev.ApplicationId.Value, out var d)
+            ? d.ClassificationResult ?? string.Empty
+            : string.Empty;
+    }
+
+    // ─────────────────── 临时救助新增汇总 ───────────────────
+
+    public async Task<Result<List<MonthlyTempReliefRow>>> GetTempReliefSummaryRowsAsync(int year, int month, string town, CancellationToken ct = default)
+    {
+        var townSafe = string.IsNullOrEmpty(town) ? "" : town;
+
+        var cycle = await GetCycleRangeAsync(year, month, ct);
+        if (cycle.IsFailure) return Result.Failure<List<MonthlyTempReliefRow>>(cycle.ErrorCode!, cycle.Message!);
+        var c = cycle.Value;
+
+        // 主查询：周期内已确认（Confirmed）的临时救助申请；
+        // 一卡通账号取临时救助档案自身的 bank_account（来源台账 one_card_account 优先，见预填逻辑）。
+        var sql = @"SELECT t.id AS relief_id,
+                           t.relief_type,
+                           t.applicant_name, t.applicant_id_card, t.gender, t.age, t.phone,
+                           t.family_size, t.family_address, t.family_category,
+                           t.difficulty_type, t.confirm_amount, t.confirmed_at,
+                           t.bank_account
+                    FROM nc_biz_temp_relief_applications t
+                    WHERE t.status = $4
+                      AND t.confirmed_at >= $1 AND t.confirmed_at < $2
+                      AND t.deleted_at IS NULL
+                      AND ($3 = '' OR t.town = $3)
+                    ORDER BY t.confirmed_at, t.id";
+        var result = await _db.QueryAsync<TempReliefSummaryRowData>(sql, ct, c.Start, c.End, townSafe, TempReliefConstants.StatusConfirmed);
+        if (result.IsFailure)
+            return Result.Failure<List<MonthlyTempReliefRow>>(result.ErrorCode!, result.Message!);
+
+        var main = result.Value ?? new List<TempReliefSummaryRowData>();
+        if (main.Count == 0)
+            return Result.Success(new List<MonthlyTempReliefRow>());
+
+        var ids = main.Select(r => r.ReliefId).Distinct().ToArray();
+
+        // 明细批量加载（避免 N+1），供自付金额合计与精简句成员名使用
+        var diseasesResult = await _db.QueryAsync<TempReliefDisease>(
+            "SELECT * FROM nc_biz_temp_relief_diseases WHERE application_id = ANY($1) AND deleted_at IS NULL ORDER BY id", ct, ids);
+        if (diseasesResult.IsFailure)
+            return Result.Failure<List<MonthlyTempReliefRow>>(diseasesResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                diseasesResult.Message ?? "临时救助疾病明细查询失败");
+        var accidentsResult = await _db.QueryAsync<TempReliefAccident>(
+            "SELECT * FROM nc_biz_temp_relief_accidents WHERE application_id = ANY($1) AND deleted_at IS NULL ORDER BY id", ct, ids);
+        if (accidentsResult.IsFailure)
+            return Result.Failure<List<MonthlyTempReliefRow>>(accidentsResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                accidentsResult.Message ?? "临时救助意外灾害明细查询失败");
+        var educationsResult = await _db.QueryAsync<TempReliefEducation>(
+            "SELECT * FROM nc_biz_temp_relief_educations WHERE application_id = ANY($1) AND deleted_at IS NULL ORDER BY id", ct, ids);
+        if (educationsResult.IsFailure)
+            return Result.Failure<List<MonthlyTempReliefRow>>(educationsResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                educationsResult.Message ?? "临时救助教育支出明细查询失败");
+
+        var diseasesByApp = (diseasesResult.Value ?? new()).GroupBy(d => d.ApplicationId).ToDictionary(g => g.Key, g => g.ToList());
+        var accidentsByApp = (accidentsResult.Value ?? new()).GroupBy(a => a.ApplicationId).ToDictionary(g => g.Key, g => g.ToList());
+        var educationsByApp = (educationsResult.Value ?? new()).GroupBy(e => e.ApplicationId).ToDictionary(g => g.Key, g => g.ToList());
+
+        var rows = new List<MonthlyTempReliefRow>(main.Count);
+        foreach (var r in main)
+        {
+            var diseases = diseasesByApp.GetValueOrDefault(r.ReliefId) ?? new List<TempReliefDisease>();
+            var accidents = accidentsByApp.GetValueOrDefault(r.ReliefId) ?? new List<TempReliefAccident>();
+            var educations = educationsByApp.GetValueOrDefault(r.ReliefId) ?? new List<TempReliefEducation>();
+
+            // 分段判定单点实现（IsFixedQuotaType）：小额=有额度 → 救助金额/审批时间两列才填，大额一律留空
+            var isSmall = TempReliefConstants.IsFixedQuotaType(r.ReliefType);
+            rows.Add(new MonthlyTempReliefRow
+            {
+                ReliefType = r.ReliefType ?? TempReliefConstants.ReliefTypeLarge,
+                Name = r.ApplicantName ?? "",
+                IdCard = r.ApplicantIdCard ?? "",
+                Age = r.Age?.ToString() ?? "",
+                Gender = r.Gender ?? "",
+                FamilySize = r.FamilySize?.ToString() ?? "",
+                Address = r.FamilyAddress ?? "",
+                // 个人类别用缩写（最低生活保障家庭→低保 等）
+                Category = TempReliefConstants.GetFamilyCategoryShortName(r.FamilyCategory),
+                Phone = r.Phone ?? "",
+                // 大额救助：救助金额 / 审批时间两列一律留空
+                Amount = isSmall && r.ConfirmAmount.HasValue ? r.ConfirmAmount.Value.ToString("F2") : "",
+                AuditDate = isSmall && r.ConfirmedAt.HasValue ? r.ConfirmedAt.Value.ToString("yyyy-MM-dd") : "",
+                Reason = BuildTempReliefSummaryReason(r.DifficultyType ?? "", diseases, accidents, educations),
+                SelfPay = CalcTempReliefSelfPay(diseases, accidents, educations),
+                BankAccount = r.BankAccount ?? ""
+            });
+        }
+        return Result.Success(rows);
+    }
+
+    /// <summary>
+    /// 汇总表"申请理由"文本（每条明细一句，块间换行，不截断）：
+    /// 因病→"因病，住院时间为{A}到{B}。患病为{C}。"；因学→"在{年}被{学校}录取。"；
+    /// 因灾→"因{类型}，发生于{时间}，地点{地点}。财产损失{金额}元。"；
+    /// 其他困难→固定句。缺失字段的子句整体省略。
+    /// </summary>
+    private static string BuildTempReliefSummaryReason(
+        string difficultyType,
+        List<TempReliefDisease> diseases, List<TempReliefAccident> accidents, List<TempReliefEducation> educations)
+    {
+        var type = (difficultyType ?? string.Empty).Trim();
+
+        if (type.Contains("教育", StringComparison.Ordinal))
+            return BuildEducationSummaryReason(educations);
+        if (type.Contains("灾害", StringComparison.Ordinal) || type.Contains("意外", StringComparison.Ordinal))
+            return BuildAccidentSummaryReason(accidents);
+        if (type.Contains("疾病", StringComparison.Ordinal))
+            return BuildDiseaseSummaryReason(diseases);
+
+        return "因家庭突发困难导致基本生活暂时陷入困境，特申请临时救助。";
+    }
+
+    /// <summary>因病：逐条"因病，住院时间为{A}到{B}。患病为{C}。"，块间换行；无日期/病名则省略对应子句</summary>
+    private static string BuildDiseaseSummaryReason(List<TempReliefDisease> diseases)
+    {
+        if (diseases.Count == 0) return "因病。";
+
+        var blocks = new List<string>(diseases.Count);
+        foreach (var d in diseases)
+        {
+            var range = FormatSummaryDateRange(d.TreatStartDate, d.TreatEndDate);
+            var block = string.IsNullOrWhiteSpace(range) ? "因病" : $"因病，住院时间为{range}";
+            block += "。";
+            if (!string.IsNullOrWhiteSpace(d.DiseaseName))
+                block += $"患病为{d.DiseaseName.Trim()}。";
+            blocks.Add(block);
+        }
+        return string.Join(Environment.NewLine, blocks);
+    }
+
+    /// <summary>因学：逐条"在{缴费年份}被{学校}录取。"，块间换行；缺年份/学校则省略对应部分</summary>
+    private static string BuildEducationSummaryReason(List<TempReliefEducation> educations)
+    {
+        if (educations.Count == 0) return "因学。";
+
+        var blocks = new List<string>(educations.Count);
+        foreach (var e in educations)
+        {
+            var hasYear = e.FeeDate != DateTime.MinValue;
+            var school = (e.SchoolName ?? string.Empty).Trim();
+            blocks.Add((hasYear, !string.IsNullOrWhiteSpace(school)) switch
+            {
+                (true, true) => $"在{e.FeeDate:yyyy年}被{school}录取。",
+                (false, true) => $"被{school}录取。",
+                (true, false) => $"在{e.FeeDate:yyyy年}被录取。",
+                _ => "因学。"
+            });
+        }
+        return string.Join(Environment.NewLine, blocks);
+    }
+
+    /// <summary>因灾：逐条"因{类型}，发生于{时间}，地点{地点}。财产损失{金额}元。"，块间换行；缺字段省略对应子句</summary>
+    private static string BuildAccidentSummaryReason(List<TempReliefAccident> accidents)
+    {
+        if (accidents.Count == 0) return "因灾。";
+
+        var blocks = new List<string>(accidents.Count);
+        foreach (var a in accidents)
+        {
+            var typeText = string.IsNullOrWhiteSpace(a.AccidentType) ? "意外灾害" : a.AccidentType.Trim();
+            // 类型值可能自带"因"前缀，重复前置会拼出"因因…"（与 FamilySituationTextBuilder 同类防护）
+            var clauses = new List<string>
+            {
+                typeText.StartsWith("因", StringComparison.Ordinal) ? typeText : $"因{typeText}"
+            };
+            if (a.HappenDate != DateTime.MinValue) clauses.Add($"发生于{a.HappenDate:yyyy年M月d日}");
+            if (!string.IsNullOrWhiteSpace(a.HappenPlace)) clauses.Add($"地点{a.HappenPlace.Trim()}");
+
+            var block = string.Join("，", clauses) + "。";
+            if (a.PropertyLoss is > 0) block += $"财产损失{a.PropertyLoss.Value:F2}元。";
+            blocks.Add(block);
+        }
+        return string.Join(Environment.NewLine, blocks);
+    }
+
+    /// <summary>日期区间文本：起止均空返回空串；单端仅显示该日；同日仅显示一天；跨日用"到"</summary>
+    private static string FormatSummaryDateRange(DateTime start, DateTime end)
+    {
+        if (start == DateTime.MinValue && end == DateTime.MinValue) return string.Empty;
+        if (start == DateTime.MinValue) return end.ToString("yyyy年M月d日");
+        if (end == DateTime.MinValue) return start.ToString("yyyy年M月d日");
+        if (start.Date == end.Date) return start.ToString("yyyy年M月d日");
+        return $"{start:yyyy年M月d日}到{end:yyyy年M月d日}";
+    }
+
+    /// <summary>
+    /// 临时救助自付金额合计 = 疾病 self_paid（按"同一次医疗事件"去重，单人多病例只计一次住院）
+    /// + 教育 tuition_fee + 意外(property_loss − compensation_paid，负数按 0)；为 0 显示空。
+    /// </summary>
+    private static string CalcTempReliefSelfPay(
+        List<TempReliefDisease> diseases, List<TempReliefAccident> accidents, List<TempReliefEducation> educations)
+    {
+        // 去重口径与临时救助打印 builder 共用（单点实现）
+        var diseaseSelf = TempReliefPrintDataBuilder.DistinctDiseasesByExpense(diseases)
+            .Where(d => d.SelfPaid.HasValue)
+            .Sum(d => d.SelfPaid!.Value);
+
+        var accidentSelf = accidents.Sum(a =>
+        {
+            var net = (a.PropertyLoss ?? 0m) - (a.CompensationPaid ?? 0m);
+            return net > 0 ? net : 0m;
+        });
+
+        var educationSelf = educations.Sum(e => e.TuitionFee ?? 0m);
+
+        var total = diseaseSelf + accidentSelf + educationSelf;
+        return total > 0 ? total.ToString("F2") : string.Empty;
+    }
+
+    private class TempReliefSummaryRowData
+    {
+        public long ReliefId { get; set; }
+        public string? ReliefType { get; set; }
+        public string? ApplicantName { get; set; }
+        public string? ApplicantIdCard { get; set; }
+        public string? Gender { get; set; }
+        public int? Age { get; set; }
+        public string? Phone { get; set; }
+        public int? FamilySize { get; set; }
+        public string? FamilyAddress { get; set; }
+        public string? FamilyCategory { get; set; }
+        public string? DifficultyType { get; set; }
+        public decimal? ConfirmAmount { get; set; }
+        public DateTime? ConfirmedAt { get; set; }
+        public string? BankAccount { get; set; }
+    }
+
+    // ─────────────────── 会议记录 ───────────────────
+
+    public async Task<Result<MonthlyMeeting>> GetMeetingAsync(int year, int month, string town, bool specialApproval = false, CancellationToken ct = default)
+    {
+        var t = string.IsNullOrEmpty(town) ? "全部" : town;
+        var result = await _db.QuerySingleAsync<MonthlyMeeting>(
+            "SELECT * FROM nc_biz_monthly_meetings WHERE year = $1 AND month = $2 AND town = $3", ct, year, month, t);
+        if (result.IsFailure)
+        {
+            // 查询失败若返回空会议对象，用户编辑保存就会覆盖真实会议记录。
+            LogError($"读取月报会议记录失败: {result.ErrorCode} {result.Message}");
+            return Result.Failure<MonthlyMeeting>(result.ErrorCode!, result.Message!);
+        }
+        var meeting = result.Value ?? new MonthlyMeeting { Year = year, Month = month, Town = t };
+
+        // 决议段/申请分类：与周期内新增明细同源自动带出（member_info 库中为空时）
+        var autoResult = await BuildMeetingAutoFieldsAsync(year, month, t, specialApproval, ct);
+        var specialAttendees = string.Empty;
+        if (autoResult.IsSuccess)
+        {
+            if (string.IsNullOrWhiteSpace(meeting.MemberInfo))
+            {
+                meeting.MemberInfo = autoResult.Value.MemberInfo;
+                meeting.ApplyCategory = autoResult.Value.ApplyCategory;
+            }
+            // 决议段姓名列表始终以周期内新增明细为准（与自动带出的成员信息同源）
+            meeting.MemberNames = autoResult.Value.NameList;
+            specialAttendees = autoResult.Value.SpecialAttendees;
+        }
+        else if (autoResult.IsFailure)
+        {
+            LogWarn($"会议记录自动字段带出失败，使用兜底值: {autoResult.ErrorCode} {autoResult.Message}");
+        }
+
+        // 字段兜底：行不存在/字段为空时按月报页同源默认补齐——否则"直接生成"时间/主持人/记录人/出席/缺席全出 "-"
+        //（2026-11-17 实测：11 月无会议记录行；月报页 LoadMeetingAsync 算好的默认值原本不进生成链）
+        await FillMeetingDefaultsAsync(meeting, year, month, t, ct);
+
+        // 一事一议模板：出席人员改读申报表「参会人员」；未登记则保留兜底/普通值（空值回退）
+        if (specialApproval && !string.IsNullOrWhiteSpace(specialAttendees))
+            meeting.Attendees = specialAttendees;
+
+        return Result.Success(meeting);
+    }
+
+    /// <summary>
+    /// 会议记录字段兜底（行不存在或字段为空时；已有值不覆盖）：会议时间=B线会议日带星期、
+    /// 主持人=本单位民政助理、记录人=当前登录用户、出席/缺席=最近一次出席历史——
+    /// 与月报页 LoadMeetingAsync / 申报表参会人员默认同一数据源（"重新录入"保存过的值优先）。
+    /// </summary>
+    private async Task FillMeetingDefaultsAsync(MonthlyMeeting meeting, int year, int month, string town, CancellationToken ct)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(meeting.MeetingTime))
+            {
+                var timeline = await _timelineService.CalculateTimelineAsync(year, month, Models.Enums.TimelineType.BusinessProcess);
+                if (timeline != null)
+                {
+                    var d = timeline.MeetingDate;
+                    var weekday = new[] { "日", "一", "二", "三", "四", "五", "六" }[(int)d.DayOfWeek];
+                    meeting.MeetingTime = $"{d.Year}年{d.Month}月{d.Day}日 星期{weekday}";
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(meeting.Host))
+                meeting.Host = await GetCivilAssistantNameAsync();
+
+            if (string.IsNullOrWhiteSpace(meeting.Recorder))
+                meeting.Recorder = CurrentUserContext.FullName;
+
+            if (string.IsNullOrWhiteSpace(meeting.Attendees) || string.IsNullOrWhiteSpace(meeting.Absentees))
+            {
+                var latest = await GetLatestMeetingAttendanceByTownAsync(town, ct);
+                if (latest.IsFailure)
+                {
+                    LogWarn($"会议记录出席/缺席兜底读取失败（不影响生成）: {latest.Message}");
+                }
+                else if (latest.Value != null)
+                {
+                    if (string.IsNullOrWhiteSpace(meeting.Attendees))
+                        meeting.Attendees = latest.Value.Attendees;
+                    if (string.IsNullOrWhiteSpace(meeting.Absentees))
+                        meeting.Absentees = latest.Value.Absentees;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogWarn($"会议记录字段兜底失败（不影响生成）: {ex.Message}");
+        }
+    }
+
+    /// <summary>当前单位职位为"民政助理"的用户姓名（与月报页 GetCivilAssistantNameAsync 同源）；未配置返回空</summary>
+    private async Task<string> GetCivilAssistantNameAsync()
+    {
+        var orgId = CurrentUserContext.OrganizationId;
+        if (!orgId.HasValue) return string.Empty;
+        var usersResult = await _userService.GetByOrganizationAsync(orgId.Value);
+        if (usersResult.IsFailure || usersResult.Value == null) return string.Empty;
+        return usersResult.Value.FirstOrDefault(u => u.Position == NewCosmos.Constants.PositionTitles.CivilAssistant)?.FullName ?? string.Empty;
+    }
+
+    /// <summary>
+    /// 自动带出会议新增成员信息/申请分类：周期内新增明细 + 一事一议分流。
+    /// onlySpecialApproval=true：仅保留特殊审批（special_approvals 关联申请，一事一议模板专用）；
+    /// false：普通会议记录 = 非一事一议申请。
+    /// member_info 每行格式：柳树镇X村村民 姓名 家庭情况说明：{申请原因详情}（分类）。
+    /// </summary>
+    private async Task<Result<(string MemberInfo, string ApplyCategory, string NameList, string SpecialAttendees)>> BuildMeetingAutoFieldsAsync(
+        int year, int month, string town, bool onlySpecialApproval, CancellationToken ct = default)
+    {
+        // 会议记录表用 "全部" 存库，而 GetAddedRowsAsync 以 $3='' 表示不过滤乡镇——须归一化
+        var queryTown = town == "全部" ? "" : town;
+        var addedResult = await GetAddedRowsAsync(year, month, queryTown, null, ct);
+        if (addedResult.IsFailure)
+            return Result.Failure<(string, string, string, string)>(addedResult.ErrorCode!, addedResult.Message!);
+
+        // 一事一议标记：关联 nc_biz_special_approvals（申请层面标记），命中则分流到一事一议模板
+        var specialIds = new HashSet<long>();
+        var sp = await _db.QueryAsync<SpecialApprovalIdRow>(
+            @"SELECT application_id FROM nc_biz_special_approvals WHERE deleted_at IS NULL", ct);
+        if (sp.HasValue)
+            foreach (var s in sp.Value)
+                if (s.ApplicationId.HasValue)
+                    specialIds.Add(s.ApplicationId.Value);
+
+        var candidates = addedResult.Value.Where(r =>
+            onlySpecialApproval
+                ? r.ApplicationId > 0 && specialIds.Contains(r.ApplicationId)
+                : !(r.ApplicationId > 0 && specialIds.Contains(r.ApplicationId))).ToList();
+
+        // 一事一议纪要成员行补「一事一议事由」：申报表有"情况介绍+事由"两个字段，
+        // 纪要行原来只有情况介绍（2026-11-17 用户反馈"书写不够完善"）。仅一事一议模板取数，
+        // 与 specialAttendees 同批候选、= ANY($1) 批查（§8）；读取失败只降级为不带事由，不阻断。
+        var mattersMap = new Dictionary<long, string>();
+        if (onlySpecialApproval)
+        {
+            var matterIds = candidates.Select(r => r.ApplicationId).Where(id => id > 0).Distinct().ToArray();
+            if (matterIds.Length > 0)
+            {
+                var mResult = await _db.QueryAsync<SpecialMattersRow>(
+                    @"SELECT application_id, special_matters FROM nc_biz_special_approval_forms
+                      WHERE deleted_at IS NULL AND application_id = ANY($1)", ct, new object[] { matterIds });
+                if (mResult.IsFailure)
+                {
+                    LogWarn($"一事一议事由读取失败（纪要行仅显示情况介绍）: {mResult.Message}");
+                }
+                else if (mResult.Value != null)
+                {
+                    foreach (var row in mResult.Value)
+                    {
+                        if (row.ApplicationId is long appId && !string.IsNullOrWhiteSpace(row.SpecialMatters))
+                            mattersMap[appId] = row.SpecialMatters.Trim();
+                    }
+                }
+            }
+        }
+
+        var memberInfo = string.Join(Environment.NewLine,
+            candidates.Select(r => BuildMemberInfoLine(
+                r, mattersMap.TryGetValue(r.ApplicationId, out var matters) ? matters : null)));
+        var applyCategory = string.Join("、", candidates.Select(r => r.Classification).Distinct());
+        var nameList = string.Join("、", candidates.Select(r => r.Name));
+
+        // 一事一议会议记录的「出席人员」= 本期候选人（与决议名单同一批）申报表「会议审议→参会人员」
+        // （nc_biz_special_approvals.meeting_members，审议时落库）合并去重；未登记/读取失败 → 空，
+        // 由 GetMeetingAsync 回退普通会议出席值（空值回退约定）。
+        var specialAttendees = string.Empty;
+        if (onlySpecialApproval)
+        {
+            var ids = candidates.Select(r => r.ApplicationId).Where(id => id > 0).Distinct().ToArray();
+            if (ids.Length > 0)
+            {
+                var spResult = await _db.QueryAsync<SpecialMeetingMembersRow>(
+                    @"SELECT meeting_members FROM nc_biz_special_approvals
+                      WHERE deleted_at IS NULL AND application_id = ANY($1)", ct, new object[] { ids });
+                if (spResult.IsFailure)
+                {
+                    // 默认值语义：读取失败不阻断输出，回退普通出席值
+                    LogWarn($"一事一议会议出席人员读取失败（回退普通会议值）: {spResult.Message}");
+                }
+                else if (spResult.Value != null)
+                {
+                    var seen = new HashSet<string>(StringComparer.Ordinal);
+                    var merged = new List<string>();
+                    foreach (var row in spResult.Value)
+                    {
+                        foreach (var line in (row.MeetingMembers ?? string.Empty)
+                                     .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                        {
+                            if (seen.Add(line))
+                                merged.Add(line);
+                        }
+                    }
+                    specialAttendees = string.Join(Environment.NewLine, merged);
+                }
+            }
+        }
+        return Result.Success((memberInfo, applyCategory, nameList, specialAttendees));
+    }
+
+    /// <summary>
+    /// 拼装会议记录"家庭情况说明"整段：柳树镇{村}村民 {姓名} 家庭情况说明：{申请原因详情}（分类）。
+    /// 一事一议模板额外追加「一事一议事由：{申报表 special_matters}」（情况介绍+理由成对，2026-11-17）。
+    /// 村名取 community 去"村委会/村民委员会/社区"后缀；申请原因详情去尾句号避免双句号。
+    /// </summary>
+    private static string BuildMemberInfoLine(MonthlyAddedRow r, string? oneAffairMatters = null)
+    {
+        var village = TrimVillageSuffix(r.Community);
+        var townPrefix = string.IsNullOrWhiteSpace(r.Town) ? string.Empty : r.Town;
+        // 村：柳树镇柳树村村民；社区/居委：柳树镇XX社区（不加"村民"）
+        var isCommunity = village.Contains("社区", StringComparison.Ordinal)
+                          || village.Contains("街道", StringComparison.Ordinal)
+                          || village.Contains("居委会", StringComparison.Ordinal);
+        var head = string.IsNullOrWhiteSpace(village)
+            ? $"{r.Name} 家庭情况说明："
+            : isCommunity
+                ? $"{townPrefix}{village} 家庭情况说明："
+                : $"{townPrefix}{village}村民 {r.Name} 家庭情况说明：";
+        // 家庭情况说明优先按最新申请明细现场重建（每次生成即更新，不用库中旧文本）；无快照时回退库中旧文本
+        var reasonDetail = r.FamilyContext != null
+            ? FamilySituationTextBuilder.Build(r.FamilyContext).TrimEnd('。')
+            : (string.IsNullOrWhiteSpace(r.ReasonDetail) ? string.Empty : r.ReasonDetail.TrimEnd('。'));
+        var category = ClassificationConstants.ConvertFromCode(r.CategoryCode);
+        string line;
+        if (string.IsNullOrWhiteSpace(category))
+            line = string.IsNullOrWhiteSpace(reasonDetail) ? r.Name : $"{head}{reasonDetail}。";
+        else if (string.IsNullOrWhiteSpace(reasonDetail))
+            line = head;
+        else
+            line = $"{head}{reasonDetail}（{category}）。";
+        return string.IsNullOrWhiteSpace(oneAffairMatters)
+            ? line
+            : $"{line}一事一议事由：{oneAffairMatters}";
+    }
+
+    /// <summary>
+    /// 社区/村名规范化：去"村民委员会/村委会"后缀并补"村"（柳树村委会→柳树村）；
+    /// 社区/居委会保留原名（作"社区居民"表述，不加"村民"）
+    /// </summary>
+    private static string TrimVillageSuffix(string? community)
+    {
+        var c = (community ?? string.Empty).Trim();
+        if (string.IsNullOrEmpty(c)) return string.Empty;
+        foreach (var suffix in new[] { "村民委员会", "村委会" })
+        {
+            if (c.EndsWith(suffix, StringComparison.Ordinal) && c.Length > suffix.Length)
+            {
+                var v = c[..^suffix.Length];
+                return v.EndsWith("村", StringComparison.Ordinal) ? v : v + "村";
+            }
+        }
+        return c;
+    }
+
+    public async Task<Result<MonthlyMeeting>> SaveMeetingAsync(MonthlyMeeting meeting, CancellationToken ct = default)
+    {
+        meeting.Town = string.IsNullOrEmpty(meeting.Town) ? "全部" : meeting.Town;
+
+        var exist = await _db.QuerySingleAsync<MonthlyMeeting>(
+            "SELECT id FROM nc_biz_monthly_meetings WHERE year = $1 AND month = $2 AND town = $3",
+            ct, meeting.Year, meeting.Month, meeting.Town);
+        if (exist.IsFailure)
+        {
+            LogError($"保存会议记录前查重失败，已中止: {exist.ErrorCode} {exist.Message}");
+            return Result.Failure<MonthlyMeeting>(exist.ErrorCode!, exist.Message!);
+        }
+        if (exist.Value != null)
+        {
+            // member_info 为空时保留库中原值（避免覆盖自动带出的新增成员列表）
+            var upd = @"UPDATE nc_biz_monthly_meetings SET meeting_time=$4, host=$5, recorder=$6, attendees=$7,
+                        absentees=$8, member_info=COALESCE(NULLIF($9, ''), member_info), apply_category=$10, updated_at=NOW()
+                        WHERE year=$1 AND month=$2 AND town=$3";
+            var r = await _db.ExecuteNonQueryAsync(upd, ct, meeting.Year, meeting.Month, meeting.Town,
+                meeting.MeetingTime, meeting.Host, meeting.Recorder, meeting.Attendees,
+                meeting.Absentees, meeting.MemberInfo, meeting.ApplyCategory);
+            if (r.IsFailure) return Result.Failure<MonthlyMeeting>(r.ErrorCode!, r.Message!);
+            Logger.LogBusiness("更新会议记录", ("Year", meeting.Year), ("Month", meeting.Month), ("Town", meeting.Town));
+            return Result.Success(meeting);
+        }
+
+        var sql = @"INSERT INTO nc_biz_monthly_meetings
+            (year, month, town, meeting_time, host, recorder, attendees, absentees, member_info, apply_category, created_by, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+            RETURNING id";
+        var ins = await _db.ExecuteScalarAsync(sql, ct, meeting.Year, meeting.Month, meeting.Town,
+            meeting.MeetingTime, meeting.Host, meeting.Recorder, meeting.Attendees, meeting.Absentees,
+            meeting.MemberInfo, meeting.ApplyCategory, meeting.CreatedBy);
+        if (ins.IsFailure) return Result.Failure<MonthlyMeeting>(ins.ErrorCode!, ins.Message!);
+        meeting.Id = ins.Value;
+        Logger.LogBusiness("保存会议记录", ("Year", meeting.Year), ("Month", meeting.Month), ("Town", meeting.Town));
+        return Result.Success(meeting);
+    }
+
+    public async Task<Result<bool>> SaveMeetingAttendanceHistoryAsync(
+        int year, int month, string town, string attendees, string absentees, string createdBy, CancellationToken ct = default)
+    {
+        var t = string.IsNullOrEmpty(town) ? "全部" : town;
+        var sql = @"INSERT INTO nc_biz_meeting_attendance_history
+            (year, month, town, attendees, absentees, created_by, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            RETURNING id";
+        var ins = await _db.ExecuteScalarAsync(sql, ct, year, month, t, attendees, absentees, createdBy);
+        if (ins.IsFailure)
+            return Result.Failure<bool>(ins.ErrorCode!, ins.Message!);
+        Logger.LogBusiness("保存会议出席/缺席历史", ("Year", year), ("Month", month), ("Town", t));
+        return Result.Success(true);
+    }
+
+    public async Task<Result<MonthlyMeetingAttendance>> GetLatestMeetingAttendanceAsync(
+        int year, int month, string town, CancellationToken ct = default)
+    {
+        var t = string.IsNullOrEmpty(town) ? "全部" : town;
+        var result = await _db.QuerySingleAsync<MonthlyMeetingAttendance>(
+            @"SELECT id, year, month, town, attendees, absentees, created_by, created_at
+              FROM nc_biz_meeting_attendance_history
+              WHERE year = $1 AND month = $2 AND town = $3
+              ORDER BY created_at DESC, id DESC
+              LIMIT 1", ct, year, month, t);
+        if (result.IsFailure)
+            return Result.Failure<MonthlyMeetingAttendance>(result.ErrorCode!, result.Message!);
+        return Result.Success(result.Value ?? new MonthlyMeetingAttendance { Year = year, Month = month, Town = t });
+    }
+
+    public async Task<Result<MonthlyMeetingAttendance>> GetLatestMeetingAttendanceByTownAsync(
+        string town, CancellationToken ct = default)
+    {
+        var t = string.IsNullOrEmpty(town) ? "全部" : town;
+        // 不限月份：当月尚未生成会议记录时也要能回填最近一次（否则默认值恒空）；
+        // 同乡镇优先于「全部」（town 归一与 GetLatestMeetingAttendanceAsync 同口径）。
+        var result = await _db.QuerySingleAsync<MonthlyMeetingAttendance>(
+            @"SELECT id, year, month, town, attendees, absentees, created_by, created_at
+              FROM nc_biz_meeting_attendance_history
+              WHERE town = $1 OR town = '全部'
+              ORDER BY (town = $1) DESC, created_at DESC, id DESC
+              LIMIT 1", ct, t);
+        if (result.IsFailure)
+            return Result.Failure<MonthlyMeetingAttendance>(result.ErrorCode!, result.Message!);
+        return Result.Success(result.Value ?? new MonthlyMeetingAttendance { Town = t });
+    }
+
+    // ─────────────────── 导出 ───────────────────
+
+    public async Task<Result<byte[]>> ExportAsync(int year, int month, string format = "Excel", CancellationToken ct = default)
+    {
+        var reportResult = await GetAsync(year, month, ct);
+        if (reportResult.IsFailure)
+            return Result.Failure<byte[]>(reportResult.ErrorCode!, reportResult.Message!);
+        var report = reportResult.Value;
+        if (report == null)
+            return Result.Failure<byte[]>(ErrorCodes.NOT_FOUND, "报表不存在");
+
+        byte[] bytes;
+        if (string.Equals(format, "Excel", StringComparison.OrdinalIgnoreCase))
+        {
+            OfficeOpenXml.ExcelPackage.License.SetNonCommercialOrganization("民政社会救助管理系统");
+            using var package = new OfficeOpenXml.ExcelPackage();
+            var ws = package.Workbook.Worksheets.Add($"{year}年{month}月月报表");
+            var headers = new[] { "年份", "月份", "总档案数", "新增档案", "停止档案", "总金额" };
+            for (var i = 0; i < headers.Length; i++)
+            {
+                ws.Cells[1, i + 1].Value = headers[i];
+                ws.Cells[1, i + 1].Style.Font.Bold = true;
+            }
+            ws.Cells[2, 1].Value = year;
+            ws.Cells[2, 2].Value = month;
+            ws.Cells[2, 3].Value = report.TotalArchives;
+            ws.Cells[2, 4].Value = report.NewArchives;
+            ws.Cells[2, 5].Value = report.StoppedArchives;
+            ws.Cells[2, 6].Value = report.TotalAmount;
+            for (var i = 1; i <= headers.Length; i++)
+                ws.Column(i).Width = 14;
+            bytes = package.GetAsByteArray();
+        }
+        else
+        {
+            var csv = $"年份,月份,总档案数,新增档案,停止档案,总金额\n{year},{month},{report.TotalArchives},{report.NewArchives},{report.StoppedArchives},{report.TotalAmount}";
+            bytes = global::System.Text.Encoding.UTF8.GetBytes(csv);
+        }
+        LogInfo($"报表导出成功: {year}年{month}月");
+        return Result.Success(bytes);
+    }
+
+    // ─────────────────── 私有映射实体 ───────────────────
+
+    private class MonthlyAggregate
+    {
+        public int TotalArchives { get; set; }
+        public int NewArchives { get; set; }
+        public int StoppedArchives { get; set; }
+        public decimal TotalAmount { get; set; }
+    }
+
+    private class ClassificationCount
+    {
+        public string ClassificationResult { get; set; } = string.Empty;
+        public int Count { get; set; }
+        public decimal TotalAmount { get; set; }
+    }
+
+    private class AddedRowData
+    {
+        public long? ApplicationId { get; set; }
+        public string? ApplicantName { get; set; }
+        public string? ApplicantIdCard { get; set; }
+        public string? Gender { get; set; }
+        public string? Address { get; set; }
+        public int? FamilySize { get; set; }
+        public string? ClassificationResult { get; set; }
+        public DateTime? ApprovalAt { get; set; }
+        public string? District { get; set; }
+        public string? Town { get; set; }
+        public string? Community { get; set; }
+        public string? HukouType { get; set; }
+        public string? ApplicationReason { get; set; }
+        public string? ApplicationReasonDetail { get; set; }
+        public string? MaritalStatus { get; set; }
+        public string? HealthStatus { get; set; }
+        public string? BankAccount { get; set; }
+        public decimal? TotalFamilyIncome { get; set; }
+        public decimal? WorkIncomeTotal { get; set; }
+        public decimal? BusinessIncomeTotal { get; set; }
+        public decimal? PropertyIncomeTotal { get; set; }
+        public decimal? TransferIncomeTotal { get; set; }
+        public decimal? OtherIncomeTotal { get; set; }
+        public decimal? PerCapitaIncome { get; set; }
+        public decimal? TotalAnnualIncome { get; set; }
+        public decimal? PerCapitaAnnualIncome { get; set; }
+        public decimal? RigidExpenditure { get; set; }
+        public decimal? AlimonyIncome { get; set; }
+        public decimal? FamilyLandArea { get; set; }
+        public decimal? LandIncomeTotal { get; set; }
+        public decimal? SubsidyTotal { get; set; }
+    }
+
+    private class SpecialApprovalIdRow
+    {
+        public long? ApplicationId { get; set; }
+    }
+
+    /// <summary>一事一议会议出席人员读取行（nc_biz_special_approvals.meeting_members）</summary>
+    private class SpecialMeetingMembersRow
+    {
+        public string? MeetingMembers { get; set; }
+    }
+
+    /// <summary>一事一议申报表事由读取行（纪要成员行「一事一议事由」补充用）</summary>
+    private class SpecialMattersRow
+    {
+        public long? ApplicationId { get; set; }
+        public string? SpecialMatters { get; set; }
+    }
+
+    private class SickMemberRow
+    {
+        public long? ApplicationId { get; set; }
+        public string? Name { get; set; }
+        public string? HealthStatus { get; set; }
+    }
+
+    private class SupporterGroupRow
+    {
+        public long? ApplicationId { get; set; }
+        public string? PersonType { get; set; }
+        public long? Cnt { get; set; }
+        public decimal? TotalFee { get; set; }
+    }
+
+    private class AssetCountRow
+    {
+        public long? ApplicationId { get; set; }
+        public long? Cnt { get; set; }
+    }
+
+    private class HeadRelationRow
+    {
+        public long? ApplicationId { get; set; }
+        public string? RelationshipToHead { get; set; }
+    }
+
+    private class SubsidyRatioRow
+    {
+        public long? ApplicationId { get; set; }
+        public decimal? RatioPercent { get; set; }
+    }
+
+    private class StoppedRowData
+    {
+        public string? HeadName { get; set; }
+        public string? HeadIdCard { get; set; }
+        public int? FamilySize { get; set; }
+        public string? Address { get; set; }
+        public string? ClassificationResult { get; set; }
+        public decimal? TotalGuaranteeAmount { get; set; }
+        public string? StopReason { get; set; }
+        public DateTime? StopDate { get; set; }
+        public DateTime? FirstApprovedAt { get; set; }
+        public decimal? ClassifiedSubsidyAmount { get; set; }
+        public string? District { get; set; }
+        public string? Town { get; set; }
+        public string? Community { get; set; }
+        public string? SourceTable { get; set; }   // 跨类停止行：导入库表名（追溯旧户月保障金/分类施保）
+        public long? SourceId { get; set; }        // 跨类停止行：导入库家庭表 ID
+    }
+
+    /// <summary>成员减员行（边缘家庭"停止、减员汇总表"——减员类别；来源：成员变更/成员死亡变更记录）</summary>
+    private class MemberReductionRowData
+    {
+        public long ChangeId { get; set; }
+        public long ApplicationId { get; set; }
+        public DateTime? ChangeDate { get; set; }
+        public string? OldClassification { get; set; }
+        public string? HeadName { get; set; }
+        public string? HeadIdCard { get; set; }
+        public int? FamilySize { get; set; }
+        public string? District { get; set; }
+        public string? Town { get; set; }
+        public string? Community { get; set; }
+        public string? Address { get; set; }
+
+        /// <summary>减员明细（多行：姓名|原因名|yyyy-MM-dd|备注，来源 nc_biz_change_details）</summary>
+        public string? MemberDetail { get; set; }
+
+        /// <summary>死亡记录（多行：姓名|死亡日期，来源 nc_biz_death_records）</summary>
+        public string? DeathInfo { get; set; }
+
+        /// <summary>明细缺失时的兜底原因（变更记录 change_reason 原文）</summary>
+        public string? FallbackReason { get; set; }
+    }
+
+    /// <summary>导入库（农村/城市低保）家庭表追溯行：旧户月保障金 + 分类施保</summary>
+    private sealed class ImportedStopAmountRow
+    {
+        public string? SourceTable { get; set; }
+        public long? SourceId { get; set; }
+        public decimal? MonthlyGuaranteeAmount { get; set; }
+        public decimal? FamilyClassifiedAmount { get; set; }
+        public decimal? PersonClassifiedAmount { get; set; }
+    }
+
+    /// <summary>
+    /// 按 (source_table, source_id) 批量追溯导入库农村/城市低保家庭表的旧户月保障金与分类施保。
+    /// 跨类停止（CategoryStop，原为低保）的旧金额在变类后被主表覆盖，只能从导入库原档案追溯。
+    /// 表名走白名单（农村/城市低保家庭表），杜绝动态表名 SQL 注入。
+    /// </summary>
+    private async Task<Result<Dictionary<(string Table, long Id), (decimal Monthly, decimal Classified)>>> LoadImportedStopAmountMapAsync(
+        IEnumerable<(string Table, long Id)> sourceKeys, CancellationToken ct = default)
+    {
+        var map = new Dictionary<(string, long), (decimal, decimal)>();
+        var keys = (sourceKeys ?? Enumerable.Empty<(string, long)>())
+            .Where(k => !string.IsNullOrWhiteSpace(k.Table) && k.Id > 0)
+            .Distinct()
+            .ToArray();
+        if (keys.Length == 0)
+            return Result.Success(map);
+
+        foreach (var grp in keys.GroupBy(k => k.Table))
+        {
+            // 白名单：仅允许农村/城市低保家庭表（跨类停止的原享受类别必为低保）
+            var table = grp.Key switch
+            {
+                "nc_biz_rural_subsistence_families" => "nc_biz_rural_subsistence_families",
+                "nc_biz_urban_subsistence_families" => "nc_biz_urban_subsistence_families",
+                _ => null
+            };
+            if (table == null) continue;
+            var ids = grp.Select(g => g.Id).Distinct().ToArray();
+            var sql = $@"SELECT '{table}'::text AS source_table, id AS source_id,
+                                monthly_guarantee_amount, family_classified_amount, person_classified_amount
+                         FROM {table}
+                         WHERE id = ANY($1::bigint[])";
+            var result = await _db.QueryAsync<ImportedStopAmountRow>(sql, ct, ids);
+            if (result.IsFailure)
+                return Result.Failure<Dictionary<(string, long), (decimal, decimal)>>(result.ErrorCode!, result.Message!);
+            foreach (var row in result.Value ?? new List<ImportedStopAmountRow>())
+            {
+                if (row.SourceId == null) continue;
+                map[(table, row.SourceId.Value)] = (
+                    row.MonthlyGuaranteeAmount ?? 0,
+                    (row.FamilyClassifiedAmount ?? 0) + (row.PersonClassifiedAmount ?? 0));
+            }
+        }
+        return Result.Success(map);
+    }
+
+    private class AmountChangeRow
+    {
+        public long? ChangeId { get; set; }
+        public string? HeadName { get; set; }
+        public string? HeadIdCard { get; set; }
+        public int? FamilySize { get; set; }
+        public string? Address { get; set; }
+        public string? ClassificationResult { get; set; }
+        public DateTime? ChangeDate { get; set; }
+        public decimal? OldGuaranteeAmount { get; set; }
+        public decimal? NewGuaranteeAmount { get; set; }
+        public string? ChangeReason { get; set; }
+        public string? ChangeReasonType { get; set; }
+        public decimal? ClassifiedSubsidyAmount { get; set; }
+        public string? District { get; set; }
+        public string? Town { get; set; }
+        public string? Community { get; set; }
+
+        /// <summary>新档案ID（分类施保现额取链尾现役档案用）</summary>
+        public long? NewApplicationId { get; set; }
+
+        /// <summary>新档分类施保金额（LEFT JOIN n.classified_subsidy_amount；无新档回退本档值）</summary>
+        public decimal? NewClassifiedSubsidyAmount { get; set; }
+
+        /// <summary>新档户月保障金（LEFT JOIN n.household_monthly_guarantee_amount，与 Before 快照旧值同为户月口径配对）</summary>
+        public decimal? NewHouseholdMonthly { get; set; }
+    }
+
+    private class DeathRow
+    {
+        public string? HeadName { get; set; }
+        public string? HeadIdCard { get; set; }
+        public string? Address { get; set; }
+        public string? DeceasedName { get; set; }
+        public string? MemberIdCard { get; set; }
+        public DateTime? DeathDate { get; set; }
+        public string? NewHeadName { get; set; }
+        public string? ClassificationResult { get; set; }
+        public string? District { get; set; }
+        public string? Town { get; set; }
+        public string? Community { get; set; }
+    }
+
+    /// <summary>退出事件行（三源 UNION 识别退出对象）</summary>
+    private class ExitEventRow
+    {
+        public long? ApplicationId { get; set; }
+        public DateTime? EventDate { get; set; }
+        public string? EventType { get; set; }
+        public string? ExitReason { get; set; }
+        public string? OldClassification { get; set; }
+        public string? HeadIdCard { get; set; }
+    }
+
+    /// <summary>退出对象申请详情行</summary>
+    private class ExitDetailRow
+    {
+        public long Id { get; set; }
+        public string? ApplicantName { get; set; }
+        public string? ApplicantIdCard { get; set; }
+        public int? FamilySize { get; set; }
+        public string? ClassificationResult { get; set; }
+        public string? Status { get; set; }
+    }
+
+    /// <summary>渐退期判定行</summary>
+    private class ExitGraceRow
+    {
+        public long? ApplicationId { get; set; }
+        public DateTime? StartDate { get; set; }
+        public DateTime? EndDate { get; set; }
+    }
+
+    /// <summary>停旧建新目标档案行（原档案 → 新档案分类 + 新档案 ID）</summary>
+    private class RebuildTargetRow
+    {
+        public long? OriginalApplicationId { get; set; }
+        public long? Id { get; set; }
+        public string? ClassificationResult { get; set; }
+    }
+
+    /// <summary>户主变更档案行（户主死亡/户主变更变更记录所在档案）</summary>
+    private class HeadChangeAppRow
+    {
+        public long? ApplicationId { get; set; }
+    }
+
+    /// <summary>跨类停保记录的变更原因类型行（经济复核/成员变更）</summary>
+    private class ChangeReasonTypeRow
+    {
+        public long? ApplicationId { get; set; }
+        public string? ChangeReasonType { get; set; }
+    }
+
+    /// <summary>
+    /// 导入库纳入时间（享受日期来源）映射行
+    /// </summary>
+    private class ImportedDateRow
+    {
+        public string? ApplicantIdCard { get; set; }
+        public string? ImportedDate { get; set; }
+    }
+
+    /// <summary>
+    /// 低保导入库户行（施保金减发数据源）
+    /// </summary>
+    private class ShiBaoFamilyRow
+    {
+        public string? Category { get; set; }
+        public string? ApplicantName { get; set; }
+        public string? ApplicantIdCard { get; set; }
+        public string? MemberNames { get; set; }
+        public string? MemberIdCards { get; set; }
+        public decimal PersonClassifiedAmount { get; set; }
+        public decimal MonthlyGuaranteeAmount { get; set; }
+        public string? Address { get; set; }
+        public string? District { get; set; }
+        public string? Street { get; set; }
+        public string? Town { get; set; }
+        public string? Community { get; set; }
+        public string? ImportedDate { get; set; }
+        public bool IsRural { get; set; }
+    }
+
+    /// <summary>
+    /// 变更链分类施保减发行（施保金减发数据源之二：nc_biz_change_records 挂旧档，
+    /// 户主/地址/类别/原现户月取旧档，死亡成员取 nc_biz_death_records；
+    /// 取数带互斥守卫——该链已有保障金变更登记记录时不出行，见 GetShiBaoReductionRowsAsync 注释）
+    ///
+    /// 理由/成员/类别/原低保金四项一律取"链主变更记录"（Main*）与"变更前后分类"（Old/NewClassification）：
+    /// 分类施保减除/分类施保变更是附属记录，自身不带原因语义，禁止拿它当理由（曾硬编码"户主死亡"致
+    /// 经济复核退出的张彦亮误印户主死亡）。原低保金优先取链上 Before 快照（旧档可能被判定覆写）。
+    /// </summary>
+    private class ShiBaoReduceRow
+    {
+        public long Id { get; set; }
+        public DateTime ChangeDate { get; set; }
+        public decimal OldGuaranteeAmount { get; set; }
+        public decimal NewGuaranteeAmount { get; set; }
+        public string? ApplicantName { get; set; }
+        public string? ApplicantIdCard { get; set; }
+        public string? ClassificationResult { get; set; }
+        public string? Address { get; set; }
+        public string? District { get; set; }
+        public string? Town { get; set; }
+        public string? Community { get; set; }
+        public decimal OldMonthly { get; set; }
+        public decimal? NewMonthly { get; set; }
+        public string? DeceasedName { get; set; }
+        /// <summary>本记录变更前/后分类（整户退出判定与类别列用；空则回退旧/新档当前分类）</summary>
+        public string? OldClassification { get; set; }
+        public string? NewClassification { get; set; }
+        /// <summary>新档当前分类（new_classification 为空时的退出判定兜底）</summary>
+        public string? NewClassificationResult { get; set; }
+        /// <summary>本记录变更原因原文（主记录缺失时的理由兜底）</summary>
+        public string? ChangeReason { get; set; }
+        /// <summary>链主变更记录（经济复核/户主死亡/成员变更/跨大类转入）的原因类型与原因原文</summary>
+        public string? MainReasonType { get; set; }
+        public string? MainReason { get; set; }
+        /// <summary>主记录减员/死亡明细：被减成员姓名、减员理由（new_value 的 | 分隔首段），顿号连接</summary>
+        public string? RemoveMembers { get; set; }
+        public string? RemoveReasons { get; set; }
+        /// <summary>链上 Before 快照 JSON（含 OldHouseholdMonthlyGuaranteeAmount 时才有值）</summary>
+        public string? OldSnapshotJson { get; set; }
+    }
+
+    /// <summary>
+    /// 分类施保增发候选户成员行（低保导入库 persons JOIN families，含户内全部成员；
+    /// TotalClassifiedAmount 用于区分符合增发条件成员与户内其他成员）
+    /// </summary>
+    private class ClassifiedAddPersonRow
+    {
+        public string? Category { get; set; }
+        public string? ApplicantName { get; set; }
+        public string? ApplicantIdCard { get; set; }
+        public string? Phone { get; set; }
+        public int? FamilySize { get; set; }
+        public string? Address { get; set; }
+        public string? District { get; set; }
+        public string? Street { get; set; }
+        public string? Town { get; set; }
+        public string? Community { get; set; }
+        public string? MemberName { get; set; }
+        public string? Gender { get; set; }
+        public DateTime? BirthDate { get; set; }
+        public string? Ethnicity { get; set; }
+        public string? HealthStatus { get; set; }
+        public string? DisabilityType { get; set; }
+        public string? DisabilityLevel { get; set; }
+        public string? Relationship { get; set; }
+        public decimal? AnnualIncome { get; set; }
+        public string? MemberIdCard { get; set; }
+        public decimal TotalClassifiedAmount { get; set; }
+        public bool IsRural { get; set; }
+    }
+
+    /// <summary>
+    /// 分类施保增发落库快照行（nc_biz_monthly_classified_adds，members_json 为 jsonb → string）
+    /// </summary>
+    private class ClassifiedAddSnapshotRow
+    {
+        public string? Category { get; set; }
+        public bool IsRural { get; set; }
+        public string? ApplicantIdCard { get; set; }
+        public string? ApplicantName { get; set; }
+        public string? ApplicantGender { get; set; }
+        public string? ApplicantBirthDate { get; set; }
+        public string? Nationality { get; set; }
+        public string? HealthStatus { get; set; }
+        public int? FamilySize { get; set; }
+        public string? Phone { get; set; }
+        public string? Address { get; set; }
+        public string? ClassifiedType { get; set; }
+        public int? Count { get; set; }
+        public decimal? Amount { get; set; }
+        public string? MembersJson { get; set; }
+    }
+}

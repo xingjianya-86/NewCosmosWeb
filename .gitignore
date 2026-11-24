@@ -1,0 +1,48 @@
+# Build
+bin/
+obj/
+publish/
+artifacts/
+*.user
+*.suo
+.vs/
+
+# Node
+node_modules/
+web/dist/
+web/.vite/
+*.tsbuildinfo
+
+# Secrets / local config
+appsettings.Local.json
+*.local.json
+config/database.ini
+config/network.ini
+config/update.ini
+AGENTS.local.md
+deploy.local.ps1
+*.pfx
+*.key
+*.pem
+*.jks
+keystore.props
+
+# Runtime
+logs/
+Logs/
+backups/
+Backups/
+output/
+输出/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Legacy reference copies: keep source, never build output
+legacy/**/bin/
+legacy/**/obj/
+legacy/**/publish/
+# 原库只作本机只读参考，不进入新仓库（原库仍在 D:\Projects\NewCosmosCode）
+legacy/NewCosmos.Desktop/

@@ -1,0 +1,242 @@
+using System.Runtime.CompilerServices;
+using NewCosmos.Constants;
+
+namespace NewCosmos.Models.Results;
+
+/// <summary>
+/// 操作结果基类——不含返回值（带值版本见 Result&lt;T&gt;）
+/// </summary>
+public class Result
+{
+    public bool IsSuccess { get; }
+    public bool IsFailure => !IsSuccess;
+    public string ErrorCode { get; } = string.Empty;
+    public string Message { get; } = string.Empty;
+    public IReadOnlyList<string> Errors { get; }
+
+    protected Result(bool isSuccess, string errorCode, string message, IReadOnlyList<string> errors)
+    {
+        IsSuccess = isSuccess;
+        ErrorCode = errorCode;
+        Message = message;
+        Errors = errors ?? Array.Empty<string>();
+    }
+
+    /// <summary>
+    /// 创建成功结果
+    /// </summary>
+    public static Result Success() => new(true, null, null, null);
+
+    /// <summary>
+    /// 创建成功结果（带警告文案）：主操作已提交但后续联动步骤失败时使用，
+    /// UI 应展示 Message 提示用户可重试联动（如高龄停发的导入台账联动标记）。
+    /// </summary>
+    public static Result SuccessWithWarning(string warning) => new(true, null, warning, null);
+
+    /// <summary>
+    /// 创建失败结果
+    /// </summary>
+    public static Result Failure(string errorCode, string message, params string[] errors) =>
+        new(false, errorCode, message, errors);
+
+    /// <summary>
+    /// 创建带值的成功结果
+    /// </summary>
+    public static Result<T> Success<T>(T value) => Result<T>.Success(value);
+
+    /// <summary>
+    /// 创建带值的失败结果
+    /// </summary>
+    public static Result<T> Failure<T>(string errorCode, string message, params string[] errors) =>
+        Result<T>.Failure(errorCode, message, errors);
+
+    /// <summary>
+    /// 从异常创建失败结
+/// </summary>
+    /// <summary>
+    /// 失败即抛出 BusinessException（用于必须中断事务的收尾步骤）。
+    /// 收敛各处 "if (result.IsFailure) throw new BusinessException(errorCode ?? ..., message ?? ...)" 样板，
+    /// 统一补齐空错误码/空消息。业务规则校验仍应优先返回 Result，不以此替代正常流程。
+    /// </summary>
+    public void ThrowIfFailure(string operation)
+    {
+        if (IsFailure)
+            throw new BusinessException(
+                string.IsNullOrEmpty(ErrorCode) ? ErrorCodes.UNKNOWN_ERROR : ErrorCode,
+                string.IsNullOrEmpty(Message) ? $"{operation}失败" : $"{operation}失败: {Message}");
+    }
+
+    public static Result FromException(Exception ex, string errorCode = null)
+    {
+        var code = errorCode ?? GetErrorCodeFromException(ex);
+        return Failure(code, ex.Message);
+    }
+
+    /// <summary>
+    /// 从异常创建失败结
+/// </summary>
+    public static Result<T> FromException<T>(Exception ex, string errorCode = null)
+    {
+        var code = errorCode ?? GetErrorCodeFromException(ex);
+        return Failure<T>(code, ex.Message);
+    }
+
+    private static string GetErrorCodeFromException(Exception ex)
+    {
+        // 沿内部异常链识别连接级失败（网络中断/超时/IO），使弱网错误映射为可操作的提示，
+        // 而非笼统的 UNKNOWN_ERROR/DB_QUERY_ERROR。类型按名称判定以避免 Models 层依赖 Npgsql/网络类型。
+        for (var current = ex; current != null; current = current.InnerException)
+        {
+            var typeName = current.GetType().Name;
+
+            if (typeName is "NpgsqlException" or "PostgresException")
+            {
+                var sqlState = current.GetType().GetProperty("SqlState")?.GetValue(current)?.ToString()
+                    ?? current.GetType().GetProperty("ErrorCode")?.GetValue(current)?.ToString();
+
+                if (string.IsNullOrEmpty(sqlState))
+                    return ErrorCodes.DB_CONNECTION_FAILED; // 无 SQLSTATE 的 Npgsql 异常=连接级
+
+                if (sqlState.StartsWith("08", StringComparison.Ordinal))
+                    return ErrorCodes.DB_CONNECTION_FAILED;
+                return sqlState switch
+                {
+                    "57014" => ErrorCodes.DB_TIMEOUT,
+                    "23505" => ErrorCodes.DB_UNIQUE_VIOLATION,
+                    "23503" => ErrorCodes.DB_FOREIGN_KEY_VIOLATION,
+                    _ => ErrorCodes.DB_QUERY_ERROR
+                };
+            }
+
+            switch (typeName)
+            {
+                case "SocketException":
+                case "IOException":
+                    return ErrorCodes.DB_CONNECTION_FAILED;
+                case "TimeoutException":
+                    return ErrorCodes.DB_TIMEOUT;
+            }
+        }
+
+        return ex switch
+        {
+            ValidationException => ErrorCodes.VALIDATION_FAILED,
+            BusinessException be => be.ErrorCode,
+            _ => ErrorCodes.UNKNOWN_ERROR
+        };
+    }
+}
+
+/// <summary>
+/// 操作结果泛型- 包含返回
+/// </summary>
+public class Result<T> : Result
+{
+    public T Value { get; }
+
+    /// <summary>成功且携带非空值。收敛大量 <c>IsSuccess &amp;&amp; Value != null</c> 组合判断。</summary>
+    [System.Diagnostics.CodeAnalysis.MemberNotNullWhen(true, nameof(Value))]
+    public bool HasValue => IsSuccess && Value is not null;
+
+    private Result(bool isSuccess, T value, string errorCode, string message, IReadOnlyList<string> errors)
+        : base(isSuccess, errorCode, message, errors)
+    {
+        Value = value;
+    }
+
+    /// <summary>
+    /// 创建成功结果
+    /// </summary>
+    public static Result<T> Success(T value) => new(true, value, null, null, null);
+
+    /// <summary>
+    /// 创建失败结果
+    /// </summary>
+    public new static Result<T> Failure(string errorCode, string message, params string[] errors) =>
+        new(false, default!, errorCode, message, errors);
+
+    /// <summary>
+    /// 映射到新类型
+    /// </summary>
+    public Result<TNew> Map<TNew>(Func<T, TNew> mapper)
+    {
+        return HasValue
+            ? Success(mapper(Value))
+            : Failure<TNew>(ErrorCode!, Message!, Errors.ToArray());
+    }
+
+    /// <summary>
+    /// 异步映射到新类型
+    /// </summary>
+    public async Task<Result<TNew>> MapAsync<TNew>(Func<T, Task<TNew>> mapper)
+    {
+        return HasValue
+            ? Success(await mapper(Value))
+            : Failure<TNew>(ErrorCode!, Message!, Errors.ToArray());
+    }
+
+    /// <summary>
+    /// 获取值或默认
+/// </summary>
+    public T? GetValueOrDefault(T? defaultValue = default) => IsSuccess ? Value : defaultValue;
+
+    /// <summary>
+    /// 获取值或抛出异常
+    /// </summary>
+    public T GetValueOrThrow()
+    {
+        if (HasValue)
+            return Value;
+        throw new BusinessException(ErrorCode ?? ErrorCodes.UNKNOWN_ERROR, Message ?? "未知错误");
+    }
+}
+
+/// <summary>
+/// 验证异常
+/// </summary>
+public class ValidationException : Exception
+{
+    public string FieldName { get; } = string.Empty;
+    public object? AttemptedValue { get; }
+
+    public ValidationException(string message) : base(message) { }
+
+    public ValidationException(string fieldName, string message, object? attemptedValue = null)
+        : base($"{fieldName}: {message}")
+    {
+        FieldName = fieldName;
+        AttemptedValue = attemptedValue;
+    }
+}
+
+/// <summary>
+/// 业务异常
+/// </summary>
+public class BusinessException : Exception
+{
+    public string ErrorCode { get; }
+    public Dictionary<string, object> Context { get; }
+
+    public BusinessException(string errorCode, string message)
+        : base(message)
+    {
+        ErrorCode = errorCode;
+        Context = new Dictionary<string, object>();
+    }
+
+    public BusinessException(string errorCode, string message, Exception innerException)
+        : base(message, innerException)
+    {
+        ErrorCode = errorCode;
+        Context = new Dictionary<string, object>();
+    }
+
+    /// <summary>
+    /// 添加上下文信息（支持链式调用
+/// </summary>
+    public BusinessException AddContext(string key, object value)
+    {
+        Context[key] = value;
+        return this;
+    }
+}

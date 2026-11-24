@@ -1,0 +1,7 @@
+{
+  "serverBaseUrl": "https://cosmos-static.sua17.cn:20000",
+  "registerToken": "",
+  "deviceKeyFile": "",
+  "heartbeatSeconds": 30,
+  "machineName": ""
+}

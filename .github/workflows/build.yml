@@ -1,0 +1,29 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - name: Build Core
+        run: dotnet build src/NewCosmos.Core/NewCosmos.Core.csproj -c Release
+      - name: Test Core
+        run: dotnet test tests/NewCosmos.Core.Tests/NewCosmos.Core.Tests.csproj -c Release --nologo
+      - name: Build Web
+        working-directory: web
+        run: |
+          npm ci
+          npm run build

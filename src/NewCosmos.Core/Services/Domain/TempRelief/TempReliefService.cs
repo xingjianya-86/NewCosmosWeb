@@ -1,0 +1,1746 @@
+using NewCosmos.Constants;
+using NewCosmos.Helpers;
+using NewCosmos.Models.Entities;
+using NewCosmos.Models.Results;
+using NewCosmos.Services.Core;
+using NewCosmos.Services.Database;
+using NewCosmos.Services.System;
+using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
+
+namespace NewCosmos.Services.Domain.TempRelief;
+
+/// <summary>
+/// 临时救助服务实现
+/// 业务规则：
+///  1. 申请人来源仅限导入台账库（5 个）与低保申请库（nc_biz_applications），不可自由录入
+///  2. 大额救助金额不填写；小额救助从配置档位选定额
+///  3. 同一身份证同一年度仅一条申请（终止也占名额；软删除释放名额）
+///  4. 跨来源检索一律**当前库优先、历史台账在后**（候选人排序去重见 TempReliefCandidateRanker，
+///     户籍解析见 ResolveHukouTypeAsync，政策清单见 GetPolicySnapshotAsync）
+/// </summary>
+public class TempReliefService : BaseService, ITempReliefService
+{
+    protected override string ServiceName => "TempReliefService";
+
+    private readonly IDatabaseService _db;
+    private readonly IStandardConfigService _standardConfigService;
+    private readonly IDictCacheService _dictCache;
+    private readonly UserManagement.IOrganizationService _organizationService;
+
+    public TempReliefService(IDatabaseService db, IStandardConfigService standardConfigService, IDictCacheService dictCache, UserManagement.IOrganizationService organizationService, ILoggerService logger)
+        : base(logger)
+    {
+        _db = db;
+        _standardConfigService = standardConfigService;
+        _dictCache = dictCache;
+        _organizationService = organizationService;
+    }
+
+    /// <summary>
+    /// 按"填报单位"名称查组织并取其联系电话。
+    /// 填报单位为空、或组织查不到 → 返回空串（文档口径，报表字段尽力而为）。
+    /// 查询失败/异常 → 如实返回 Failure（§7）：四个调用点都取 <c>.Value ?? ""</c>，
+    /// 行为不变，但失败不再被伪装成"该单位没有电话"。
+    /// </summary>
+    public async Task<Result<string>> GetReportUnitPhoneAsync(string? reportUnit, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(reportUnit))
+            return Result.Success(string.Empty);
+        try
+        {
+            var org = await _organizationService.GetByNameAsync(reportUnit.Trim(), ct);
+            if (org.IsFailure)
+                return Result.Failure<string>(org.ErrorCode!, org.Message!);
+            if (org.Value == null)
+                return Result.Success(string.Empty);
+            return Result.Success(org.Value.Phone ?? string.Empty);
+        }
+        catch (Exception ex)
+        {
+            LogError(ex, "按填报单位取单位电话失败");
+            return Result.FromException<string>(ex);
+        }
+    }
+
+    #region 候选人检索（仅限白名单表）
+
+    public async Task<Result<List<TempReliefCandidate>>> SearchCandidatesAsync(string keyword, string? excludeIdCard = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(keyword))
+            return Result.Success(new List<TempReliefCandidate>());
+
+        var results = new List<TempReliefCandidate>();
+        var kw = keyword.Trim();
+
+        foreach (var table in TempReliefConstants.AllowedSourceTables)
+        {
+            var result = await SearchCandidatesInTableAsync(table, kw, excludeIdCard, ct);
+            if (result.IsFailure)
+                return result;
+            results.AddRange(result.Value);
+        }
+
+        // ① 已在当前库建档的申请人：剔除其台账重复行（台账是旧快照，选中会带出错误的家庭类别/银行/家庭人数）。
+        //    批查失败 → 降级不去重（留 warn、不挡检索），顺序仍由 ② 保证当前库在前。
+        var filed = await LoadFiledApplicantIdCardsAsync(results, ct);
+        if (filed.IsSuccess)
+            results = TempReliefCandidateRanker.ExcludeFiledLedgerRows(results, filed.Value);
+        else
+            LogWarn($"当前库已建档身份证批查失败，跳过台账去重: {filed.Message}");
+
+        // ② 当前库在前 → 历史台账在后 → 身份证精确命中 → 姓名 → 记录 ID 较新在前（见 TempReliefCandidateRanker）
+        var ordered = TempReliefCandidateRanker.Order(results, kw);
+        return Result.Success(ordered.Count > 50 ? ordered.GetRange(0, 50) : ordered);
+    }
+
+    /// <summary>
+    /// 批查候选里「已是当前库申请人」的身份证（台账候选去重用）。
+    /// 无台账候选 → 直接 Success 空集（0 往返）；查询失败如实返回 Failure，由调用方决定降级（§7）。
+    /// [SQL 白名单背书] 表名是硬编码常量，值走 = ANY($1) 数组参数。
+    /// </summary>
+    private async Task<Result<List<string>>> LoadFiledApplicantIdCardsAsync(
+        IReadOnlyList<TempReliefCandidate> candidates, CancellationToken ct)
+    {
+        var ledgerIdCards = candidates
+            .Where(c => !string.Equals(c.SourceTable, TempReliefConstants.CurrentSourceTable, StringComparison.Ordinal))
+            .Select(c => c.IdCard)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (ledgerIdCards.Length == 0)
+            return Result.Success(new List<string>());
+
+        const string sql = @"SELECT DISTINCT applicant_id_card
+                             FROM nc_biz_applications
+                             WHERE applicant_id_card = ANY($1) AND deleted_at IS NULL";
+        var result = await _db.QueryAsync<string>(sql, ct, ledgerIdCards);
+        if (result.IsFailure)
+            return Result.Failure<List<string>>(result.ErrorCode!, result.Message!);
+        return Result.Success(result.Value ?? new List<string>());
+    }
+
+    private async Task<Result<List<TempReliefCandidate>>> SearchCandidatesInTableAsync(string table, string keyword, string? excludeIdCard, CancellationToken ct)
+    {
+        try
+        {
+            var parameters = new List<object> { $"%{keyword}%" };
+            var hasExclude = !string.IsNullOrWhiteSpace(excludeIdCard);
+            if (hasExclude) parameters.Add(excludeIdCard!);
+
+            var directSql = BuildDirectMatchSql(table, hasExclude);
+            var memberSql = BuildMemberMatchSql(table, hasExclude);
+            var sql = memberSql == null
+                ? directSql + " LIMIT 20"
+                : $"({directSql}) UNION ALL ({memberSql}) LIMIT 20";
+
+            var result = await _db.QueryAsync<TempReliefCandidateRow>(sql, ct, parameters.ToArray());
+            if (result.IsFailure)
+                return Result.Failure<List<TempReliefCandidate>>(result.ErrorCode!, result.Message!);
+
+            return Result.Success(result.Value.Select(r => r.ToCandidate(table)).ToList());
+        }
+        catch (Exception ex)
+        {
+            LogException(ex, $"检索来源表 {table} 失败");
+            return Result.FromException<List<TempReliefCandidate>>(ex);
+        }
+    }
+
+    /// <summary>直查臂：户主/申请人姓名或身份证命中（申请库过滤软删）。</summary>
+    private static string BuildDirectMatchSql(string table, bool hasExclude)
+    {
+        var sql = "SELECT " + BuildCandidateSelect(table) +
+            ", '' AS matched_member_name, '' AS matched_member_relation, '' AS matched_member_id_card" +
+            " FROM " + table + " WHERE ";
+        if (table == "nc_biz_applications") sql += "deleted_at IS NULL AND ";
+        sql += "(applicant_name ILIKE $1 OR applicant_id_card ILIKE $1)";
+        if (hasExclude) sql += " AND applicant_id_card != $2";
+        return sql;
+    }
+
+    /// <summary>
+    /// 成员命中回查户主臂：五台账 persons JOIN families（按 head_id_card）；
+    /// 申请库 LATERAL 查 nc_biz_family_members。排除户主本人行，避免与直查臂重复。
+    /// 无成员关联时返回 null。
+    /// </summary>
+    private static string? BuildMemberMatchSql(string table, bool hasExclude)
+    {
+        if (table == "nc_biz_applications")
+        {
+            var appSql = "SELECT " + BuildCandidateSelect(table, "a.") +
+                ", m.name AS matched_member_name, COALESCE(m.relationship_to_head,'') AS matched_member_relation, COALESCE(m.id_card,'') AS matched_member_id_card" +
+                " FROM nc_biz_applications a" +
+                " JOIN LATERAL (SELECT name, relationship_to_head, id_card FROM nc_biz_family_members fm" +
+                " WHERE fm.application_id = a.id AND (fm.name ILIKE $1 OR fm.id_card ILIKE $1)" +
+                " AND fm.deleted_at IS NULL AND COALESCE(fm.is_applicant,false) = false" +
+                " ORDER BY fm.id LIMIT 1) m ON true" +
+                " WHERE a.deleted_at IS NULL" +
+                " AND NOT (a.applicant_name ILIKE $1 OR a.applicant_id_card ILIKE $1)";
+            if (hasExclude) appSql += " AND a.applicant_id_card != $2";
+            return appSql;
+        }
+
+        var persons = TempReliefConstants.GetPersonsTable(table);
+        if (string.IsNullOrEmpty(persons)) return null;
+
+        var sql = "SELECT DISTINCT ON (f.id) " + BuildCandidateSelect(table, "f.") +
+            ", p.name AS matched_member_name, COALESCE(p.relationship,'') AS matched_member_relation, COALESCE(p.id_card,'') AS matched_member_id_card" +
+            $" FROM {persons} p JOIN {table} f ON f.applicant_id_card = p.head_id_card" +
+            " WHERE (p.name ILIKE $1 OR p.id_card ILIKE $1)" +
+            " AND COALESCE(p.relationship,'') <> 'Head'" +
+            " AND NOT (f.applicant_name ILIKE $1 OR f.applicant_id_card ILIKE $1)";
+        if (hasExclude) sql += " AND f.applicant_id_card != $2";
+        sql += " ORDER BY f.id, p.id";
+        return sql;
+    }
+
+    /// <summary>
+    /// 生成候选人查询 SELECT 列（各来源表列名统一；prefix 用于 JOIN 臂表别名 f./a.）
+    /// </summary>
+    private static string BuildCandidateSelect(string table, string prefix = "")
+    {
+        var p = prefix;
+        return table switch
+        {
+            // 农村/城市低保台账无 hukou_address 列，户籍地址缺省（户籍由表单从当前用户组织机构获取）
+            "nc_biz_rural_subsistence_families" or
+            "nc_biz_urban_subsistence_families" => string.Join(", ",
+                p + "id AS source_family_id",
+                p + "applicant_name AS name",
+                p + "applicant_id_card AS id_card",
+                $"COALESCE({p}phone,'') AS phone",
+                $"COALESCE({p}province,'') AS province",
+                $"COALESCE({p}city,'') AS city",
+                $"COALESCE({p}district,'') AS district",
+                $"COALESCE({p}address,'') AS detail_address",
+                $"COALESCE({p}address,'') AS family_address",
+                "'' AS hukou_address",
+                $"COALESCE({p}street,'') AS town",
+                $"COALESCE({p}community,'') AS village",
+                p + "family_size",
+                $"COALESCE({p}bank_name,'') AS bank_name",
+                $"COALESCE({p}bank_account,'') AS bank_account",
+                $"COALESCE({p}one_card_account,'') AS one_card_account"),
+            // 特困人员台账无 address 列，家庭住址存于 hukou_address，无详细地址分列
+            "nc_biz_destitute_families" => string.Join(", ",
+                p + "id AS source_family_id",
+                p + "applicant_name AS name",
+                p + "applicant_id_card AS id_card",
+                $"COALESCE({p}phone,'') AS phone",
+                $"COALESCE({p}province,'') AS province",
+                $"COALESCE({p}city,'') AS city",
+                $"COALESCE({p}district,'') AS district",
+                "'' AS detail_address",
+                $"COALESCE({p}hukou_address,'') AS family_address",
+                $"COALESCE({p}hukou_address,'') AS hukou_address",
+                $"COALESCE({p}street,'') AS town",
+                $"COALESCE({p}community,'') AS village",
+                p + "family_size",
+                $"COALESCE({p}bank_name,'') AS bank_name",
+                $"COALESCE({p}bank_account,'') AS bank_account",
+                $"COALESCE({p}one_card_account,'') AS one_card_account"),
+            // 低保边缘/刚性支出/其他困难台账无 family_size 列，只有 guarantee_size；无 hukou_address 列
+            "nc_biz_low_income_edge_families" or
+            "nc_biz_rigid_expenditure_families" or
+            "nc_biz_other_difficulty_families" => string.Join(", ",
+                p + "id AS source_family_id",
+                p + "applicant_name AS name",
+                p + "applicant_id_card AS id_card",
+                $"COALESCE({p}phone,'') AS phone",
+                $"COALESCE({p}province,'') AS province",
+                $"COALESCE({p}city,'') AS city",
+                $"COALESCE({p}district,'') AS district",
+                $"COALESCE({p}address,'') AS detail_address",
+                $"COALESCE({p}address,'') AS family_address",
+                "'' AS hukou_address",
+                $"COALESCE({p}street,'') AS town",
+                $"COALESCE({p}community,'') AS village",
+                p + "guarantee_size AS family_size",
+                "'' AS bank_name",
+                "'' AS bank_account",
+                "'' AS one_card_account"),
+            "nc_biz_applications" => string.Join(", ",
+                p + "id AS source_family_id",
+                p + "applicant_name AS name",
+                p + "applicant_id_card AS id_card",
+                $"COALESCE({p}gender,'') AS gender",
+                $"COALESCE({p}applicant_phone,'') AS phone",
+                $"COALESCE({p}province,'') AS province",
+                $"COALESCE({p}city,'') AS city",
+                $"COALESCE({p}district,'') AS district",
+                $"COALESCE({p}address,'') AS detail_address",
+                $"COALESCE({p}province||{p}city||{p}district||{p}town||{p}community,'') AS family_address",
+                $"COALESCE({p}hukou_address,'') AS hukou_address",
+                $"COALESCE({p}town,'') AS town",
+                $"COALESCE({p}community,'') AS village",
+                // 家庭人口 seed：档案主表 family_size（为 0 时取 confirmed_family_size）；
+                // 成员明细（LoadMemberSnapshotAsync）随后按口径覆盖，赡养义务人不计入
+                $"COALESCE(NULLIF({p}family_size, 0), {p}confirmed_family_size) AS family_size",
+                $"COALESCE({p}bank_name,'') AS bank_name",
+                $"COALESCE({p}bank_account,'') AS bank_account",
+                "'' AS one_card_account"),
+            _ => throw new ArgumentException($"来源表不在白名单内: {table}")
+        } + ", " + BuildHukouTypeSelect(table, prefix);
+    }
+
+    /// <summary>
+    /// 户籍类型快照取值（指定字段固定映射）：城乡低保台账无该列，按表名固定；
+    /// 其余白名单表直接读 hukou_type 列（农村/城镇，兼容申请库 Rural/Urban）
+    /// </summary>
+    private static string BuildHukouTypeSelect(string table, string prefix = "") => table switch
+    {
+        "nc_biz_rural_subsistence_families" => "'农村' AS hukou_type",
+        "nc_biz_urban_subsistence_families" => "'城镇' AS hukou_type",
+        _ => $"COALESCE({prefix}hukou_type,'') AS hukou_type"
+    };
+
+    public async Task<Result<TempReliefCandidate>> GetCandidateDetailAsync(string sourceTable, long sourceFamilyId, string? excludeIdCard = null, CancellationToken ct = default)
+    {
+        if (!TempReliefConstants.IsAllowedSourceTable(sourceTable))
+            return Result.Failure<TempReliefCandidate>(ErrorCodes.VALIDATION_FAILED, $"来源表不在白名单内: {sourceTable}");
+
+        try
+        {
+            var sql = "SELECT " + BuildCandidateSelect(sourceTable) + $" FROM {sourceTable} WHERE id = $1";
+            var result = await _db.QuerySingleAsync<TempReliefCandidateRow>(sql, ct, sourceFamilyId);
+            if (result.IsFailure || result.Value == null)
+                return Result.Failure<TempReliefCandidate>(ErrorCodes.NOT_FOUND, "未找到该候选人");
+
+            var candidate = result.Value.ToCandidate(sourceTable);
+
+            // 户籍分类缺失时跨来源兜底：当前库申请库优先，其次导入台账（见 ResolveHukouTypeAsync）
+            if (string.IsNullOrWhiteSpace(candidate.HukouType))
+            {
+                var hukouResult = await ResolveHukouTypeAsync(candidate.IdCard, ct);
+                if (hukouResult.IsFailure)
+                    return Result.Failure<TempReliefCandidate>(hukouResult.ErrorCode!, hukouResult.Message!);
+                candidate.HukouType = hukouResult.Value ?? string.Empty;
+            }
+
+            // 镇/村缺失时从地址文本解析（台账表 street/community 列常为空，地址中携带"XX镇XX村"）；户籍缺失时以家庭住址兜底
+            await ResolveTownVillageAsync(candidate, ct);
+            if (string.IsNullOrWhiteSpace(candidate.HukouAddress))
+            {
+                candidate.HukouAddress = candidate.FamilyAddress;
+            }
+
+            // 低保申请库来源：家庭类别取认定分类（如 农村低保/特困分散供养），供表单回显与救助原因默认值使用
+            if (sourceTable == "nc_biz_applications")
+            {
+                const string classSql = @"SELECT COALESCE(classification_result,'') AS classification_result
+                                          FROM nc_biz_applications WHERE id = $1";
+                var clsResult = await _db.QuerySingleAsync<PolicyClassRow>(classSql, ct, sourceFamilyId);
+                var cls = clsResult.HasValue ? clsResult.Value.ClassificationResult : string.Empty;
+                if (!string.IsNullOrWhiteSpace(cls))
+                    candidate.FamilyCategory = ClassificationConstants.ConvertFromCode(cls);
+            }
+            else
+            {
+                // 台账来源：家庭表无性别列 → 从成员明细表取户主性别，兜底用身份证第 17 位奇偶推导
+                var personsTable = TempReliefConstants.GetPersonsTable(sourceTable);
+                if (!string.IsNullOrEmpty(personsTable))
+                {
+                    const string genderSql = @"
+                        SELECT COALESCE(gender,'') AS gender
+                        FROM {PERSONS}
+                        WHERE family_id = $1 AND relationship = 'Head'
+                        ORDER BY id LIMIT 1";
+                    var genderResult = await _db.QuerySingleAsync<GenderRow>(
+                        genderSql.Replace("{PERSONS}", personsTable), ct, sourceFamilyId);
+                    if (genderResult.IsSuccess && !string.IsNullOrWhiteSpace(genderResult.Value?.Gender))
+                    {
+                        candidate.Gender = genderResult.Value.Gender;
+                    }
+                    else if (string.IsNullOrWhiteSpace(candidate.Gender))
+                    {
+                        candidate.Gender = InferGenderFromIdCard(candidate.IdCard);
+                    }
+                }
+
+                // 台账来源：家庭人数以成员明细表为准（家庭表 family_size 曾出现与明细不符）
+                if (!string.IsNullOrEmpty(personsTable))
+                {
+                    const string countSql = "SELECT COUNT(*) FROM {PERSONS} WHERE family_id = $1";
+                    var countResult = await _db.ExecuteScalarAsync<long>(countSql.Replace("{PERSONS}", personsTable), ct, sourceFamilyId);
+                    if (countResult.IsSuccess && countResult.Value > 0)
+                        candidate.FamilySize = (int)countResult.Value;
+                }
+            }
+
+            // 是否当年已申请
+            var applyYear = DateTime.Today.Year.ToString();
+            var annualResult = await CheckAnnualExistsAsync(candidate.IdCard, applyYear, null, ct);
+            if (annualResult.IsFailure)
+                return Result.Failure<TempReliefCandidate>(annualResult.ErrorCode!, annualResult.Message!);
+            candidate.HasAppliedThisYear = annualResult.Value;
+
+            // 家庭成员快照
+            var memberResult = await LoadMemberSnapshotAsync(sourceTable, sourceFamilyId, ct);
+            if (memberResult.IsFailure)
+                return Result.Failure<TempReliefCandidate>(memberResult.ErrorCode!, memberResult.Message!);
+            candidate.Members = memberResult.Value;
+
+            return Result.Success(candidate);
+        }
+        catch (Exception ex)
+        {
+            LogException(ex, "获取候选人详情失败");
+            return Result.FromException<TempReliefCandidate>(ex);
+        }
+    }
+
+    /// <summary>
+    /// 按身份证跨来源解析户籍分类（定额救助按户籍取低保月标准的判定入口）：
+    /// ① 当前库 nc_biz_applications（低保申请库，最新一条）→ ② 农村低保台账（固定"农村"）
+    /// → ③ 城镇低保台账（固定"城镇"）→ ④ 特困 → ⑤ 边缘 → ⑥ 刚性支出 → ⑦ 其他困难（取 hukou_type 列）。
+    /// 取第一个非空值；全部缺失返回 Success("")，由表单提示手动选择档位（=手选户籍分类）。
+    /// </summary>
+    public async Task<Result<string>> ResolveHukouTypeAsync(string? idCard, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(idCard))
+            return Result.Success(string.Empty);
+
+        try
+        {
+            const string sql = @"
+                SELECT hukou_type
+                FROM (
+                    SELECT 1 AS prio, id AS ref_id, COALESCE(hukou_type, '') AS hukou_type
+                      FROM nc_biz_applications WHERE applicant_id_card = $1
+                    UNION ALL
+                    SELECT 2, id, '农村' FROM nc_biz_rural_subsistence_families WHERE applicant_id_card = $1
+                    UNION ALL
+                    SELECT 3, id, '城镇' FROM nc_biz_urban_subsistence_families WHERE applicant_id_card = $1
+                    UNION ALL
+                    SELECT 4, id, COALESCE(hukou_type, '') FROM nc_biz_destitute_families WHERE applicant_id_card = $1
+                    UNION ALL
+                    SELECT 5, id, COALESCE(hukou_type, '') FROM nc_biz_low_income_edge_families WHERE applicant_id_card = $1
+                    UNION ALL
+                    SELECT 6, id, COALESCE(hukou_type, '') FROM nc_biz_rigid_expenditure_families WHERE applicant_id_card = $1
+                    UNION ALL
+                    SELECT 7, id, COALESCE(hukou_type, '') FROM nc_biz_other_difficulty_families WHERE applicant_id_card = $1
+                ) t
+                WHERE COALESCE(hukou_type, '') <> ''
+                ORDER BY prio, ref_id DESC
+                LIMIT 1";
+
+            var result = await _db.QuerySingleAsync<HukouTypeRow>(sql, ct, idCard.Trim());
+            if (result.IsFailure)
+                return Result.Failure<string>(result.ErrorCode!, result.Message!);
+
+            return Result.Success(result.Value?.HukouType ?? string.Empty);
+        }
+        catch (Exception ex)
+        {
+            LogException(ex, "跨来源解析户籍分类失败");
+            return Result.FromException<string>(ex);
+        }
+    }
+
+    /// <summary>
+    /// 解析候选人所在镇/村：地址文本中提取"XX镇/乡/街道""XX村/社区"；
+    /// 提取不到镇但已识别村时，通过地址库（nc_regions_villages→nc_regions_towns）反查镇名。
+    /// </summary>
+    private async Task ResolveTownVillageAsync(TempReliefCandidate candidate, CancellationToken ct)
+    {
+        var address = candidate.FamilyAddress;
+        if (string.IsNullOrWhiteSpace(address)) return;
+
+        if (string.IsNullOrWhiteSpace(candidate.Town))
+        {
+            var m = Regex.Match(address, @"([^县]{1,8}(?:镇|乡|街道))");
+            if (m.Success) candidate.Town = m.Groups[1].Value;
+        }
+
+        if (string.IsNullOrWhiteSpace(candidate.Village))
+        {
+            string? village = null;
+            var m2 = Regex.Match(address, @"(?:镇|乡|街道)([^县]{1,10}?)(村|社区)");
+            if (m2.Success) village = m2.Groups[1].Value + m2.Groups[2].Value;
+            else
+            {
+                var m3 = Regex.Match(address, @"([^县]{1,10}?)(村|社区)");
+                if (m3.Success) village = m3.Groups[1].Value + m3.Groups[2].Value;
+            }
+            if (!string.IsNullOrWhiteSpace(village))
+                candidate.Village = village;
+        }
+
+        // 村已识别而镇缺失：经地址库村表反查所属镇
+        if (string.IsNullOrWhiteSpace(candidate.Town) && !string.IsNullOrWhiteSpace(candidate.Village))
+        {
+            try
+            {
+                const string sql = @"SELECT t.town_name AS town_name
+                                     FROM nc_regions_villages v
+                                     JOIN nc_regions_towns t ON t.id = v.town_id
+                                     WHERE v.village_name LIKE '%' || $1 || '%'
+                                     ORDER BY t.sort_order, v.id
+                                     LIMIT 1";
+                var result = await _db.QuerySingleAsync<TownNameRow>(sql, ct, candidate.Village);
+                if (result.HasValue && !string.IsNullOrWhiteSpace(result.Value.TownName))
+                    candidate.Town = result.Value.TownName;
+            }
+            catch (Exception ex)
+            {
+                LogWarn($"地址库反查镇失败: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// 加载候选人家庭成员快照：
+    ///  - 导入台账家庭表：member_names / member_id_cards 分号分隔，按位对齐（无关系/工作单位/年收入）
+    ///  - 低保申请库：nc_biz_family_members 明细
+    /// </summary>
+    /// <summary>
+    /// 台账成员表年收入表达式（成员快照统一输出 annual_income 年值口径）：
+    /// 农村/特困台账成员表自带 annual_income 列（年值）；
+    /// 城市低保/低保边缘/刚性支出成员表为 monthly_income（月值），按既有口径 ×12 年化
+    /// （与 MonthlyReportService、ImportedArchiveService 的表间口径一致）。
+    /// </summary>
+    private static string GetPersonsAnnualIncomeExpr(string personsTable) => personsTable switch
+    {
+        "nc_biz_rural_subsistence_persons" or "nc_biz_destitute_persons" => "annual_income",
+        "nc_biz_urban_subsistence_persons" or "nc_biz_low_income_edge_persons" or "nc_biz_rigid_expenditure_persons"
+            or "nc_biz_other_difficulty_persons"
+            => "COALESCE(monthly_income, 0) * 12",
+        _ => "NULL::numeric"
+    };
+
+    private async Task<Result<List<TempReliefMemberSnapshot>>> LoadMemberSnapshotAsync(string sourceTable, long sourceFamilyId, CancellationToken ct)
+    {
+        if (sourceTable == "nc_biz_applications")
+        {
+            // 与家庭人口口径一致：赡养/抚养/扶养义务人（member_category='Support'）不是共同生活成员，
+            // 不进临时救助审批表的家庭成员行、也不计入家庭人口；未知/历史 NULL 值保持原行为（不排除）
+            const string sql = @"SELECT name AS member_name,
+                    COALESCE(gender,'') AS gender,
+                    COALESCE(relationship_to_head,'') AS relation,
+                    COALESCE(id_card,'') AS id_card,
+                    COALESCE(work_unit,'') AS work_unit,
+                    annual_income
+                FROM nc_biz_family_members
+                WHERE application_id = $1 AND deleted_at IS NULL
+                  AND (member_category IS NULL OR member_category <> 'Support')
+                ORDER BY is_applicant DESC, id
+                LIMIT 20";
+            var result = await _db.QueryAsync<TempReliefMemberRow>(sql, ct, sourceFamilyId);
+            if (result.IsFailure)
+                return Result.Failure<List<TempReliefMemberSnapshot>>(result.ErrorCode!, result.Message!);
+
+            return Result.Success(result.Value.Select(m => new TempReliefMemberSnapshot
+            {
+                MemberName = m.MemberName,
+                Gender = m.Gender,
+                // 申请库 relationship_to_head 存的是字典键（Head/Spouse/...），
+                // 必须转中文后进快照，否则会随表单落库并在授权承诺书/审批表打印成英文
+                Relation = TempReliefConstants.GetRelationshipDisplayName(m.Relation),
+                IdCard = m.IdCard,
+                WorkUnit = m.WorkUnit,
+                AnnualIncome = m.AnnualIncome
+            }).ToList());
+        }
+
+        // 台账来源：优先从成员明细表（persons）读取完整家庭成员（含户主、性别、关系、年龄、年收入）
+        var personsTable = TempReliefConstants.GetPersonsTable(sourceTable);
+        if (!string.IsNullOrEmpty(personsTable))
+        {
+            const string personsSql = @"
+                SELECT COALESCE(name,'') AS member_name,
+                       COALESCE(gender,'') AS gender,
+                       COALESCE(relationship,'') AS relation,
+                       COALESCE(id_card,'') AS id_card,
+                       {INCOME} AS annual_income
+                FROM {PERSONS}
+                WHERE family_id = $1
+                ORDER BY CASE WHEN relationship = 'Head' THEN 0 ELSE 1 END, id
+                LIMIT 20";
+            var personsResult = await _db.QueryAsync<TempReliefMemberRow>(
+                personsSql.Replace("{PERSONS}", personsTable).Replace("{INCOME}", GetPersonsAnnualIncomeExpr(personsTable)), ct, sourceFamilyId);
+            if (personsResult.IsFailure)
+                return Result.Failure<List<TempReliefMemberSnapshot>>(personsResult.ErrorCode!, personsResult.Message!);
+
+            if (personsResult.Value.Count > 0)
+            {
+                return Result.Success(personsResult.Value.Select(m => new TempReliefMemberSnapshot
+                {
+                    MemberName = m.MemberName,
+                    Gender = m.Gender,
+                    Relation = TempReliefConstants.GetRelationshipDisplayName(m.Relation),
+                    IdCard = m.IdCard,
+                    WorkUnit = string.Empty,
+                    AnnualIncome = m.AnnualIncome
+                }).ToList());
+            }
+        }
+
+        var namesSql = "SELECT COALESCE(member_names,'') AS member_names, COALESCE(member_id_cards,'') AS member_id_cards FROM " + sourceTable + " WHERE id = $1";
+        var namesResult = await _db.QuerySingleAsync<TempReliefMemberNamesRow>(namesSql, ct, sourceFamilyId);
+        // 查询失败如实上抛（调用方 GetCandidateDetailAsync 已按 Failure 处理）：
+        // 折叠成空列表会让候选人带着空成员快照继续往下走，属于"失败当空集合"（§7）
+        if (namesResult.IsFailure)
+            return Result.Failure<List<TempReliefMemberSnapshot>>(namesResult.ErrorCode!, namesResult.Message!);
+        if (namesResult.Value == null)
+            return Result.Success(new List<TempReliefMemberSnapshot>());
+
+        var names = SplitSemicolon(namesResult.Value.MemberNames);
+        var idCards = SplitSemicolon(namesResult.Value.MemberIdCards);
+        var list = new List<TempReliefMemberSnapshot>();
+        for (var i = 0; i < names.Count; i++)
+        {
+            list.Add(new TempReliefMemberSnapshot
+            {
+                MemberName = names[i],
+                IdCard = i < idCards.Count ? idCards[i] : string.Empty
+            });
+        }
+
+        // 台账成员仅有姓名/身份证 → 按身份证从低保申请库家庭成员明细补全（关系/性别/工作单位/年收入）
+        await FillMemberDetailsFromLedgerAsync(list, ct);
+
+        return Result.Success(list);
+    }
+
+    /// <summary>
+    /// 台账来源成员按身份证从 nc_biz_family_members（经低保管反查最新有效申请）补全明细；
+    /// 身份证为空或未在低保管建档的成员保持原样
+    /// </summary>
+    private async Task FillMemberDetailsFromLedgerAsync(List<TempReliefMemberSnapshot> members, CancellationToken ct)
+    {
+        var idCards = members
+            .Select(m => m.IdCard)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (idCards.Count == 0) return;
+
+        const string sql = @"
+            SELECT fm.name AS member_name,
+                   COALESCE(fm.gender,'') AS gender,
+                   COALESCE(fm.relationship_to_head,'') AS relation,
+                   COALESCE(fm.id_card,'') AS id_card,
+                   COALESCE(fm.work_unit,'') AS work_unit,
+                   fm.annual_income
+            FROM nc_biz_family_members fm
+            JOIN (
+                SELECT id, applicant_id_card,
+                       ROW_NUMBER() OVER (PARTITION BY applicant_id_card ORDER BY created_at DESC, id DESC) AS rn
+                FROM nc_biz_applications
+                WHERE applicant_id_card = ANY($1) AND deleted_at IS NULL
+            ) app ON fm.application_id = app.id AND app.rn = 1
+            WHERE fm.id_card = ANY($1) AND fm.deleted_at IS NULL";
+
+        var result = await _db.QueryAsync<TempReliefMemberRow>(sql, ct, idCards);
+        if (result.IsFailure || result.Value == null) return;
+
+        var byIdCard = new Dictionary<string, TempReliefMemberRow>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in result.Value)
+        {
+            if (!string.IsNullOrWhiteSpace(row.IdCard) && !byIdCard.ContainsKey(row.IdCard))
+                byIdCard[row.IdCard] = row;
+        }
+
+        foreach (var m in members)
+        {
+            if (string.IsNullOrWhiteSpace(m.IdCard)) continue;
+            if (byIdCard.TryGetValue(m.IdCard, out var detail))
+            {
+                if (string.IsNullOrEmpty(m.Gender)) m.Gender = detail.Gender;
+                // detail.Relation 来自 nc_biz_family_members.relationship_to_head（字典键），
+                // 与申请库分支同口径转中文，避免打印/表单出现 Spouse 等英文
+                if (string.IsNullOrEmpty(m.Relation)) m.Relation = TempReliefConstants.GetRelationshipDisplayName(detail.Relation);
+                if (string.IsNullOrEmpty(m.WorkUnit)) m.WorkUnit = detail.WorkUnit;
+                if (!m.AnnualIncome.HasValue) m.AnnualIncome = detail.AnnualIncome;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 身份证第 17 位奇偶推导性别（奇男偶女）；证件缺失/位数不足返回空串
+    /// </summary>
+    private static string InferGenderFromIdCard(string? idCard)
+    {
+        if (string.IsNullOrWhiteSpace(idCard) || idCard.Length < 17)
+            return string.Empty;
+        return idCard[16] % 2 == 0 ? "女" : "男";
+    }
+
+    private static List<string> SplitSemicolon(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return new List<string>();
+        return text.Split(';', StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .ToList();
+    }
+
+    #endregion
+
+    #region 默认值检索（政策救助/家庭成员状态）
+
+    /// <summary>
+    /// 按身份证检索其已享受/在申的救助政策清单（遍历白名单来源表精确匹配）
+    /// 返回值如：["享受农村最低生活保障", "正在申请最低生活保障"]
+    /// 顺序口径（2026-11-15）：**当前库在申/在享在前、历史导入台账在后**，与候选人检索同源。
+    /// 2026-11 性能收口：原 7 表逐表 SELECT 1（选人后自动填充路径 = 7 次串行往返）→
+    /// ① 表存在性批量检查（information_schema ANY + 进程缓存，首查后免查）；
+    /// ② 存在的台账表合成一条 UNION ALL 批查；③ nc_biz_applications 的存在性检查冗余
+    ///    （下方分类查询本身按活跃状态过滤，无活跃行时同样不产出文本），直接单查分类。
+    /// 稳态往返：7~8 → 2。
+    /// </summary>
+    public async Task<Result<List<string>>> GetPolicySnapshotAsync(string idCard, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(idCard))
+            return Result.Success(new List<string>());
+
+        // 台账命中与当前库命中分开累积，最后按「当前库在前、历史台账在后」合并（与候选人检索同口径）
+        var ledgerResult = new List<string>();
+        var currentResult = new List<string>();
+        try
+        {
+            // 台账表（除 nc_biz_applications 外）批量存在性检查 + UNION ALL 批查。
+            // [SQL 白名单背书] 表名全部取自 TempReliefConstants.AllowedSourceTables 硬编码常量
+            // （check_standards SQL1 豁免 table），无外部输入。
+            var ledgerTables = TempReliefConstants.AllowedSourceTables
+                .Where(t => t != TempReliefConstants.CurrentSourceTable).ToArray();
+            var existingTables = new List<string>();
+            foreach (var table in ledgerTables)
+            {
+                if (await TableExistsCachedAsync(table, ct))
+                    existingTables.Add(table);
+            }
+
+            if (existingTables.Count > 0)
+            {
+                var unionParts = existingTables
+                    // 每段必须自带括号：PostgreSQL 中 UNION 操作数含 LIMIT 时无括号是语法错误
+                    //（syntax error at or near "UNION"，42601）——2026-11-12 实测修复；
+                    // 此前批查每次失败并静默走下方逐表回退，功能对但性能退化且刷错误日志
+                    .Select(t => $"(SELECT '{t}' AS tbl FROM {t} WHERE applicant_id_card = $1 LIMIT 1)");
+                // [SQL 白名单背书] unionSql 仅由上方硬编码白名单表名生成（见方法注释）
+                var unionSql = string.Join(" UNION ALL ", unionParts);
+                var matched = await _db.QueryAsync<string>(unionSql, ct, idCard);
+                if (matched.HasValue)
+                {
+                    // UNION ALL 返回序无保证 → 按白名单表序回排，台账之间顺序稳定
+                    foreach (var tbl in matched.Value.OrderBy(t => Array.IndexOf(ledgerTables, t)))
+                        ledgerResult.Add("享受" + TempReliefConstants.GetFamilyCategoryByTable(tbl));
+                }
+                else if (matched.IsFailure)
+                {
+                    // 批查失败（如存量库缺某表）：回退逐表路径，保持原容错语义
+                    LogWarn($"政策清单批查失败，回退逐表: {matched.Message}");
+                    ledgerResult.Clear();
+                    foreach (var table in existingTables)
+                    {
+                        var exists = await _db.ExecuteScalarAsync<long>(
+                            "SELECT 1 FROM " + table + " WHERE applicant_id_card = $1 LIMIT 1", ct, idCard);
+                        if (exists.IsSuccess && exists.Value > 0)
+                            ledgerResult.Add("享受" + TempReliefConstants.GetFamilyCategoryByTable(table));
+                    }
+                }
+            }
+
+            // 当前库申请：取最新一条"在申/在享"记录（Approved/Completed 优先，其次 Draft/Submitted）。
+            // 停保/不予受理/收入超标等历史记录不算"正在申请"；
+            // 已审批的档案应显示"享受{分类}"，不能一律显示"正在申请"（仲立亮 app95 实测错例）。
+            var classSql = @"SELECT status, COALESCE(classification_result,'') AS classification_result
+                             FROM nc_biz_applications
+                             WHERE applicant_id_card = $1 AND deleted_at IS NULL
+                               AND status = ANY($2::text[])
+                             ORDER BY CASE status
+                                          WHEN 'Approved' THEN 0
+                                          WHEN 'Completed' THEN 0
+                                          WHEN 'Submitted' THEN 1
+                                          ELSE 2
+                                      END,
+                                      created_at DESC, id DESC
+                             LIMIT 1";
+            var activeStatuses = new[]
+            {
+                ApplicationStatusCodes.DRAFT, ApplicationStatusCodes.SUBMITTED,
+                ApplicationStatusCodes.APPROVED, ApplicationStatusCodes.COMPLETED
+            };
+            var cls = await _db.QuerySingleAsync<PolicyClassRow>(classSql, ct, idCard, activeStatuses);
+            if (cls.HasValue && !string.IsNullOrWhiteSpace(cls.Value.ClassificationResult))
+            {
+                var isEnjoying = cls.Value.Status is ApplicationStatusCodes.APPROVED or ApplicationStatusCodes.COMPLETED;
+                var name = ClassificationConstants.ConvertFromCode(cls.Value.ClassificationResult);
+                currentResult.Add((isEnjoying ? "享受" : "正在申请") + name);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogException(ex, "检索政策救助情况失败");
+        }
+
+        // 顺序口径：当前库（在申/在享）在前、历史导入台账在后——与候选人检索（TempReliefCandidateRanker）同源
+        var result = new List<string>(currentResult.Count + ledgerResult.Count);
+        result.AddRange(currentResult);
+        result.AddRange(ledgerResult);
+        return Result.Success(result);
+    }
+
+    /// <summary>表存在性进程内缓存（同 ElderlyCategoryService 模式；表不会运行时消失，首查后免往返）</summary>
+    private static readonly ConcurrentDictionary<string, bool> SourceTableExistsCache = new(StringComparer.Ordinal);
+
+    private async Task<bool> TableExistsCachedAsync(string table, CancellationToken ct)
+    {
+        if (SourceTableExistsCache.TryGetValue(table, out var cached))
+            return cached;
+
+        var result = await _db.ExecuteScalarAsync<long>(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = $1", ct, table);
+        var exists = result.IsSuccess && result.Value > 0;
+        SourceTableExistsCache[table] = exists;
+        return exists;
+    }
+
+    /// <summary>
+    /// 按身份证检索家庭成员健康状况汇总文本（源自低保管家庭成员明细）
+    /// 全员健康 → "家庭成员身体健康，具备劳动能力"；有患病/残疾成员 → 逐条"成员X患Y、劳动能力…"；无数据返回空字符串
+    /// </summary>
+    public async Task<Result<string>> GetFamilyMemberStatusAsync(string idCard, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(idCard))
+            return Result.Success(string.Empty);
+
+        try
+        {
+            const string sql = @"
+                SELECT fm.name AS member_name,
+                       fm.is_applicant,
+                       COALESCE(fm.health_status,'') AS health_status,
+                       COALESCE(fm.work_capacity,'') AS work_capacity,
+                       COALESCE(fm.disease_name,'') AS disease_name,
+                       COALESCE(fm.disability_type,'') AS disability_type,
+                       COALESCE(fm.disability_level,'') AS disability_level,
+                       COALESCE(fm.is_disabled,false) AS is_disabled
+                FROM nc_biz_family_members fm
+                JOIN (
+                    SELECT id, applicant_id_card,
+                           ROW_NUMBER() OVER (PARTITION BY applicant_id_card ORDER BY created_at DESC, id DESC) AS rn
+                    FROM nc_biz_applications
+                    WHERE applicant_id_card = $1 AND deleted_at IS NULL
+                ) app ON fm.application_id = app.id AND app.rn = 1
+                WHERE fm.deleted_at IS NULL
+                ORDER BY fm.is_applicant DESC, fm.id
+                LIMIT 20";
+
+            var result = await _db.QueryAsync<FamilyStatusRow>(sql, ct, idCard);
+            // 查询失败如实上抛（调用方只取 Success 分支，失败时留空、不覆盖已有状态）；
+            // 查不到家庭成员才是"状态为空"→ Success("")
+            if (result.IsFailure)
+                return Result.Failure<string>(result.ErrorCode!, result.Message!);
+            if (result.Value == null || result.Value.Count == 0)
+                return Result.Success(string.Empty);
+
+            var parts = new List<string>();
+            var hasIssue = false;
+            foreach (var m in result.Value)
+            {
+                var role = m.IsApplicant ? "户主" : "成员";
+                var issues = new List<string>();
+
+                if (!string.IsNullOrWhiteSpace(m.DisabilityType))
+                {
+                    var dType = _dictCache.GetValue(DictionaryTypeCodes.DisabilityTypes, m.DisabilityType);
+                    var dLevel = string.IsNullOrWhiteSpace(m.DisabilityLevel)
+                        ? string.Empty
+                        : _dictCache.GetValue(DictionaryTypeCodes.DisabilityLevels, m.DisabilityLevel);
+                    issues.Add(string.IsNullOrWhiteSpace(dLevel)
+                        ? $"残疾（{dType}）"
+                        : $"残疾（{dType}·{dLevel}）");
+                }
+
+                if (!string.IsNullOrWhiteSpace(m.DiseaseName))
+                    issues.Add($"患{m.DiseaseName}");
+
+                var health = string.IsNullOrWhiteSpace(m.HealthStatus)
+                    ? string.Empty
+                    : _dictCache.GetValue(DictionaryTypeCodes.HealthStatuses, m.HealthStatus);
+                if (!string.IsNullOrWhiteSpace(health) && health != m.HealthStatus && !health.Contains("健康"))
+                    issues.Add(health);
+
+                var labor = string.IsNullOrWhiteSpace(m.WorkCapacity)
+                    ? string.Empty
+                    : _dictCache.GetValue(DictionaryTypeCodes.LaborAbilities, m.WorkCapacity);
+                if (!string.IsNullOrWhiteSpace(labor) && labor == m.WorkCapacity)
+                    labor = string.Empty; // 字典未命中时不展示代码
+
+                if (issues.Count == 0 && string.IsNullOrWhiteSpace(labor))
+                    continue; // 无特殊信息（健康/具备劳动能力）
+
+                hasIssue = true;
+                var text = $"{role}{m.MemberName}{string.Join("、", issues)}";
+                if (!string.IsNullOrWhiteSpace(labor))
+                    text += $"、{labor}";
+                parts.Add(text);
+            }
+
+            if (!hasIssue)
+                return Result.Success("家庭成员身体健康，具备劳动能力");
+
+            return Result.Success(string.Join("；", parts) + "。");
+        }
+        catch (Exception ex)
+        {
+            LogException(ex, "检索家庭成员状态失败");
+            // 与上面的 IsFailure 分支保持一致：失败如实上抛，不再伪装成"状态为空"。
+            // 调用方只取 .Value ?? ""，运行行为不变
+            return Result.FromException<string>(ex);
+        }
+    }
+
+    #endregion
+
+    #region 小额定额档位
+
+    public async Task<Result<List<ConfigStandard>>> GetSmallAmountLevelsAsync(string? hukouType, CancellationToken ct = default)
+    {
+        // 2026-11-13 起定额救助 = 按户籍动态取低保月标准（农村 632 / 城镇 827），
+        // 原「临时救助小额定额」三档（500/1000/2000）已停用、不再读取；低保调标后自动跟随。
+        var standardType = TempReliefConstants.ResolveSubsistenceStandardType(hukouType);
+        if (standardType != null)
+        {
+            var single = await BuildSubsistenceLevelAsync(standardType, ct);
+            if (single.IsFailure)
+                return Result.Failure<List<ConfigStandard>>(single.ErrorCode!, single.Message!);
+            return Result.Success(new List<ConfigStandard> { single.Value! });
+        }
+
+        // 户籍为空/未知：列出农村 + 城镇两档，由录入人按实际户籍手选
+        var levels = new List<ConfigStandard>();
+
+        var rural = await BuildSubsistenceLevelAsync(TempReliefConstants.SubsistenceStandardRural, ct);
+        if (rural.IsFailure)
+            return Result.Failure<List<ConfigStandard>>(rural.ErrorCode!, rural.Message!);
+        levels.Add(rural.Value!);
+
+        var urban = await BuildSubsistenceLevelAsync(TempReliefConstants.SubsistenceStandardUrban, ct);
+        if (urban.IsFailure)
+            return Result.Failure<List<ConfigStandard>>(urban.ErrorCode!, urban.Message!);
+        levels.Add(urban.Value!);
+
+        return Result.Success(levels);
+    }
+
+    /// <summary>
+    /// 按低保月标准类型构建定额档位（标准缺失/为 0 显式失败，禁止静默归零——见 AGENTS §7）。
+    /// 档位金额随标准走：低保调标后重新打开表单即显示新值。
+    /// </summary>
+    private async Task<Result<ConfigStandard>> BuildSubsistenceLevelAsync(string standardType, CancellationToken ct)
+    {
+        var valueResult = await _standardConfigService.GetStandardValueAsync(standardType, null, null, ct);
+        if (valueResult.IsFailure)
+            return Result.Failure<ConfigStandard>(valueResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                valueResult.Message ?? "读取最低生活保障月标准失败");
+        if (valueResult.Value <= 0)
+            return Result.Failure<ConfigStandard>(ErrorCodes.CONFIG_NOT_FOUND,
+                "未配置当前生效的最低生活保障月标准，无法确定定额救助金额");
+
+        var isRural = standardType == TempReliefConstants.SubsistenceStandardRural;
+        return Result.Success(new ConfigStandard
+        {
+            StandardType = standardType,
+            StandardName = isRural ? "农村户口（低保月标准）" : "城镇户口（低保月标准）",
+            HukouType = isRural ? "Rural" : "Urban",
+            StandardValue = valueResult.Value,
+            Unit = "元/月",
+            IsActive = true,
+            EffectiveStartDate = DateTime.Today
+        });
+    }
+
+    #endregion
+
+    #region 查询
+
+    public async Task<Result<TempReliefApplication>> GetByIdAsync(long id, CancellationToken ct = default)
+    {
+        LogInfo($"按ID查询: {id}");
+        var sql = "SELECT " + WideTableColumns.TempReliefApplicationsColumns + " FROM nc_biz_temp_relief_applications WHERE id = $1 AND deleted_at IS NULL";
+        return await _db.QuerySingleAsync<TempReliefApplication>(sql, ct, id);
+    }
+
+    public async Task<Result<List<TempReliefMember>>> GetMembersByApplicationIdAsync(long applicationId, CancellationToken ct = default)
+    {
+        var sql = @"SELECT * FROM nc_biz_temp_relief_members
+                    WHERE application_id = $1 AND deleted_at IS NULL
+                    ORDER BY sort_order, id";
+        var result = await _db.QueryAsync<TempReliefMember>(sql, ct, applicationId);
+        if (result.IsFailure)
+            return Result.Failure<List<TempReliefMember>>(result.ErrorCode!, result.Message!);
+
+        // 历史数据兼容：早期从申请库快照带入的关系可能是字典键（Spouse 等），
+        // 读取时统一转中文，保证表单回显、授权承诺书、审核审批表口径一致（不改库也能修正打印）。
+        foreach (var member in result.Value)
+            member.Relation = TempReliefConstants.GetRelationshipDisplayName(member.Relation);
+
+        return Result.Success(result.Value);
+    }
+
+    public async Task<Result<List<TempReliefDisease>>> GetDiseasesByApplicationIdAsync(long applicationId, CancellationToken ct = default)
+    {
+        var sql = @"SELECT * FROM nc_biz_temp_relief_diseases
+                    WHERE application_id = $1 AND deleted_at IS NULL
+                    ORDER BY sort_order, id";
+        var result = await _db.QueryAsync<TempReliefDisease>(sql, ct, applicationId);
+        if (result.IsFailure)
+            return Result.Failure<List<TempReliefDisease>>(result.ErrorCode!, result.Message!);
+        return Result.Success(result.Value);
+    }
+
+    public async Task<Result<List<TempReliefAccident>>> GetAccidentsByApplicationIdAsync(long applicationId, CancellationToken ct = default)
+    {
+        var sql = @"SELECT * FROM nc_biz_temp_relief_accidents
+                    WHERE application_id = $1 AND deleted_at IS NULL
+                    ORDER BY sort_order, id";
+        var result = await _db.QueryAsync<TempReliefAccident>(sql, ct, applicationId);
+        if (result.IsFailure)
+            return Result.Failure<List<TempReliefAccident>>(result.ErrorCode!, result.Message!);
+        return Result.Success(result.Value);
+    }
+
+    public async Task<Result<List<TempReliefEducation>>> GetEducationsByApplicationIdAsync(long applicationId, CancellationToken ct = default)
+    {
+        var sql = @"SELECT * FROM nc_biz_temp_relief_educations
+                    WHERE application_id = $1 AND deleted_at IS NULL
+                    ORDER BY sort_order, id";
+        var result = await _db.QueryAsync<TempReliefEducation>(sql, ct, applicationId);
+        if (result.IsFailure)
+            return Result.Failure<List<TempReliefEducation>>(result.ErrorCode!, result.Message!);
+        return Result.Success(result.Value);
+    }
+
+    public async Task<Result<PagedResult<TempReliefApplication>>> GetPagedAsync(string keyword, string status, int pageIndex, int pageSize, CancellationToken ct = default)
+    {
+        LogInfo($"分页查询: keywordLength={keyword.Length}, status={status}, 第{pageIndex}页, 每页{pageSize}条");
+
+        var conditions = new SqlConditionBuilder()
+            .Add("deleted_at IS NULL")
+            .AddIf(!string.IsNullOrEmpty(status), "status = {0}", status)
+            .AddIf(!string.IsNullOrWhiteSpace(keyword), "(applicant_name ILIKE {0} OR applicant_id_card ILIKE {0})", $"%{keyword}%");
+
+        var where = conditions.ToWhereClause();
+        var countSql = $"SELECT COUNT(*) FROM nc_biz_temp_relief_applications{where}";
+        var countResult = await _db.ExecuteScalarAsync<long>(countSql, ct, conditions.GetParameters());
+        if (countResult.IsFailure)
+            return Result.Failure<PagedResult<TempReliefApplication>>(countResult.ErrorCode!, countResult.Message!);
+
+        var offset = (pageIndex - 1) * pageSize;
+        var querySql = $"SELECT {WideTableColumns.TempReliefApplicationsColumns} FROM nc_biz_temp_relief_applications{where}" +
+            $" ORDER BY created_at DESC LIMIT ${conditions.ParamCount + 1} OFFSET ${conditions.ParamCount + 2}";
+        var pageParams = new List<object?>(conditions.GetParameters()) { pageSize, offset };
+
+        var listResult = await _db.QueryAsync<TempReliefApplication>(querySql, ct, pageParams.ToArray());
+        if (listResult.IsFailure)
+            return Result.Failure<PagedResult<TempReliefApplication>>(listResult.ErrorCode!, listResult.Message!);
+
+        return Result.Success(PagedResult<TempReliefApplication>.FromList(listResult.Value, pageIndex, pageSize, Convert.ToInt32(countResult.Value)));
+    }
+
+    public async Task<Result<PagedResult<TempReliefApplication>>> GetArchivedPagedAsync(string? keyword, int pageIndex, int pageSize, CancellationToken ct = default)
+    {
+        LogInfo($"已完结分页查询: keywordLength={keyword?.Length ?? 0}, 第{pageIndex}页, 每页{pageSize}条");
+
+        var conditions = new SqlConditionBuilder()
+            .Add("deleted_at IS NULL")
+            .Add("status IN ({0}, {1})", TempReliefConstants.StatusConfirmed, TempReliefConstants.StatusStopped)
+            .AddIf(!string.IsNullOrWhiteSpace(keyword), "(applicant_name ILIKE {0} OR applicant_id_card ILIKE {0})", $"%{keyword}%");
+
+        var where = conditions.ToWhereClause();
+        var countSql = $"SELECT COUNT(*) FROM nc_biz_temp_relief_applications{where}";
+        var countResult = await _db.ExecuteScalarAsync<long>(countSql, ct, conditions.GetParameters());
+        if (countResult.IsFailure)
+            return Result.Failure<PagedResult<TempReliefApplication>>(countResult.ErrorCode!, countResult.Message!);
+
+        var offset = (pageIndex - 1) * pageSize;
+        var querySql = $"SELECT {WideTableColumns.TempReliefApplicationsColumns} FROM nc_biz_temp_relief_applications{where}" +
+            $" ORDER BY updated_at DESC LIMIT ${conditions.ParamCount + 1} OFFSET ${conditions.ParamCount + 2}";
+        var pageParams = new List<object?>(conditions.GetParameters()) { pageSize, offset };
+
+        var listResult = await _db.QueryAsync<TempReliefApplication>(querySql, ct, pageParams.ToArray());
+        if (listResult.IsFailure)
+            return Result.Failure<PagedResult<TempReliefApplication>>(listResult.ErrorCode!, listResult.Message!);
+
+        return Result.Success(PagedResult<TempReliefApplication>.FromList(listResult.Value, pageIndex, pageSize, Convert.ToInt32(countResult.Value)));
+    }
+
+    public async Task<Result<PagedResult<TempReliefApplication>>> GetByMonthPagedAsync(int year, int month, int pageIndex, int pageSize, CancellationToken ct = default)
+    {
+        LogInfo($"按月查询已完结: {year}年{month}月, 第{pageIndex}页");
+
+        var monthStart = new DateTime(year, month, 1);
+        var monthEnd = monthStart.AddMonths(1);
+
+        // 业务时间口径 COALESCE(apply_date, report_time, created_at)，与名单业务时间一致；范围比较
+        var conditions = new SqlConditionBuilder()
+            .Add("deleted_at IS NULL")
+            .Add("status IN ({0}, {1})", TempReliefConstants.StatusConfirmed, TempReliefConstants.StatusStopped)
+            .Add("COALESCE(apply_date, report_time, created_at) >= {0}", monthStart)
+            .Add("COALESCE(apply_date, report_time, created_at) < {0}", monthEnd);
+
+        var where = conditions.ToWhereClause();
+        var countSql = $"SELECT COUNT(*) FROM nc_biz_temp_relief_applications{where}";
+        var countResult = await _db.ExecuteScalarAsync<long>(countSql, ct, conditions.GetParameters());
+        if (countResult.IsFailure)
+            return Result.Failure<PagedResult<TempReliefApplication>>(countResult.ErrorCode!, countResult.Message!);
+
+        var offset = (pageIndex - 1) * pageSize;
+        var querySql = $"SELECT {WideTableColumns.TempReliefApplicationsColumns} FROM nc_biz_temp_relief_applications{where}" +
+            $" ORDER BY updated_at DESC LIMIT ${conditions.ParamCount + 1} OFFSET ${conditions.ParamCount + 2}";
+        var pageParams = new List<object?>(conditions.GetParameters()) { pageSize, offset };
+
+        var listResult = await _db.QueryAsync<TempReliefApplication>(querySql, ct, pageParams.ToArray());
+        if (listResult.IsFailure)
+            return Result.Failure<PagedResult<TempReliefApplication>>(listResult.ErrorCode!, listResult.Message!);
+
+        return Result.Success(PagedResult<TempReliefApplication>.FromList(listResult.Value, pageIndex, pageSize, Convert.ToInt32(countResult.Value)));
+    }
+
+    #endregion
+
+    #region 写操作
+
+    public async Task<Result<long>> CreateAsync(TempReliefApplication application, List<TempReliefMember> members, CancellationToken ct = default)
+    {
+        ValidateNotNull(application, nameof(application));
+        ValidateNotNullOrEmpty(application.ApplicantName, nameof(application.ApplicantName));
+        ValidateNotNullOrEmpty(application.ApplicantIdCard, nameof(application.ApplicantIdCard));
+
+        LogInfo($"创建临时救助: {DataMasker.MaskName(application.ApplicantName)}, 身份证={DataMasker.MaskIdCard(application.ApplicantIdCard)}, 类型={application.ReliefType}");
+
+        await using var tx = await _db.BeginTransactionScopeAsync(ct);
+        try
+        {
+            var applyDate = application.ApplyDate ?? DateTime.Today;
+            var applyYear = applyDate.Year.ToString();
+            application.ApplyYear = applyYear;
+
+            var existsResult = await CheckAnnualExistsAsync(application.ApplicantIdCard, applyYear, null, ct);
+            if (existsResult.IsFailure)
+            {
+                // 查重失败不能放行：否则"每年仅限一次"的硬约束被静默绕过。
+                LogError($"年度查重失败，拒绝创建: {existsResult.ErrorCode} {existsResult.Message}");
+                return Result.Failure<long>(
+                    existsResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                    $"年度查重失败，未创建临时救助: {existsResult.Message}");
+            }
+            if (existsResult.Value)
+                return Result.Failure<long>(ErrorCodes.ANNUAL_LIMIT_EXCEEDED, $"该申请人 {applyYear} 年已申请过临时救助，每年仅限一次");
+
+            var appNoResult = await GetNextApplicationNoAsync(ct);
+            if (appNoResult.IsFailure)
+                return Result.Failure<long>(appNoResult.ErrorCode!, appNoResult.Message!);
+
+            const string sql = @"
+                 INSERT INTO nc_biz_temp_relief_applications
+                (application_no, relief_type, apply_year, source_type, source_table, source_family_id,
+                 applicant_name, applicant_id_card, gender, age, phone,
+                 family_province, family_city, family_district, family_town, family_detail, family_address,
+                 hukou_province, hukou_city, hukou_district, hukou_town, hukou_address,
+                 town, village, family_size, family_category,
+                 policy_enjoyed, family_member_status, difficulty_reason,
+                 difficulty_type,
+                 apply_date,
+                 report_unit, report_time, small_amount_level, confirm_amount,
+                 publicize_start_date, publicize_end_date, verify_result, acceptance_person,
+                 beneficiary_name, beneficiary_id_card, beneficiary_gender, beneficiary_age, beneficiary_relation,
+                 status, created_by, hukou_type, bank_name, bank_account, created_at, updated_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+                        $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,
+                        $31,$32,$33,$34,$35,$36,$37,$38,
+                        $39,$40,$41,$42,$43,
+                        $44,$45,$46,$47,$48,$49,NOW(), NOW())
+                RETURNING id";
+
+            var insertResult = await _db.ExecuteScalarAsync<long>(sql, ct,
+                appNoResult.Value,
+                application.ReliefType, application.ApplyYear,
+                application.SourceType, application.SourceTable, application.SourceFamilyId,
+                application.ApplicantName, application.ApplicantIdCard,
+                application.Gender ?? "", (object?)application.Age, application.Phone ?? "",
+                application.FamilyProvince ?? "", application.FamilyCity ?? "",
+                application.FamilyDistrict ?? "", application.FamilyTown ?? "",
+                application.FamilyDetail ?? "", application.FamilyAddress ?? "",
+                application.HukouProvince ?? "", application.HukouCity ?? "",
+                application.HukouDistrict ?? "", application.HukouTown ?? "",
+                application.HukouAddress ?? "",
+                application.Town ?? "", application.Village ?? "",
+                (object?)application.FamilySize, application.FamilyCategory ?? "",
+                application.PolicyEnjoyed ?? "", application.FamilyMemberStatus ?? "",
+                application.DifficultyReason ?? "",
+                application.DifficultyType ?? "",
+                applyDate,
+                application.ReportUnit ?? "", application.ReportTime,
+                application.SmallAmountLevel ?? "", (object?)application.ConfirmAmount,
+                application.PublicizeStartDate, application.PublicizeEndDate,
+                application.VerifyResult ?? "", application.AcceptancePerson ?? "",
+                application.BeneficiaryName ?? "", application.BeneficiaryIdCard ?? "",
+                application.BeneficiaryGender ?? "", (object?)application.BeneficiaryAge,
+                application.BeneficiaryRelation ?? "",
+                application.Status ?? TempReliefConstants.StatusDraft,
+                application.CreatedBy ?? "System",
+                application.HukouType ?? "",
+                application.BankName ?? "", application.BankAccount ?? "");
+
+            if (insertResult.IsFailure)
+                return Result.Failure<long>(insertResult.ErrorCode!, insertResult.Message!);
+
+            var newId = insertResult.Value;
+
+            if (members != null && members.Count > 0)
+            {
+                var memberResult = await ReplaceMembersAsync(newId, members, ct);
+                if (memberResult.IsFailure)
+                    return Result.Failure<long>(memberResult.ErrorCode!, memberResult.Message!);
+            }
+
+            var diseaseResult = await ReplaceDiseasesAsync(newId, application.Diseases, ct);
+            if (diseaseResult.IsFailure)
+                return Result.Failure<long>(diseaseResult.ErrorCode!, diseaseResult.Message!);
+
+            var accidentResult = await ReplaceAccidentsAsync(newId, application.Accidents, ct);
+            if (accidentResult.IsFailure)
+                return Result.Failure<long>(accidentResult.ErrorCode!, accidentResult.Message!);
+
+            var educationResult = await ReplaceEducationsAsync(newId, application.Educations, ct);
+            if (educationResult.IsFailure)
+                return Result.Failure<long>(educationResult.ErrorCode!, educationResult.Message!);
+
+            await tx.CommitAsync(ct);
+
+            Logger.LogBusiness("创建临时救助申请",
+                ("ApplicationId", newId),
+                ("ApplicationNo", appNoResult.Value),
+                ("ReliefType", application.ReliefType),
+                ("Name", DataMasker.MaskName(application.ApplicantName)));
+            return Result.Success(newId);
+        }
+        catch (Exception ex)
+        {
+            LogException(ex, "创建临时救助申请失败");
+            return Result.FromException<long>(ex);
+        }
+    }
+
+    public async Task<Result> UpdateAsync(TempReliefApplication application, List<TempReliefMember> members, CancellationToken ct = default)
+    {
+        ValidateNotNull(application, nameof(application));
+
+        LogInfo($"更新临时救助: id={application.Id}, 姓名={DataMasker.MaskName(application.ApplicantName)}");
+
+        await using var tx = await _db.BeginTransactionScopeAsync(ct);
+        try
+        {
+            var applyDate = application.ApplyDate ?? DateTime.Today;
+            var applyYear = applyDate.Year.ToString();
+            application.ApplyYear = applyYear;
+
+            var existsResult = await CheckAnnualExistsAsync(application.ApplicantIdCard, applyYear, application.Id, ct);
+            if (existsResult.IsFailure)
+            {
+                LogError($"年度查重失败，拒绝更新: {existsResult.ErrorCode} {existsResult.Message}");
+                return Result.Failure(
+                    existsResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                    $"年度查重失败，未更新临时救助: {existsResult.Message}");
+            }
+            if (existsResult.Value)
+                return Result.Failure(ErrorCodes.ANNUAL_LIMIT_EXCEEDED, $"该申请人 {applyYear} 年已申请过临时救助，每年仅限一次");
+
+            const string sql = @"
+                 UPDATE nc_biz_temp_relief_applications SET
+                 relief_type = $1, apply_year = $2, source_type = $3, source_table = $4, source_family_id = $5,
+                 applicant_name = $6, applicant_id_card = $7, gender = $8, age = $9, phone = $10,
+                 family_province = $11, family_city = $12, family_district = $13, family_town = $14,
+                 family_detail = $15, family_address = $16,
+                 hukou_province = $17, hukou_city = $18, hukou_district = $19, hukou_town = $20,
+                 hukou_address = $21,
+                 town = $22, village = $23, family_size = $24, family_category = $25,
+                 policy_enjoyed = $26, family_member_status = $27, difficulty_reason = $28,
+                 difficulty_type = $29,
+                 apply_date = $30,
+                 report_unit = $31, report_time = $32, small_amount_level = $33, confirm_amount = $34,
+                 publicize_start_date = $35, publicize_end_date = $36, verify_result = $37, acceptance_person = $38,
+                 beneficiary_name = $39, beneficiary_id_card = $40, beneficiary_gender = $41,
+                 beneficiary_age = $42, beneficiary_relation = $43,
+                 hukou_type = $44, bank_name = $45, bank_account = $46,
+                 updated_by = $47, updated_at = NOW()
+                 WHERE id = $48 AND deleted_at IS NULL";
+
+             var updateResult = await _db.ExecuteNonQueryAsync(sql, ct,
+                 application.ReliefType, application.ApplyYear,
+                 application.SourceType, application.SourceTable, application.SourceFamilyId,
+                 application.ApplicantName, application.ApplicantIdCard,
+                 application.Gender ?? "", (object?)application.Age, application.Phone ?? "",
+                 application.FamilyProvince ?? "", application.FamilyCity ?? "",
+                 application.FamilyDistrict ?? "", application.FamilyTown ?? "",
+                 application.FamilyDetail ?? "", application.FamilyAddress ?? "",
+                 application.HukouProvince ?? "", application.HukouCity ?? "",
+                 application.HukouDistrict ?? "", application.HukouTown ?? "",
+                 application.HukouAddress ?? "",
+                 application.Town ?? "", application.Village ?? "",
+                 (object?)application.FamilySize, application.FamilyCategory ?? "",
+                 application.PolicyEnjoyed ?? "", application.FamilyMemberStatus ?? "",
+                 application.DifficultyReason ?? "",
+                 application.DifficultyType ?? "",
+                 applyDate,
+                 application.ReportUnit ?? "", application.ReportTime,
+                 application.SmallAmountLevel ?? "", (object?)application.ConfirmAmount,
+                 application.PublicizeStartDate, application.PublicizeEndDate,
+                 application.VerifyResult ?? "", application.AcceptancePerson ?? "",
+                 application.BeneficiaryName ?? "", application.BeneficiaryIdCard ?? "",
+                 application.BeneficiaryGender ?? "", (object?)application.BeneficiaryAge,
+                 application.BeneficiaryRelation ?? "",
+                 application.HukouType ?? "",
+                 application.BankName ?? "", application.BankAccount ?? "",
+                 application.UpdatedBy ?? "System",
+                 application.Id);
+
+            if (updateResult.IsFailure)
+                return Result.Failure(updateResult.ErrorCode!, updateResult.Message!);
+            if (updateResult.Value == 0)
+                return Result.Failure(ErrorCodes.RECORD_NOT_FOUND, "申请记录不存在或已删除");
+
+            var memberResult = await ReplaceMembersAsync(application.Id, members, ct);
+            if (memberResult.IsFailure)
+                return Result.Failure(memberResult.ErrorCode!, memberResult.Message!);
+
+            var diseaseResult = await ReplaceDiseasesAsync(application.Id, application.Diseases, ct);
+            if (diseaseResult.IsFailure)
+                return Result.Failure(diseaseResult.ErrorCode!, diseaseResult.Message!);
+
+            var accidentResult = await ReplaceAccidentsAsync(application.Id, application.Accidents, ct);
+            if (accidentResult.IsFailure)
+                return Result.Failure(accidentResult.ErrorCode!, accidentResult.Message!);
+
+            var educationResult = await ReplaceEducationsAsync(application.Id, application.Educations, ct);
+            if (educationResult.IsFailure)
+                return Result.Failure(educationResult.ErrorCode!, educationResult.Message!);
+
+            await tx.CommitAsync(ct);
+            Logger.LogBusiness("更新临时救助申请", ("ApplicationId", application.Id));
+            return Result.Success();
+        }
+        catch (Exception ex)
+        {
+            LogException(ex, "更新临时救助申请失败");
+            return Result.FromException(ex);
+        }
+    }
+
+    public async Task<Result> ConfirmAsync(long id, string operatorName, CancellationToken ct = default)
+    {
+        LogInfo($"确认临时救助: id={id}, operator={operatorName}");
+
+        var sql = @"UPDATE nc_biz_temp_relief_applications SET
+                    status = $1, confirmed_at = NOW(), confirmed_by = $2, updated_at = NOW()
+                    WHERE id = $3 AND deleted_at IS NULL AND status = $4";
+        var result = await _db.ExecuteNonQueryAsync(sql, ct, TempReliefConstants.StatusConfirmed, operatorName ?? "System", id, TempReliefConstants.StatusDraft);
+        if (result.IsFailure)
+            return Result.Failure(result.ErrorCode!, result.Message!);
+        if (result.Value == 0)
+            return Result.Failure(ErrorCodes.INVALID_TRANSITION, "仅草稿状态可确认");
+
+        Logger.LogBusiness("确认临时救助申请", ("ApplicationId", id));
+        return Result.Success();
+    }
+
+    public async Task<Result> CompleteArchiveAsync(long id, CancellationToken ct = default)
+    {
+        // 打印页「完成归档」入口：临时救助保存并确认后状态已是终态 Confirmed，无状态可推进。
+        // 仅校验本表存在性——此前该入口误走 nc_biz_applications（社会救助主表），
+        // 拿临时救助 ID 查主表恒查不到，报「申请不存在」。
+        var exists = await _db.ExecuteScalarAsync<long>(
+            "SELECT id FROM nc_biz_temp_relief_applications WHERE id = $1 AND deleted_at IS NULL",
+            ct, id);
+        if (exists.IsFailure)
+            return Result.Failure(exists.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                exists.Message ?? "读取临时救助申请失败");
+        if (exists.Value == 0)
+            return Result.Failure(ErrorCodes.APPLICATION_NOT_FOUND, "申请不存在");
+
+        Logger.LogBusiness("临时救助归档完成（幂等，状态已是已确认）", ("ApplicationId", id));
+        return Result.Success();
+    }
+
+    public async Task<Result> StopAsync(long id, string reason, string operatorName, CancellationToken ct = default)
+    {
+        LogInfo($"终止临时救助: id={id}, operator={operatorName}");
+
+        var sql = @"UPDATE nc_biz_temp_relief_applications SET
+                    status = $1, stopped_at = NOW(), stopped_by = $2, stop_reason = $3, updated_at = NOW()
+                    WHERE id = $4 AND deleted_at IS NULL AND status = $5";
+        var result = await _db.ExecuteNonQueryAsync(sql, ct, TempReliefConstants.StatusStopped, operatorName ?? "System", reason ?? string.Empty, id, TempReliefConstants.StatusConfirmed);
+        if (result.IsFailure)
+            return Result.Failure(result.ErrorCode!, result.Message!);
+        if (result.Value == 0)
+            return Result.Failure(ErrorCodes.INVALID_TRANSITION, "仅已确认状态可终止");
+
+        Logger.LogBusiness("终止临时救助申请", ("ApplicationId", id), ("Reason", reason ?? string.Empty));
+        return Result.Success();
+    }
+
+    public async Task<Result> DeleteAsync(long id, CancellationToken ct = default)
+    {
+        LogInfo($"删除临时救助: id={id}");
+
+        var sql = @"UPDATE nc_biz_temp_relief_applications SET
+                    deleted_at = NOW(), updated_at = NOW()
+                    WHERE id = $1 AND deleted_at IS NULL AND status = $2";
+        var result = await _db.ExecuteNonQueryAsync(sql, ct, id, TempReliefConstants.StatusDraft);
+        if (result.IsFailure)
+            return Result.Failure(result.ErrorCode!, result.Message!);
+        if (result.Value == 0)
+            return Result.Failure(ErrorCodes.INVALID_TRANSITION, "仅草稿状态可删除");
+
+        Logger.LogBusiness("删除临时救助申请", ("ApplicationId", id));
+        return Result.Success();
+    }
+
+    public async Task<Result<bool>> CheckAnnualExistsAsync(string idCard, string applyYear, long? excludeId = null, CancellationToken ct = default)
+    {
+        ValidateNotNullOrEmpty(idCard, nameof(idCard));
+        ValidateNotNullOrEmpty(applyYear, nameof(applyYear));
+
+        string sql;
+        object[] parameters;
+
+        if (excludeId.HasValue)
+        {
+            sql = @"SELECT COUNT(*) FROM nc_biz_temp_relief_applications
+                    WHERE applicant_id_card = $1 AND apply_year = $2 AND id != $3 AND deleted_at IS NULL";
+            parameters = new object[] { idCard, applyYear, excludeId.Value };
+        }
+        else
+        {
+            sql = @"SELECT COUNT(*) FROM nc_biz_temp_relief_applications
+                    WHERE applicant_id_card = $1 AND apply_year = $2 AND deleted_at IS NULL";
+            parameters = new object[] { idCard, applyYear };
+        }
+
+        var result = await _db.ExecuteScalarAsync<long>(sql, ct, parameters);
+        if (result.IsFailure)
+            return Result.Failure<bool>(result.ErrorCode!, result.Message!);
+
+        return Result.Success(result.Value > 0);
+    }
+
+    #endregion
+
+    #region 私有辅助
+
+    /// <summary>
+    /// 生成申请编号：LZ{yyyyMMdd}{seq:D4}
+    /// </summary>
+    private async Task<Result<string>> GetNextApplicationNoAsync(CancellationToken ct = default)
+    {
+        var prefix = $"{TempReliefConstants.ApplicationNoPrefix}{DateTime.Now:yyyyMMdd}";
+
+        var sql = @"SELECT COALESCE(MAX(CAST(SUBSTRING(application_no FROM 11) AS INTEGER)), 0) + 1
+                    FROM nc_biz_temp_relief_applications
+                    WHERE application_no LIKE $1";
+        var result = await _db.ExecuteScalarAsync<long>(sql, ct, $"{prefix}%");
+        if (result.IsFailure)
+            return Result.Failure<string>(result.ErrorCode!, result.Message!);
+
+        var seq = result.Value;
+        var appNo = $"{prefix}{seq:D4}";
+        return Result.Success(appNo);
+    }
+
+    /// <summary>
+    /// 重建家庭成员明细（先删后插）：跳过姓名为空的表单占位行；关系统一转中文后落库
+    /// </summary>
+    private async Task<Result> ReplaceMembersAsync(long applicationId, List<TempReliefMember> members, CancellationToken ct)
+    {
+        var deleteResult = await _db.ExecuteNonQueryAsync(
+            "DELETE FROM nc_biz_temp_relief_members WHERE application_id = $1", ct, applicationId);
+        if (deleteResult.IsFailure)
+            return Result.Failure(deleteResult.ErrorCode!, deleteResult.Message!);
+
+        // 表单在无成员时会保留一行空白占位行（供录入），不能落库：
+        // 否则打印授权承诺书时该空行仍会被写入"居民身份证"（单成员家庭出现两个证件类型）。
+        var effective = members?
+            .Where(m => !string.IsNullOrWhiteSpace(m.MemberName))
+            .ToList() ?? new List<TempReliefMember>();
+
+        if (effective.Count == 0)
+            return Result.Success();
+
+        var sorted = effective
+            .Select((m, idx) => new { Member = m, Index = idx })
+            .ToList();
+
+        var (valuesClause, args) = MultiRowValuesBuilder.Build(sorted.Count, 8, i =>
+        {
+            var m = sorted[i].Member;
+            return new object?[]
+            {
+                applicationId, m.MemberName, m.Gender ?? "",
+                TempReliefConstants.GetRelationshipDisplayName(m.Relation), m.IdCard ?? "",
+                m.WorkUnit ?? "", m.AnnualIncome, sorted[i].Index
+            };
+        }, o => $"(${o}, ${o + 1}, ${o + 2}, ${o + 3}, ${o + 4}, ${o + 5}, ${o + 6}, ${o + 7}, NOW(), NOW())");
+
+        var result = await _db.ExecuteNonQueryAsync(@"
+            INSERT INTO nc_biz_temp_relief_members
+            (application_id, member_name, gender, relation, id_card, work_unit, annual_income, sort_order, created_at, updated_at)
+            VALUES " + valuesClause, ct, args);
+        if (result.IsFailure)
+            return Result.Failure(result.ErrorCode!, result.Message!);
+
+        return Result.Success();
+    }
+
+    private static DateTime? OrNull(DateTime d) => d == default ? null : d;
+
+    private async Task<Result> ReplaceDiseasesAsync(long applicationId, List<TempReliefDisease> diseases, CancellationToken ct)
+    {
+        var deleteResult = await _db.ExecuteNonQueryAsync(
+            "DELETE FROM nc_biz_temp_relief_diseases WHERE application_id = $1", ct, applicationId);
+        if (deleteResult.IsFailure)
+            return Result.Failure(deleteResult.ErrorCode!, deleteResult.Message!);
+
+        if (diseases == null || diseases.Count == 0)
+            return Result.Success();
+
+        var sorted = diseases
+            .Select((d, idx) => new { Item = d, Index = idx })
+            .OrderByDescending(x => string.IsNullOrWhiteSpace(x.Item.DiseaseName) ? 0 : 1)
+            .ThenBy(x => x.Index)
+            .ToList();
+
+        var (valuesClause, args) = MultiRowValuesBuilder.Build(sorted.Count, 11, i =>
+        {
+            var d = sorted[i].Item;
+            return new object?[]
+            {
+                applicationId, d.DiseaseName ?? "", d.DiseaseCode ?? "", d.MemberName ?? "", d.Hospital ?? "",
+                OrNull(d.TreatStartDate), OrNull(d.TreatEndDate),
+                d.MedicalTotal, d.InsurancePaid, d.SelfPaid, sorted[i].Index
+            };
+        }, o => $"(${o}, ${o + 1}, ${o + 2}, ${o + 3}, ${o + 4}, ${o + 5}, ${o + 6}, ${o + 7}, ${o + 8}, ${o + 9}, ${o + 10}, NOW(), NOW())");
+
+        var result = await _db.ExecuteNonQueryAsync(@"
+            INSERT INTO nc_biz_temp_relief_diseases
+            (application_id, disease_name, disease_code, member_name, hospital, treat_start_date, treat_end_date,
+             medical_total, insurance_paid, self_paid, sort_order, created_at, updated_at)
+            VALUES " + valuesClause, ct, args);
+        if (result.IsFailure)
+            return Result.Failure(result.ErrorCode!, result.Message!);
+
+        return Result.Success();
+    }
+
+    private async Task<Result> ReplaceAccidentsAsync(long applicationId, List<TempReliefAccident> accidents, CancellationToken ct)
+    {
+        var deleteResult = await _db.ExecuteNonQueryAsync(
+            "DELETE FROM nc_biz_temp_relief_accidents WHERE application_id = $1", ct, applicationId);
+        if (deleteResult.IsFailure)
+            return Result.Failure(deleteResult.ErrorCode!, deleteResult.Message!);
+
+        if (accidents == null || accidents.Count == 0)
+            return Result.Success();
+
+        var sorted = accidents
+            .Select((a, idx) => new { Item = a, Index = idx })
+            .OrderByDescending(x => string.IsNullOrWhiteSpace(x.Item.AccidentType) ? 0 : 1)
+            .ThenBy(x => x.Index)
+            .ToList();
+
+        var (valuesClause, args) = MultiRowValuesBuilder.Build(sorted.Count, 11, i =>
+        {
+            var a = sorted[i].Item;
+            return new object?[]
+            {
+                applicationId, a.AccidentType ?? "", a.MemberName ?? "", OrNull(a.HappenDate), a.HappenPlace ?? "", a.InjurySituation ?? "",
+                a.PropertyLoss, a.CompensationPaid,
+                a.ResponsibilityDesc ?? "", a.MaterialDesc ?? "", sorted[i].Index
+            };
+        }, o => $"(${o}, ${o + 1}, ${o + 2}, ${o + 3}, ${o + 4}, ${o + 5}, ${o + 6}, ${o + 7}, ${o + 8}, ${o + 9}, ${o + 10}, NOW(), NOW())");
+
+        var result = await _db.ExecuteNonQueryAsync(@"
+            INSERT INTO nc_biz_temp_relief_accidents
+            (application_id, accident_type, member_name, happen_date, happen_place, injury_situation,
+             property_loss, compensation_paid, responsibility_desc, material_desc, sort_order, created_at, updated_at)
+            VALUES " + valuesClause, ct, args);
+        if (result.IsFailure)
+            return Result.Failure(result.ErrorCode!, result.Message!);
+
+        return Result.Success();
+    }
+
+    private async Task<Result> ReplaceEducationsAsync(long applicationId, List<TempReliefEducation> educations, CancellationToken ct)
+    {
+        var deleteResult = await _db.ExecuteNonQueryAsync(
+            "DELETE FROM nc_biz_temp_relief_educations WHERE application_id = $1", ct, applicationId);
+        if (deleteResult.IsFailure)
+            return Result.Failure(deleteResult.ErrorCode!, deleteResult.Message!);
+
+        if (educations == null || educations.Count == 0)
+            return Result.Success();
+
+        var sorted = educations
+            .Select((e, idx) => new { Item = e, Index = idx })
+            .OrderByDescending(x => string.IsNullOrWhiteSpace(x.Item.StudentName) ? 0 : 1)
+            .ThenBy(x => x.Index)
+            .ToList();
+
+        var (valuesClause, args) = MultiRowValuesBuilder.Build(sorted.Count, 8, i =>
+        {
+            var e = sorted[i].Item;
+            return new object?[]
+            {
+                applicationId, e.StudentName ?? "", e.EducationStage ?? "", e.SchoolName ?? "",
+                e.TuitionFee, OrNull(e.FeeDate), e.SchoolDuration, sorted[i].Index
+            };
+        }, o => $"(${o}, ${o + 1}, ${o + 2}, ${o + 3}, ${o + 4}, ${o + 5}, ${o + 6}, ${o + 7}, NOW(), NOW())");
+
+        var result = await _db.ExecuteNonQueryAsync(@"
+            INSERT INTO nc_biz_temp_relief_educations
+            (application_id, student_name, education_stage, school_name,
+             tuition_fee, fee_date, school_duration, sort_order, created_at, updated_at)
+            VALUES " + valuesClause, ct, args);
+        if (result.IsFailure)
+            return Result.Failure(result.ErrorCode!, result.Message!);
+
+        return Result.Success();
+    }
+
+    #endregion
+}
+
+/// <summary>
+/// 候选人查询行（各来源表统一列）
+/// </summary>
+public class TempReliefCandidateRow
+{
+    public long SourceFamilyId { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string IdCard { get; set; } = string.Empty;
+    public string Gender { get; set; } = string.Empty;
+    public string Phone { get; set; } = string.Empty;
+    public string Province { get; set; } = string.Empty;
+    public string City { get; set; } = string.Empty;
+    public string District { get; set; } = string.Empty;
+    public string DetailAddress { get; set; } = string.Empty;
+    public string FamilyAddress { get; set; } = string.Empty;
+    public string HukouAddress { get; set; } = string.Empty;
+    public string Town { get; set; } = string.Empty;
+    public string Village { get; set; } = string.Empty;
+    public int? FamilySize { get; set; }
+    public string HukouType { get; set; } = string.Empty;
+    public string BankName { get; set; } = string.Empty;
+    public string BankAccount { get; set; } = string.Empty;
+    public string OneCardAccount { get; set; } = string.Empty;
+    public string MatchedMemberName { get; set; } = string.Empty;
+    public string MatchedMemberRelation { get; set; } = string.Empty;
+    public string MatchedMemberIdCard { get; set; } = string.Empty;
+
+    public TempReliefCandidate ToCandidate(string sourceTable) => new()
+    {
+        SourceFamilyId = SourceFamilyId,
+        SourceTable = sourceTable,
+        HukouType = HukouType,
+        Name = Name,
+        IdCard = IdCard,
+        Gender = Gender,
+        Phone = Phone,
+        Province = Province,
+        City = City,
+        District = District,
+        DetailAddress = DetailAddress,
+        FamilyAddress = FamilyAddress,
+        HukouAddress = HukouAddress,
+        Town = Town,
+        Village = Village,
+        FamilySize = FamilySize,
+        BankName = BankName,
+        BankAccount = BankAccount,
+        OneCardAccount = OneCardAccount,
+        MatchedMemberIdCard = MatchedMemberIdCard,
+        MatchedPersonInfo = BuildMatchedPersonInfo(MatchedMemberName, MatchedMemberRelation)
+    };
+
+    /// <summary>命中成员展示串：命中成员：张三（儿子）；关系为空时省略括号。</summary>
+    private static string BuildMatchedPersonInfo(string name, string relation)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+        var rel = TempReliefConstants.GetRelationshipDisplayName(relation);
+        return string.IsNullOrWhiteSpace(rel) ? $"命中成员：{name}" : $"命中成员：{name}（{rel}）";
+    }
+}
+
+/// <summary>
+/// 家庭成员查询行（低保申请库）
+/// </summary>
+public class TempReliefMemberRow
+{
+    public string MemberName { get; set; } = string.Empty;
+    public string Gender { get; set; } = string.Empty;
+    public string Relation { get; set; } = string.Empty;
+    public string IdCard { get; set; } = string.Empty;
+    public string WorkUnit { get; set; } = string.Empty;
+    public decimal? AnnualIncome { get; set; }
+}
+
+/// <summary>
+/// 导入台账家庭表成员名单查询行
+/// </summary>
+public class TempReliefMemberNamesRow
+{
+    public string MemberNames { get; set; } = string.Empty;
+    public string MemberIdCards { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 低保申请库认定分类查询行
+/// </summary>
+public class PolicyClassRow
+{
+    public string Status { get; set; } = string.Empty;
+    public string ClassificationResult { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 地址库镇名查询行（村→镇反查）
+/// </summary>
+public class TownNameRow
+{
+    public string TownName { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 跨来源户籍分类查询行
+/// </summary>
+public class HukouTypeRow
+{
+    public string HukouType { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 台账成员明细户主性别查询行
+/// </summary>
+public class GenderRow
+{
+    public string Gender { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 家庭成员健康状况查询行（状态汇总用）
+/// </summary>
+public class FamilyStatusRow
+{
+    public string MemberName { get; set; } = string.Empty;
+    public bool IsApplicant { get; set; }
+    public string HealthStatus { get; set; } = string.Empty;
+    public string WorkCapacity { get; set; } = string.Empty;
+    public string DiseaseName { get; set; } = string.Empty;
+    public string DisabilityType { get; set; } = string.Empty;
+    public string DisabilityLevel { get; set; } = string.Empty;
+    public bool IsDisabled { get; set; }
+}

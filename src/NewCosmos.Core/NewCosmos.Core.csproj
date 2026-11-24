@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>NewCosmos</RootNamespace>
+    <AssemblyName>NewCosmos.Core</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CA1416;CA1707;CA1859;CA1845;CA1822;CA1852;CA2201;CA1000;CA1001;CA1716;CA1816;CS8625</NoWarn>
+    <AcceptNPOIOSMFLicense>true</AcceptNPOIOSMFLicense>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="Serilog" Version="4.4.0" />
+    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+    <PackageReference Include="Serilog.Sinks.Async" Version="2.1.0" />
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="BCrypt.Net-Next" Version="4.2.1" />
+    <PackageReference Include="YamlDotNet" Version="18.1.0" />
+    <PackageReference Include="EPPlus" Version="8.6.3" />
+    <PackageReference Include="ExcelDataReader" Version="3.9.0" />
+    <PackageReference Include="ExcelDataReader.DataSet" Version="3.9.0" />
+    <PackageReference Include="TinyPinyin" Version="1.1.0" />
+    <PackageReference Include="NPOI" Version="2.8.0" />
+    <PackageReference Include="PDFsharp" Version="6.1.1" />
+    <PackageReference Include="SkiaSharp" Version="3.119.2" />
+  </ItemGroup>
+
+</Project>

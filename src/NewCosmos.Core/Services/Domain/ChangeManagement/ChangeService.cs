@@ -1,0 +1,864 @@
+using System.Text;
+using System.Text.Json;
+using NewCosmos.Constants;
+using NewCosmos.Helpers;
+using NewCosmos.Models.Entities;
+using NewCosmos.Models.Enums;
+using NewCosmos.Models.Results;
+using NewCosmos.Services.Core;
+using NewCosmos.Services.Database;
+using NewCosmos.Services.Domain.SocialAssistance;
+using NewCosmos.Services.StateMachine;
+using NewCosmos.Services.System;
+
+namespace NewCosmos.Services.Domain.ChangeManagement;
+
+using ApplicationEntity = NewCosmos.Models.Entities.Application;
+
+/// <summary>
+/// 变更上下文
+/// </summary>
+public class ChangeContext
+{
+    public long ApplicationId { get; set; }
+    public string ChangeType { get; set; } = string.Empty;
+
+    /// <summary>变更类别（DictionaryConstants.ChangeCategory.*；默认 null 不写）</summary>
+    public string? ChangeCategory { get; set; }
+
+    public string ChangeReason { get; set; } = string.Empty;
+    public string ChangeReasonType { get; set; } = string.Empty;
+    public DateTime ChangeDate { get; set; } = DateTime.Today;
+    public string OperatorName { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 经济复核上下文
+/// </summary>
+public class EconomicReviewContext
+{
+    public long ApplicationId { get; set; }
+    public decimal NewTotalFamilyIncome { get; set; }
+    public decimal NewPerCapitaIncome { get; set; }
+    public decimal NewTotalAnnualIncome { get; set; }
+    public decimal NewPerCapitaAnnualIncome { get; set; }
+    public decimal NewRigidExpenditure { get; set; }
+    public int NewFamilySize { get; set; }
+    public string ReviewReason { get; set; } = string.Empty;
+    public string OperatorName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 是否为家庭信息修正模式（需要额外校验周期限制）
+    /// </summary>
+    public bool IsFamilyCorrection { get; set; }
+
+    // ── 覆写前捕获的变更前旧值 ──
+    // 经济复核入口（表单 ExecuteReviewSaveAsync）优先传向导入口（LoadApplicationAsync）固化的快照
+    //（_entryApplicationSnapshot）：步骤保存/Step5 判定落库已把新经济数据写回本档，
+    // 此后读库拿到的"旧值"实为覆写后值（Before 快照 / old_per_capita_income 失真）。
+    // 任一未提供时回退读 application（与历史行为一致）。
+
+    /// <summary>覆写前的家庭人数</summary>
+    public int? OldFamilySize { get; set; }
+
+    /// <summary>覆写前的家庭月总收入</summary>
+    public decimal? OldTotalFamilyIncome { get; set; }
+
+    /// <summary>覆写前的家庭年收入</summary>
+    public decimal? OldTotalAnnualIncome { get; set; }
+
+    /// <summary>覆写前的月人均收入</summary>
+    public decimal? OldPerCapitaIncome { get; set; }
+
+    /// <summary>覆写前的刚性支出数值（口径同上）</summary>
+    public decimal? OldRigidExpenditure { get; set; }
+
+    /// <summary>
+    /// 覆写前的分类结果。必须在 Step5「分类判定」落库之前捕获（表单加载时刻），
+    /// 否则 needRebuild 的分类比较读到的是覆写后值，恒判"无变化"。
+    /// </summary>
+    public string? OldClassification { get; set; }
+
+    /// <summary>
+    /// 覆写前的保障金合计（户月 + 分类施保 + 照料费）。同上必须在判定落库前捕获，
+    /// 否则 needRebuild 的金额比较恒判"无变化"，真正有变化的复核不重建。
+    /// </summary>
+    public decimal? OldGuaranteeAmount { get; set; }
+
+    /// <summary>
+    /// 覆写前的户月保障金（household_monthly_guarantee_amount，不含分类施保/照料费）。
+    /// 保障金变更登记的差额口径只认本值（分类施保变动另行保存记录，不并入保障金差）；
+    /// 必须在 Step5 判定落库前由表单捕获，null 时回退 OldGuaranteeAmount − OldClassified − OldCaregiver。
+    /// </summary>
+    public decimal? OldHouseholdMonthlyGuaranteeAmount { get; set; }
+
+    /// <summary>覆写前的分类施保金额（分类施保变更记录的旧值来源；同样须判定前捕获）</summary>
+    public decimal? OldClassifiedSubsidyAmount { get; set; }
+
+    /// <summary>覆写前的照料补贴金额（户月口径回退换算用）</summary>
+    public decimal? OldCaregiverSubsidyAmount { get; set; }
+
+    /// <summary>
+    /// 覆写前的合格标记（is_eligible）。Approved 档案在判定落库时会被覆写成 false，
+    /// 停旧建新后须按本值还原旧档（历史快照 + 月报停保汇总表归组）。
+    /// </summary>
+    public bool? OldIsEligible { get; set; }
+
+    /// <summary>覆写前的年人均收入（年值权威口径；还原旧档历史快照用，null 保持旧档现值）</summary>
+    public decimal? OldPerCapitaAnnualIncome { get; set; }
+
+    /// <summary>
+    /// 覆写前的收入分项旧值（与 Application 列同名同口径：务工/经营/财产/转移/其他/刚性为月值，赡养/土地/补贴为年值）
+    /// </summary>
+    public IncomeComponentValues? OldComponents { get; set; }
+}
+
+/// <summary>
+/// 停旧建新的「旧档还原快照」：Step5「分类判定」与经济明细保存会把新值写回当前（旧）档案，
+/// 随后旧档被置 Stopped，若不还原则旧档变成"停保码 + 0 元 + 复核后收入"——既不是历史记录，
+/// 月报停保汇总表按分类过滤时整户也会漏出（2026-10 张彦亮/贺满程/梁玉祥 实测漏 3 户）。
+/// 全字段可空：缺失列由还原 SQL 的 COALESCE 保持旧档现值，不猜测、不写 NULL。
+/// </summary>
+public class PreChangeArchiveSnapshot
+{
+    public string? Classification { get; set; }
+    public bool? IsEligible { get; set; }
+    public decimal? HouseholdMonthlyGuaranteeAmount { get; set; }
+    public decimal? ClassifiedSubsidyAmount { get; set; }
+    public decimal? CaregiverSubsidyAmount { get; set; }
+    public decimal? TotalGuaranteeAmount { get; set; }
+    public int? FamilySize { get; set; }
+    public decimal? TotalFamilyIncome { get; set; }
+    public decimal? PerCapitaIncome { get; set; }
+    public decimal? TotalAnnualIncome { get; set; }
+    public decimal? PerCapitaAnnualIncome { get; set; }
+    public decimal? RigidExpenditure { get; set; }
+    public decimal? WorkIncomeTotal { get; set; }
+    public decimal? BusinessIncomeTotal { get; set; }
+    public decimal? PropertyIncomeTotal { get; set; }
+    public decimal? TransferIncomeTotal { get; set; }
+    public decimal? OtherIncomeTotal { get; set; }
+    public decimal? AlimonyIncome { get; set; }
+    public decimal? LandIncomeTotal { get; set; }
+    public decimal? SubsidyTotal { get; set; }
+}
+
+/// <summary>
+/// 收入分项值（列口径与 nc_biz_applications 主表一致：前六项月值、后三项年值；读取方展示时统一换算年值）
+/// </summary>
+public class IncomeComponentValues
+{
+    public decimal WorkIncomeTotal { get; set; }
+    public decimal BusinessIncomeTotal { get; set; }
+    public decimal PropertyIncomeTotal { get; set; }
+    public decimal TransferIncomeTotal { get; set; }
+    public decimal OtherIncomeTotal { get; set; }
+    public decimal RigidExpenditure { get; set; }
+    public decimal AlimonyIncome { get; set; }
+    public decimal LandIncomeTotal { get; set; }
+    public decimal SubsidyTotal { get; set; }
+}
+
+/// <summary>
+/// 家庭成员变更上下文（增员/减员后重新认定，停旧建新）
+/// </summary>
+public class MemberChangeContext
+{
+    public long ApplicationId { get; set; }
+
+    /// <summary>主变更类型（DictionaryConstants.ChangeType.MEMBER_ADD/MEMBER_REMOVE/MEMBER_MODIFY）</summary>
+    public string ChangeType { get; set; } = DictionaryConstants.ChangeType.MEMBER_MODIFY;
+
+    /// <summary>变更摘要（如 "新增 张三；减员 李四"），并入变更原因</summary>
+    public string ChangeSummary { get; set; } = string.Empty;
+
+    /// <summary>变更原因（表单"原因详情"，必填）</summary>
+    public string ChangeReason { get; set; } = string.Empty;
+
+    /// <summary>逐人变更明细（增员/减员原因登记；写入快照与 nc_biz_change_details，死亡减员联动死亡记录）</summary>
+    public List<MemberChangeEntry> Entries { get; set; } = new();
+
+    /// <summary>变更前家庭人数（表单加载时口径，用于 Before 快照）</summary>
+    public int OldFamilySize { get; set; }
+
+    /// <summary>
+    /// 覆写前的分类结果。必须在 Step5「分类判定」落库之前捕获（表单加载时刻），
+    /// 否则停旧建新判定的分类/金额比较读到覆写后值，恒判"无变化"。
+    /// </summary>
+    public string? OldClassification { get; set; }
+
+    /// <summary>覆写前的保障金合计（户月 + 分类施保 + 照料费）。同上必须在判定落库前捕获。</summary>
+    public decimal? OldGuaranteeAmount { get; set; }
+
+    /// <summary>
+    /// 覆写前的户月保障金（不含分类施保/照料费）。保障金变更登记的差额口径只认本值；
+    /// 必须在 Step5 判定落库前由表单捕获，null 时回退 OldGuaranteeAmount − OldClassified − OldCaregiver。
+    /// </summary>
+    public decimal? OldHouseholdMonthlyGuaranteeAmount { get; set; }
+
+    /// <summary>覆写前的分类施保金额（分类施保变更记录的旧值来源）</summary>
+    public decimal? OldClassifiedSubsidyAmount { get; set; }
+
+    /// <summary>覆写前的照料补贴金额（户月口径回退换算用）</summary>
+    public decimal? OldCaregiverSubsidyAmount { get; set; }
+
+    /// <summary>覆写前的家庭月总收入（表单入口快照；null 回退读库——本事务 SaveEconomicDetailsAsync 已先写回）</summary>
+    public decimal? OldTotalFamilyIncome { get; set; }
+
+    /// <summary>覆写前的月人均收入（同上；写入 Before 快照与 nc_biz_change_records.old_per_capita_income）</summary>
+    public decimal? OldPerCapitaIncome { get; set; }
+
+    /// <summary>覆写前的刚性支出（同上）</summary>
+    public decimal? OldRigidExpenditure { get; set; }
+
+    /// <summary>覆写前的年家庭总收入（年值权威口径；还原旧档历史快照用，null 保持旧档现值）</summary>
+    public decimal? OldTotalAnnualIncome { get; set; }
+
+    /// <summary>覆写前的年人均收入（同上）</summary>
+    public decimal? OldPerCapitaAnnualIncome { get; set; }
+
+    /// <summary>覆写前的合格标记（is_eligible；同 OldClassification，须判定落库前捕获）</summary>
+    public bool? OldIsEligible { get; set; }
+
+    /// <summary>覆写前的收入分项旧值（同 EconomicReviewContext，还原旧档历史快照用）</summary>
+    public IncomeComponentValues? OldComponents { get; set; }
+
+    public decimal NewTotalFamilyIncome { get; set; }
+    public decimal NewPerCapitaIncome { get; set; }
+    public decimal NewTotalAnnualIncome { get; set; }
+    public decimal NewPerCapitaAnnualIncome { get; set; }
+    public decimal NewRigidExpenditure { get; set; }
+    public int NewFamilySize { get; set; }
+    public string OperatorName { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 家庭成员变更明细（增员/减员逐人原因登记）
+/// </summary>
+public class MemberChangeEntry
+{
+    /// <summary>方向：DictionaryConstants.ChangeType.MEMBER_ADD / MEMBER_REMOVE</summary>
+    public string Direction { get; set; } = DictionaryConstants.ChangeType.MEMBER_ADD;
+
+    /// <summary>成员ID（减员为旧档案成员行ID；增员为 0）</summary>
+    public long MemberId { get; set; }
+
+    public string Name { get; set; } = string.Empty;
+    public string IdCard { get; set; } = string.Empty;
+    public string RelationshipToHead { get; set; } = string.Empty;
+    public string MemberCategory { get; set; } = string.Empty;
+
+    /// <summary>变更原因代码（字典 item_key，分类 ChangeReasons/MemberAddReasons）</summary>
+    public string ReasonCode { get; set; } = string.Empty;
+
+    /// <summary>变更原因名称（冗余存储，供输出与审计直读）</summary>
+    public string ReasonName { get; set; } = string.Empty;
+
+    /// <summary>事由日期（死亡减员=死亡日期，其余=生效日期）</summary>
+    public DateTime EventDate { get; set; } = DateTime.Today;
+
+    /// <summary>事由时刻（死亡减员=死亡确切时刻；其余事由可空）——落 nc_biz_death_records.death_time</summary>
+    public TimeSpan? EventTime { get; set; }
+
+    public string Remark { get; set; } = string.Empty;
+}
+
+// MemberDeathContext「成员死亡上下文」已删（2026-11-08 P0-1）：唯一消费方 ProcessMemberDeathAsync
+// 为死代码（全仓 0 调用方），成员死亡实战走 MemberChangeEntry（见上方）→ RebuildAndReview 批量 CTE。
+
+/// <summary>
+/// 户主变更上下文
+/// </summary>
+public class HeadChangeContext
+{
+    public long ApplicationId { get; set; }
+    public long OldHeadMemberId { get; set; }
+    public long NewHeadMemberId { get; set; }
+    public string OldHeadName { get; set; } = string.Empty;
+    public string NewHeadName { get; set; } = string.Empty;
+    public string ChangeReason { get; set; } = string.Empty;
+    public string OperatorName { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 户主死亡变更上下文（停旧建新）
+/// </summary>
+public class HouseholdDeathContext
+{
+    /// <summary>
+    /// 旧档案申请ID
+    /// </summary>
+    public long ApplicationId { get; set; }
+
+    /// <summary>
+    /// 死亡原户主成员ID（0 时由服务端按"申请人/户主"自动定位）
+    /// </summary>
+    public long DeceasedHeadMemberId { get; set; }
+
+    /// <summary>
+    /// 死亡原户主姓名
+    /// </summary>
+    public string DeceasedHeadName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 死亡原户主身份证号
+    /// </summary>
+    public string DeceasedHeadIdCard { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 新户主成员ID（在原档案中的 member id）
+    /// </summary>
+    public long NewHeadMemberId { get; set; }
+
+    /// <summary>
+    /// 新户主姓名
+    /// </summary>
+    public string NewHeadName { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 新户主身份证号
+    /// </summary>
+    public string NewHeadIdCard { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 死亡日期
+    /// </summary>
+    public DateTime DeathDate { get; set; } = DateTime.Today;
+
+    /// <summary>
+    /// 死亡确切时刻（必填：应用层双门校验的入参侧，空值由 ExecuteHouseholdDeathAsync 拒绝）
+    /// </summary>
+    public TimeSpan? DeathTime { get; set; }
+
+    /// <summary>
+    /// 死亡原因
+    /// </summary>
+    public string DeathReason { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 死亡证明编号
+    /// </summary>
+    public string DeathCertificateNo { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 操作人
+    /// </summary>
+    public string OperatorName { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 核验停止上下文（动态管理「拒绝配合核验工作」：核验失败直接停止保障，只停不建新档）
+/// </summary>
+public class VerifyStopContext
+{
+    /// <summary>
+    /// 旧档案申请ID
+    /// </summary>
+    public long ApplicationId { get; set; }
+
+    /// <summary>
+    /// 停止业务日期（默认办理当日；月报停保汇总按 stop_date 落周期）
+    /// </summary>
+    public DateTime StopDate { get; set; } = DateTime.Today;
+
+    /// <summary>
+    /// 操作人
+    /// </summary>
+    public string OperatorName { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 变更结果
+/// </summary>
+public class ChangeResult
+{
+    public long ChangeId { get; set; }
+    public bool IsSuccess { get; set; }
+    public string ErrorMessage { get; set; } = string.Empty;
+    public string OldClassification { get; set; } = string.Empty;
+    public string NewClassification { get; set; } = string.Empty;
+    public decimal OldGuaranteeAmount { get; set; }
+    public decimal NewGuaranteeAmount { get; set; }
+    public bool TriggeredGracePeriod { get; set; }
+    public bool TriggeredStop { get; set; }
+
+    /// <summary>
+    /// 是否已停旧建新生成新档案。
+    /// false = 保障金额/分类/停保三项均未变化，复核结果留在原档（原档保持有效，未生成新档案）。
+    /// </summary>
+    public bool Rebuilt { get; set; }
+
+    /// <summary>
+    /// 户主死亡停旧建新后生成的新档案申请ID（其余变更场景为 0）
+    /// </summary>
+    public long NewApplicationId { get; set; }
+}
+
+/// <summary>
+/// 变更服务接口
+/// </summary>
+public interface IChangeService
+{
+    /// <summary>
+    /// 创建变更记录
+    /// </summary>
+    Task<Result<long>> CreateChangeAsync(ChangeContext context, string beforeJson, string afterJson, CancellationToken ct = default);
+
+    /// <summary>
+    /// 渐退超限减发：补写 change_type=FundChange（old&gt;new、同分类），供月报保障金减发表捕获。幂等。
+    /// </summary>
+    Task<Result<long>> CreateGraceCapFundChangeAsync(
+        long applicationId,
+        string newClassification,
+        string oldClassification,
+        decimal oldGuaranteeAmount,
+        decimal newGuaranteeAmount,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// 接续链档案 Step5 分类判定后同步跨大类 CategoryAdd 记录（月报「新增救助明细」跨类新增行数据源，
+    /// 同时使本档变更记录列表可见「新类别新增」）。仅链档案（original_application_id 非空）且新分类与
+    /// 上游档案跨四大类时写入；幂等——已存在且分类一致跳过，判定值变化就地更新，判定回同大类则软删。
+    /// change_date = 判定日；triggered_grace_period/triggered_stop 恒 false（死亡停保已由链上
+    /// HouseholdDeath 记录承载，置 true 会使月报「退出对象纠治表」误标经济复核降档事件）。
+    /// </summary>
+    Task<Result<long?>> EnsureChainCategoryAddAsync(long applicationId, string operatorName, CancellationToken ct = default);
+
+    /// <summary>
+    /// 接续链档案 Step5 分类判定后的统一结算挂点：保障金变更登记 + 分类施保变更登记（两步独立把关）。
+    /// 户主死亡的最终保障金额在新档 Step5 才确定（死亡瞬间只建链不判金额），故结算不能在死亡时刻做，
+    /// 必须在本步以旧档（未被表单覆写，可信）vs 本档（新档）已落库值比对。
+    ///
+    /// ① 保障金变更登记：旧/新同属最低生活保障群体（同码）且户月差 ≥ FundChangeThresholdHelper.Threshold
+    ///    时写入，金额为户月口径；渐退期活跃时跳过（待遇走渐退封顶减发，防同户同月两条 FundChange）。
+    ///    幂等——同链金额一致跳过、漂移就地更新。
+    ///
+    /// ② 分类施保变更登记：不套阈值、也不套低保同码门（原「户主死亡进入渐退期」专用减发记录
+    ///    EnsureChainClassifiedSubsidyReduceAsync 已删，语义由本步覆盖并放宽到三分支）。
+    ///    change_type 按方向取 ClassifiedSubsidyReduce / ClassifiedSubsidyAdd，change_reason_type='分类施保变更'；
+    ///    change_category=NULL（不入增减员调整表）、triggered_grace_period/triggered_stop 恒 false
+    ///    （置 true 会使月报「退出对象纠治表」误标经济复核降档事件）。
+    ///    幂等——链感知键（application_id + new_application_id + change_type）：金额一致跳过、漂移就地更新、
+    ///    方向翻转软删重建。
+    ///
+    /// 典型形态：户主死亡进渐退期（低保→低收入）→ 第 ① 步被渐退期跳过，第 ② 步照写分类施保减发记录，
+    /// 该减发由月报「分类施保金减发人员表」承载（月保障金按原额封顶，无增减发行）。
+    /// </summary>
+    Task<Result<long?>> EnsureChainFundChangeSettlementAsync(long applicationId, string operatorName, CancellationToken ct = default);
+
+    /// <summary>
+    /// 本档案关联链上是否存在"保障金变更登记"记录（application_id 或 new_application_id 关联）。
+    /// 档案输出追加《档案_变更告知书》"待遇调整"场景的判定依据（与停保场景并列，无停保时仍出告知书）。
+    /// </summary>
+    Task<Result<bool>> HasFundChangeRegistrationAsync(long applicationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询本档案关联链上最近一条"保障金变更登记"记录（告知书待遇调整场景字段装配用；无则 Value 为 null）。
+    /// 金额列为户月保障金口径。
+    /// </summary>
+    Task<Result<FundChangeRegistrationRecord?>> GetLatestFundChangeRegistrationAsync(long applicationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询与本档案关联（application_id 或 new_application_id）且含快照的最近变更记录的 Before/After 快照。
+    /// 定期复核审批表「死亡原因/家庭人口」取数兜底：停旧建新链的 CategoryAdd 行自身无快照
+    /// （经济复核跨类行/Step5 跨类补写行），快照在链上发起记录（如户主死亡记录）；无匹配时 Value 为 null 非失败。
+    /// </summary>
+    Task<Result<ChangeSnapshotPair?>> GetLinkedChangeSnapshotsAsync(long applicationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 保存快照
+    /// </summary>
+    Task<Result> SaveSnapshotAsync(long changeId, string snapshotType, string dataJson, CancellationToken ct = default);
+
+    /// <summary>
+    /// 保存变更明细
+    /// </summary>
+    Task<Result> SaveDetailAsync(long changeId, string fieldName, string oldValue, string newValue, CancellationToken ct = default);
+
+    /// <summary>
+    /// 执行经济复核
+    /// </summary>
+    Task<Result<ChangeResult>> ExecuteEconomicReviewAsync(EconomicReviewContext context, CancellationToken ct = default);
+
+    /// <summary>
+    /// 执行家庭成员变更（增员/减员后重新认定，停旧建新）
+    /// </summary>
+    Task<Result<ChangeResult>> ExecuteMemberChangeAsync(MemberChangeContext context, CancellationToken ct = default);
+
+    // ProcessMemberDeathAsync「处理成员死亡」已删（2026-11-08 P0-1）：全仓 0 调用方（死代码取证），
+    // 实战链路是 ExecuteMemberChangeAsync → RebuildAndReview 的死亡减员批量 CTE
+    //（docs/20260924 挂点已同步改指该处）；MemberDeathContext 一并移除。
+
+    /// <summary>
+    /// 执行户主变更
+    /// </summary>
+    Task<Result<ChangeResult>> ExecuteHeadChangeAsync(HeadChangeContext context, CancellationToken ct = default);
+
+    /// <summary>
+    /// 执行户主死亡变更（停旧建新：旧档案停止，以新户主建立新档案并继承全部子表数据）
+    /// </summary>
+    Task<Result<ChangeResult>> ExecuteHouseholdDeathAsync(HouseholdDeathContext context, CancellationToken ct = default);
+
+    /// <summary>
+    /// 获取变更历史（按变更时间倒序，最多 200 条）
+    /// </summary>
+    Task<Result<List<ChangeRecord>>> GetChangeHistoryAsync(long applicationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 单人户户主死亡：只整户停止、不建新档案（唯一成员即户主，无人可接任新户主）。
+    /// 事务内：状态校验 → 定位死亡户主 → 写死亡记录（无新户主/新档）→ 停止旧档 → 结清渐退期 → 写变更记录。
+    /// </summary>
+    Task<Result<ChangeResult>> ExecuteHouseholdHeadDeathStopOnlyAsync(HouseholdDeathContext context, CancellationToken ct = default);
+
+    /// <summary>
+    /// 核验停止（动态管理「拒绝配合核验工作」按钮）：核验失败拒不配合 → 直接停止保障，只停不建新档。
+    /// 事务内：状态守卫 → 停止旧档（ApplicationStatusService 单点写入）→ 结清渐退期 → 写变更记录（VerifyStop）。
+    /// 分类与保障金列不动（保障金属审批结果，§9.7），停保后可经「恢复保障」无损逆向。
+    /// </summary>
+    Task<Result<ChangeResult>> ExecuteVerifyStopAsync(VerifyStopContext context, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询最近一条"核验停止"记录（change_type=VerifyStop；无则 Value 为 null）。
+    /// 档案输出据此追加《档案_变更告知书》并装配"停止/停止享受"字段（理由含核验日期）。
+    /// </summary>
+    Task<Result<VerifyStopRecord?>> GetLatestVerifyStopRecordAsync(long applicationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询本月（当前自然月）内本档案链上发生过的变更类型项（按 change_type + change_reason_type 去重），
+    /// 供变更入口"本月已办理"提示判断。
+    /// </summary>
+    Task<Result<List<MonthlyChangeEntry>>> GetThisMonthChangeEntriesAsync(long applicationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询最近一条"户主死亡整户停止"记录（单人户户主死亡只停不建新档；无则 Value 为 null）。
+    /// 档案输出据此追加《变更告知书》并装配"停止/停止享受"字段（理由含死亡日期）。
+    /// </summary>
+    Task<Result<HouseholdDeathStopRecord?>> GetLatestHouseholdDeathStopRecordAsync(long applicationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询最近一条触发停保的 CategoryStop 变更记录（档案告知书字段装配用；无则 Value 为 null）
+    /// </summary>
+    Task<Result<TriggeredStopChangeRecord?>> GetLatestTriggeredStopRecordAsync(long applicationId, IReadOnlyCollection<string> newClassifications, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询档案链上的"在保前分类"（告知书方向② 停止/不予认定 判定 + 归档终结拒保补写 CategoryStop 用）：
+    /// ① 链上最近一条 old_classification 非空的变更记录；② 回退上游档案链最近非空分类；皆无 → Value=null。
+    /// 单点实现 <c>Helpers\ChainPreClassification</c>（装配端与写入侧共用，两侧口径不劈叉）。
+    /// </summary>
+    Task<Result<string?>> GetLatestChainPreClassificationAsync(long applicationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 是否存在触发停保的 CategoryStop 变更记录（档案输出追加变更告知书判定用）
+    /// </summary>
+    Task<Result<bool>> HasTriggeredCategoryStopAsync(long applicationId, IReadOnlyCollection<string> stopCategoryCodes, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询家庭成员类变更记录（增减员调整表字段装配用，按变更日期倒序）
+    /// </summary>
+    Task<Result<List<MemberChangeRecord>>> GetMemberChangeRecordsAsync(long applicationId, int limit, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询逐人增/减员明细（增减员调整表字段装配用，按变更日期倒序、按身份证号去重）。
+    /// 数据源两路：①成员增减流程写入的 nc_biz_change_details（field_name=MemberAdd/MemberRemove，含逐人原因）；
+    /// ②成员死亡/户主死亡流程不写明细，按 change_reason 的 "动词: 姓名(身份证)" 解析兜底。
+    /// 两类人员均回查 nc_biz_family_members 补齐性别/家庭关系/身体状况/工作单位/年收入
+    /// （减员行可能只剩软删除历史行，故查询不带 deleted_at 过滤，优先取在册行）。
+    /// </summary>
+    Task<Result<List<MemberAdjustEntry>>> GetMemberAdjustEntriesAsync(long applicationId, int limit, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询最近一条与渐退退出相关的变更（经济复核/户主死亡/触发停保，档案渐退审批表退出说明用；无则 Value 为 null）
+    /// </summary>
+    Task<Result<GraceExitChangeRecord?>> GetLatestGraceExitChangeAsync(long applicationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询最近一条含新旧人均收入的变更记录（渐退审批表「变动情况说明」经济复核场景取人均收入新旧值用；无则 Value 为 null）
+    /// </summary>
+    Task<Result<IncomeComparisonRecord?>> GetLatestIncomeComparisonAsync(long applicationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询最近一条挂在旧档上的、Before 快照含 Components 的变更（渐退审批表分项对比取复核前旧值用；无则 Value 为 null）
+    /// </summary>
+    Task<Result<BeforeSnapshotOldValues?>> GetLatestBeforeSnapshotAsync(long originalApplicationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询最近一条复核/变更记录（档案_定期复核审批表「复核情况/复核时间/待遇变化」取数用）。
+    /// 覆盖经济复核、户主死亡、成员变更等完整流程（同档案可能只有死亡类记录，如卢永华户主死亡链）；无匹配则 Value 为 null。
+    /// </summary>
+    Task<Result<ReviewChangeRecord?>> GetLatestReviewChangeRecordAsync(long applicationId, CancellationToken ct = default);
+
+    /// <summary>
+    /// 查询指定变更记录的 Before/After 快照 JSON（定期复核审批表「复核情况」取家庭人口与死亡原因用；
+    /// 经济复核链的 Before 快照含 Components、死亡/成员变更链不含，故不复用 GetLatestBeforeSnapshotAsync；无则 Value 为 null）。
+    /// </summary>
+    Task<Result<ChangeSnapshotPair?>> GetChangeSnapshotsAsync(long changeId, CancellationToken ct = default);
+}
+
+/// <summary>
+/// 变更记录
+/// </summary>
+public class ChangeRecord
+{
+    public long Id { get; set; }
+    public long ApplicationId { get; set; }
+    public string ChangeNo { get; set; } = string.Empty;
+    public string ChangeType { get; set; } = string.Empty;
+    public string ChangeReason { get; set; } = string.Empty;
+    public DateTime ChangeDate { get; set; }
+    public string OperatorName { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+    public DateTime ChangedAt { get; set; }
+
+    /// <summary>变更类型显示名（列表绑定用；未知类型回退原值）</summary>
+    public string ChangeTypeDisplay => ChangeType switch
+    {
+        // 经济复核主记录与"保障金变更登记"记录同为 FundChange：按原因类型区分显示，
+        // 否则成员变更/户主死亡补写的登记记录会在变更历史里误显示为"经济复核"
+        DictionaryConstants.ChangeType.FUND_CHANGE when IsFundChangeRegistration => "保障金变更",
+        DictionaryConstants.ChangeType.FUND_CHANGE => "经济复核",
+        DictionaryConstants.ChangeType.MEMBER_ATTRIBUTE => "成员属性变更",
+        DictionaryConstants.ChangeType.MEMBER_ADD => "成员增加",
+        DictionaryConstants.ChangeType.MEMBER_REMOVE => "成员减少",
+        DictionaryConstants.ChangeType.MEMBER_DEATH => "成员死亡",
+        DictionaryConstants.ChangeType.MEMBER_MODIFY => "成员修改",
+        DictionaryConstants.ChangeType.HOUSEHOLD_DEATH => "户主死亡",
+        DictionaryConstants.ChangeType.HOUSEHOLD_HEAD_CHANGE => "户主变更",
+        DictionaryConstants.ChangeType.DRAFT_SAVE => "草稿保存",
+        DictionaryConstants.ChangeType.CATEGORY_STOP => "原类别停止",
+        DictionaryConstants.ChangeType.CATEGORY_ADD => "新类别新增",
+        DictionaryConstants.ChangeType.CLASSIFIED_SUBSIDY_REDUCE => "分类施保减除",
+        DictionaryConstants.ChangeType.CLASSIFIED_SUBSIDY_ADD => "分类施保增加",
+        DictionaryConstants.ChangeType.VERIFY_STOP => "核验停止",
+        _ => ChangeType
+    };
+
+    /// <summary>变更原因类型（change_reason_type；查询未选列时为空）</summary>
+    public string? ChangeReasonType { get; set; }
+
+    /// <summary>是否为"保障金变更登记"记录（change_type=FundChange 且 reason_type=保障金变更登记）</summary>
+    public bool IsFundChangeRegistration =>
+        string.Equals(ChangeType, DictionaryConstants.ChangeType.FUND_CHANGE, global::System.StringComparison.Ordinal)
+        && string.Equals(ChangeReasonType, ChangeReasonTypeConstants.FundChangeRegistration, global::System.StringComparison.Ordinal);
+}
+
+/// <summary>
+/// 本月变更类型项（变更入口"本月已办理"提示用：按 (change_type, change_reason_type) 去重）
+/// </summary>
+public class MonthlyChangeEntry
+{
+    public string ChangeType { get; set; } = string.Empty;
+
+    /// <summary>变更原因类型（change_reason_type；FundChange 靠它区分"经济复核"与"保障金变更登记"）</summary>
+    public string? ChangeReasonType { get; set; }
+}
+
+/// <summary>
+/// 户主死亡整户停止记录（单人户户主死亡只停不建新档；供档案输出追加《变更告知书》并装配"停止"字段）
+/// </summary>
+public class HouseholdDeathStopRecord
+{
+    /// <summary>死亡日期（= change_record.change_date，办理时写入的业务日期）</summary>
+    public DateTime DeathDate { get; set; }
+}
+
+/// <summary>
+/// 核验停止记录（动态管理「拒绝配合核验工作」只停不建新档；供档案输出追加《变更告知书》并装配"停止"字段）
+/// </summary>
+public class VerifyStopRecord
+{
+    /// <summary>核验停止日期（= change_record.change_date，办理时写入的业务日期）</summary>
+    public DateTime StopDate { get; set; }
+}
+
+/// <summary>
+/// 触发停保的变更记录（档案告知书区分"停止告知/不予认定告知"用）
+/// </summary>
+public class TriggeredStopChangeRecord
+{
+    public string? OldClassification { get; set; }
+    public string? NewClassification { get; set; }
+}
+
+/// <summary>
+/// 保障金变更登记记录（告知书待遇调整场景字段装配用）。
+/// 金额列一律为户月保障金口径（不含分类施保/照料费，分类施保变动走独立的分类施保变更记录）。
+/// </summary>
+public class FundChangeRegistrationRecord
+{
+    public long Id { get; set; }
+    public string? OldClassification { get; set; }
+    public string? NewClassification { get; set; }
+
+    /// <summary>变更前户月保障金</summary>
+    public decimal OldGuaranteeAmount { get; set; }
+
+    /// <summary>变更后户月保障金</summary>
+    public decimal NewGuaranteeAmount { get; set; }
+
+    public string? ChangeReason { get; set; }
+    public DateTime ChangeDate { get; set; }
+
+    /// <summary>变动方向（增发/减发），由金额差符号判定</summary>
+    public bool IsIncrease => NewGuaranteeAmount > OldGuaranteeAmount;
+}
+
+/// <summary>
+/// 家庭成员类变更记录行（增减员调整表字段装配用）
+/// </summary>
+public class MemberChangeRecord
+{
+    public long Id { get; set; }
+    public long ApplicationId { get; set; }
+    public long NewApplicationId { get; set; }
+    public string? ChangeType { get; set; }
+    public string? ChangeReason { get; set; }
+    public DateTime ChangeDate { get; set; }
+    public string? OldClassification { get; set; }
+    public string? NewClassification { get; set; }
+    public decimal? OldGuaranteeAmount { get; set; }
+    public decimal? NewGuaranteeAmount { get; set; }
+}
+
+/// <summary>
+/// 逐人增/减员明细行（增减员调整表字段装配用）
+/// </summary>
+public class MemberAdjustEntry
+{
+    /// <summary>方向：DictionaryConstants.ChangeType.MEMBER_ADD / MEMBER_REMOVE</summary>
+    public string Direction { get; set; } = DictionaryConstants.ChangeType.MEMBER_ADD;
+
+    public string Name { get; set; } = string.Empty;
+    public string IdCard { get; set; } = string.Empty;
+    public string RelationshipToHead { get; set; } = string.Empty;
+    public string MemberCategory { get; set; } = string.Empty;
+
+    /// <summary>逐人变更原因名称（成员增减流程登记；死亡类记录为空，由调用方兜底）</summary>
+    public string ReasonName { get; set; } = string.Empty;
+
+    /// <summary>事由日期（死亡减员=死亡日期，其余=生效日期）</summary>
+    public DateTime? EventDate { get; set; }
+
+    /// <summary>所属变更日期（倒序排序与兜底原因用）</summary>
+    public DateTime ChangeDate { get; set; }
+
+    /// <summary>所属变更类型（死亡类兜底原因文案用）</summary>
+    public string? ChangeType { get; set; }
+
+    // ── 成员表回填（减员可能只剩软删除历史行；查不到时保持空）──
+    public string? Gender { get; set; }
+    public string? HealthStatus { get; set; }
+    public string? WorkUnit { get; set; }
+    public decimal AnnualIncome { get; set; }
+}
+
+/// <summary>
+/// 渐退退出相关变更行（渐退期审批表「退出渐退期情况」分型拼句用）
+/// </summary>
+public class GraceExitChangeRecord
+{
+    public DateTime? ChangeDate { get; set; }
+    public string? ChangeReasonType { get; set; }
+    public string? ChangeType { get; set; }
+    public string? ChangeReason { get; set; }
+    public bool? TriggeredStop { get; set; }
+    public string? NewClassification { get; set; }
+    public string? OldClassification { get; set; }
+}
+
+/// <summary>
+/// 最近一条复核/变更行（档案_定期复核审批表「复核情况/复核时间/待遇变化」取数用）
+/// </summary>
+public class ReviewChangeRecord
+{
+    public long Id { get; set; }
+    public DateTime? ChangeDate { get; set; }
+    public string? ChangeReason { get; set; }
+    public string? ChangeReasonType { get; set; }
+    public string? ChangeType { get; set; }
+    public string? OldClassification { get; set; }
+    public string? NewClassification { get; set; }
+    public decimal? OldGuaranteeAmount { get; set; }
+    public decimal? NewGuaranteeAmount { get; set; }
+    // 复核前人均月收入（NULL=无历史收入记录，打印端按 0 显示，见 ArchiveProductionViewModel.BuildReviewChangeDetailAsync）
+    public decimal? OldPerCapitaIncome { get; set; }
+}
+
+/// <summary>
+/// 指定变更记录的 Before/After 快照 JSON（复核情况取家庭人口、死亡原因等；两键可能均为 null）
+/// </summary>
+public class ChangeSnapshotPair
+{
+    public string? BeforeJson { get; set; }
+    public string? AfterJson { get; set; }
+}
+
+/// <summary>
+/// 变更新旧人均收入行（渐退期审批表「变动情况说明」经济复核场景取数用）
+/// </summary>
+public class IncomeComparisonRecord
+{
+    public decimal? OldPerCapitaIncome { get; set; }
+    public decimal? NewPerCapitaIncome { get; set; }
+    public DateTime? ChangeDate { get; set; }
+    public string? ChangeType { get; set; }
+}
+
+/// <summary>
+/// Before 快照中捕获的变更前旧值（经济复核表单覆写前写入，供渐退审批表人口/总额/分项对比）
+/// </summary>
+public class BeforeSnapshotOldValues
+{
+    public int? OldFamilySize { get; set; }
+    public decimal? OldTotalFamilyIncome { get; set; }
+    public decimal? OldTotalAnnualIncome { get; set; }
+    public decimal? OldPerCapitaIncome { get; set; }
+    public IncomeComponentValues? Components { get; set; }
+}
+
+/// <summary>
+/// 变更服务实现。
+/// [宽表豁免] 本文件对 nc_biz_applications / nc_biz_family_members / nc_biz_caregivers 的读取保留
+/// <c>SELECT *</c>：这些是"整实体读取 → 分类判定/复制落库"的读改写路径，显式列必须穷尽全部被持久化列，
+/// 否则漏列会被按实体默认值回写造成静默数据丢失；且实体属性数（如成员 53）多于 Schema YAML 列数（34），
+/// 以 Schema 生成列清单并不可靠。故保留全列读取，仅列表/宽表分页查询按规范显式列 + LIMIT。
+/// </summary>
+public partial class ChangeService : BaseService, IChangeService
+{
+    protected override string ServiceName => "ChangeService";
+    private readonly IDatabaseService _db;
+    private readonly IClassificationService _classificationService;
+    private readonly IGracePeriodService _gracePeriodService;
+    private readonly ISupporterService _supporterService;
+    private readonly IApplicationService _applicationService;
+    private readonly IEconomicDetailService _economicDetailService;
+    private readonly Services.Utilities.IBusinessTimelineService _businessTimelineService;
+    private readonly Services.Domain.ElderlyBenefits.IElderlyApplicationService _elderlyApplicationService;
+    private readonly IIncomeCalculationService _incomeCalculationService;
+    private readonly Services.Core.IApplicationStatusService _statusService;
+
+    public ChangeService(
+        IDatabaseService db,
+        IClassificationService classificationService,
+        IGracePeriodService gracePeriodService,
+        ISupporterService supporterService,
+        IApplicationService applicationService,
+        IEconomicDetailService economicDetailService,
+        ILoggerService logger,
+        Services.Utilities.IBusinessTimelineService businessTimelineService,
+        Services.Domain.ElderlyBenefits.IElderlyApplicationService elderlyApplicationService,
+        IIncomeCalculationService incomeCalculationService,
+        Services.Core.IApplicationStatusService statusService) : base(logger)
+    {
+        _db = db;
+        _classificationService = classificationService;
+        _gracePeriodService = gracePeriodService;
+        _supporterService = supporterService;
+        _applicationService = applicationService;
+        _economicDetailService = economicDetailService;
+        _businessTimelineService = businessTimelineService;
+        _elderlyApplicationService = elderlyApplicationService;
+        _incomeCalculationService = incomeCalculationService;
+        _statusService = statusService;
+    }
+
+}

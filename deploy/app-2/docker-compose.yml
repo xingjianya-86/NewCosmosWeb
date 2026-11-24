@@ -1,0 +1,85 @@
+# =============================================================================
+# NewCosmos.Server — Docker Compose（应用节点 .2）
+# -----------------------------------------------------------------------------
+# 布局（服务器上）：
+#   /srv/newcosmos/server/
+#     docker-compose.yml
+#     Dockerfile.server
+#     .dockerignore
+#     server.env              # 从 server.env.example 复制并填值，chmod 600
+#     publish/                # deploy-server.ps1 上传的 dotnet publish 产物
+#
+# 启动：
+#   cd /srv/newcosmos/server
+#   docker compose up -d --build
+#
+# 健康检查：
+#   curl -fsS http://127.0.0.1:8787/health
+#
+# 注意：
+#   - 同时绑定 127.0.0.1:8787（本机 nginx）与 10.110.0.2:8787（.1 认证反代）；
+#     不要绑 0.0.0.0。防火墙只允许 10.110.0.1 访问 8787。
+#   - PostgreSQL 在宿主机时，容器通过 host.docker.internal 访问，
+#     需要宿主 PG 监听 docker0/内网地址并放行 pg_hba（见 README）。
+#   - 也可以把 NC_DB_HOST 改成 10.110.0.2。
+# =============================================================================
+
+name: newcosmos
+
+services:
+  server:
+    image: newcosmos-server:${NC_IMAGE_TAG:-local}
+
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+      args:
+        INSTALL_CJK_FONTS: "${INSTALL_CJK_FONTS:-false}"
+
+    container_name: newcosmos-server
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+
+    env_file:
+      - server.env
+
+    ports:
+      # 两处都必须能连：
+      #   .2 本机 nginx  -> 127.0.0.1:8787
+      #   .1 边缘 nginx  -> 10.110.0.2:8787（仅认证反代）
+      # 防火墙必须只允许 10.110.0.1 访问 10.110.0.2:8787，禁止公网直连。
+      - "127.0.0.1:8787:8787"
+      - "10.110.0.2:8787:8787"
+      # 如果 .2 的内网地址不是 10.110.0.2，改成实际地址。
+      # 不建议绑 0.0.0.0；若绑，必须用防火墙限制来源。
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      # 数据库备份/导出；宿主机目录需：chown -R 10001:10001 /srv/newcosmos/backups
+      - /srv/newcosmos/backups:/srv/newcosmos/backups
+      # 如果服务端 Serilog 写文件日志，可启用：
+      - /srv/newcosmos/logs:/srv/newcosmos/logs
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+    security_opt:
+      - no-new-privileges:true
+
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

@@ -1,0 +1,16 @@
+# 构建上下文里不需要的东西，尤其不要把运行时密钥送进 docker build。
+# 运行时由 compose 的 env_file 注入 server.env。
+server.env
+*.env
+*.env.*
+!*.env.example
+backups/
+logs/
+publish.new/
+publish.prev/
+publish.failed/
+publish/*.pdb
+publish/appsettings.Development.json
+publish/appsettings.*.Local.json
+.git/
+.gitignore

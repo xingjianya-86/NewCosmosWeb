@@ -1,0 +1,21 @@
+# NewCosmos 彩票 Worker 运行时依赖（Python 3.11，CPU-only）
+# 说明：legacy 原版按 TensorFlow 2.15 / Keras 2 开发；此处使用 tensorflow-cpu
+# 以减小镜像体积（无 GPU，服务器为 4C CPU）。升级 TF 需重新验证 legacy 兼容性。
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+
+tensorflow-cpu==2.15.1
+keras==2.15.0
+numpy>=1.24,<2.0
+pandas==2.2.2
+
+# lstm_entry 直连 PostgreSQL 导出 nc_lottery_draws / 负样本降权
+psycopg2-binary==2.9.10
+
+# legacy 原版 src.data_fetcher 模块级 import（本 Worker 不联网抓取，但导入链需要）
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.3.0
+PyYAML==6.0.2
+loguru==0.7.2

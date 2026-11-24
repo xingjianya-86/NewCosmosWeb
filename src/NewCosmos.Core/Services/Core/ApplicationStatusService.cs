@@ -1,0 +1,791 @@
+using NewCosmos.Constants;
+using NewCosmos.Helpers;
+using NewCosmos.Models.Enums;
+using NewCosmos.Models.Results;
+using NewCosmos.Services.Database;
+using NewCosmos.Services.Domain.SocialAssistance;
+using NewCosmos.Services.StateMachine;
+using NewCosmos.Services.Utilities;
+
+namespace NewCosmos.Services.Core;
+
+/// <inheritdoc cref="IApplicationStatusService" />
+public class ApplicationStatusService : BaseService, IApplicationStatusService
+{
+    private readonly IDatabaseService _db;
+    private readonly IBusinessTimelineService _timelineService;
+    private readonly IOtherDifficultyLedgerService _otherDifficultyLedger;
+
+    protected override string ServiceName => "ApplicationStatusService";
+
+    public ApplicationStatusService(
+        IDatabaseService db,
+        ILoggerService logger,
+        IBusinessTimelineService timelineService,
+        IOtherDifficultyLedgerService otherDifficultyLedger)
+        : base(logger)
+    {
+        _db = db;
+        _timelineService = timelineService;
+        _otherDifficultyLedger = otherDifficultyLedger;
+    }
+
+    /// <inheritdoc />
+    public Task<Result> SubmitAsync(long applicationId, string submittedBy, CancellationToken ct = default)
+        => TransitionAsync(applicationId, ApplicationStatus.Submitted, submittedBy, null, null,
+            action: "提交申请", detail: null, allowSubmittedOverride: false, ct: ct);
+
+    /// <inheritdoc />
+    public Task<Result> ApproveAsync(long applicationId, string approvedBy, CancellationToken ct = default)
+        => TransitionAsync(applicationId, ApplicationStatus.Approved, approvedBy, null, null,
+            action: "审批通过", detail: null, allowSubmittedOverride: false, ct: ct);
+
+    /// <inheritdoc />
+    public Task<Result> RefuseAsync(long applicationId, string refusedBy, CancellationToken ct = default)
+        => TransitionAsync(applicationId, ApplicationStatus.Refused, refusedBy, null, null,
+            action: "不予受理", detail: null, allowSubmittedOverride: false, ct: ct);
+
+    /// <inheritdoc />
+    public async Task<Result> CompleteArchiveAsync(long applicationId, string operatorName, CancellationToken ct = default)
+    {
+        try
+        {
+            var appResult = await _db.QuerySingleAsync<StatusRow>(
+                "SELECT id, status, current_step, is_eligible, classification_result FROM nc_biz_applications WHERE id = $1 AND deleted_at IS NULL",
+                ct, applicationId);
+            if (appResult.IsFailure)
+                return Result.Failure(appResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                    appResult.Message ?? "读取申请状态失败");
+            if (appResult.Value == null)
+                return Result.Failure(ErrorCodes.APPLICATION_NOT_FOUND, "申请不存在");
+
+            var current = appResult.Value;
+            var currentStatus = ApplicationStatusExtensions.FromCode(current.Status ?? string.Empty);
+
+            // 步骤门槛：五个录入步骤未完成的残档不得一键归档成「已完结」。
+            // 放行 Draft 直落目标状态后，若不拦，step=1 的半成品也会跳到 step=6。
+            // 已 Approved/Completed/Stopped 的存量行 current_step 均为 6，不受此门槛影响。
+            if (current.CurrentStep < WorkflowSteps.PENDING_ARCHIVE)
+                return Result.Failure(ErrorCodes.VALIDATION_FAILED,
+                    $"档案录入未完成（当前第 {current.CurrentStep} 步，需完成第 {WorkflowSteps.PENDING_ARCHIVE} 步），不能完成归档");
+
+            // 归档目标状态：复核判定不合格 → Stopped；否则 Approved（系统无独立审批工作流，归档即视为通过）。
+            // 库内先例：「已完结」Tab 中 is_eligible=false 的档案一律为 Stopped，Approved 全部为 true。
+            // is_eligible 列 defaultValue=false（未判定的新档同为 false），必须结合 classification_result
+            // 非空才能区分「判了不合格」与「还没判」，否则未判定的新档会被误置为 Stopped。
+            var isIneligible = !string.IsNullOrEmpty(current.ClassificationResult)
+                               && current.IsEligible == false;
+            var targetStatus = isIneligible ? ApplicationStatus.Stopped : ApplicationStatus.Approved;
+
+            // 已 Approved/Completed：仅推进步骤（幂等），不改状态避免降级。
+            // 顺带补空 first_approved_at（COALESCE，已有值不覆盖）：走「归档判停→恢复在保」路径的档案
+            // 从未经过写首审时间的分支，会永久为 NULL —— 补打中心按月查询强制
+            // first_approved_at IS NOT NULL，该档案任何年月都查不到；月报"本月新增"同样漏计。
+            // 此处是存量自愈入口：下次完成归档即补齐。
+            if (currentStatus is ApplicationStatus.Approved or ApplicationStatus.Completed)
+            {
+                // 事务包裹（§8）：状态推进与审计同生共死——原实现无事务，UPDATE 成功而审计失败
+                // 会留下"状态变了没审计"的孤儿行。事务内审计失败=显式失败回滚（§7），
+                // 不再沿用"仅告警"（失败语句会中止 PostgreSQL 事务，静默回滚比报错更糟）。
+                await using (var tx = await _db.BeginTransactionScopeAsync(ct))
+                {
+                    var stepOnly = await _db.ExecuteNonQueryAsync(
+                        @"UPDATE nc_biz_applications SET current_step = $2,
+                            first_approved_at = COALESCE(first_approved_at, NOW()), updated_at = NOW()
+                          WHERE id = $1 AND deleted_at IS NULL", ct, applicationId, WorkflowSteps.ARCHIVED);
+                    if (stepOnly.IsFailure)
+                        return Result.Failure(stepOnly.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                            stepOnly.Message ?? "归档推进步骤失败");
+                    var audit1 = await _db.ExecuteNonQueryAsync(
+                        @"INSERT INTO nc_biz_application_logs
+                              (application_id, action, action_detail, old_value, new_value, operator_name, operated_at)
+                          VALUES ($1, '完成归档', $2, $3, $3, $4, NOW())",
+                        ct, applicationId,
+                        "已 Approved/Completed，仅推进 current_step=6（first_approved_at 为空则补空，不覆盖原值）",
+                        current.Status, operatorName);
+                    if (audit1.IsFailure)
+                        return Result.Failure(audit1.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                            $"审计留痕写入失败，归档已回滚: {audit1.Message}");
+                    await tx.CommitAsync(ct);
+                }
+                LogInfo($"归档完成（幂等，状态未变）: ApplicationId={applicationId}, Status={current.Status}");
+                return Result.Success();
+            }
+
+            // 已 Stopped：终态不改状态，仅推进步骤使其进入「已完结」（Stopped 在已完结过滤集内）。
+            // 历史遗留的 step<6 停保行（如停旧建新中途停保）五个 Tab 全不可见，推步后归位。
+            if (currentStatus == ApplicationStatus.Stopped)
+            {
+                await using (var tx = await _db.BeginTransactionScopeAsync(ct))
+                {
+                    var stopStepOnly = await _db.ExecuteNonQueryAsync(
+                        @"UPDATE nc_biz_applications SET current_step = $2, updated_at = NOW()
+                          WHERE id = $1 AND deleted_at IS NULL", ct, applicationId, WorkflowSteps.ARCHIVED);
+                    if (stopStepOnly.IsFailure)
+                        return Result.Failure(stopStepOnly.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                            stopStepOnly.Message ?? "归档推进步骤失败");
+                    var audit2 = await _db.ExecuteNonQueryAsync(
+                        @"INSERT INTO nc_biz_application_logs
+                              (application_id, action, action_detail, old_value, new_value, operator_name, operated_at)
+                          VALUES ($1, '完成归档', '已 Stopped（终态），仅推进 current_step=6', $2, $2, $3, NOW())",
+                        ct, applicationId, current.Status, operatorName);
+                    if (audit2.IsFailure)
+                        return Result.Failure(audit2.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                            $"审计留痕写入失败，归档已回滚: {audit2.Message}");
+                    await tx.CommitAsync(ct);
+                }
+                LogInfo($"归档完成（已停保，仅推步）: ApplicationId={applicationId}");
+                return Result.Success();
+            }
+
+            var transition = ApplicationStateMachine.ValidateTransition(currentStatus, targetStatus);
+
+            // 业务放行：系统无独立审批工作流，归档即视为审批通过/终结。
+            // 停旧建新产物（CategoryRebuild，Draft+1）与数据录入完成的档案停留在 Draft，
+            // 归档必须能直接落到 Approved/Stopped —— 否则完成归档对这批档案恒失败。
+            // 与 TransitionAsync 的 allowSubmittedOverride 同一模式：放行并记警告，
+            // 不放宽状态机本身（ApproveAsync / 一事一议等入口仍受严格约束）。
+            if (transition.IsFailure
+                && currentStatus is ApplicationStatus.Draft or ApplicationStatus.Submitted)
+            {
+                LogWarn($"归档状态放行 {currentStatus.GetDescription()} → {targetStatus.GetDescription()}（归档即视为通过）: ApplicationId={applicationId}");
+                transition = Result.Success();
+            }
+
+            if (transition.IsFailure)
+                return Result.Failure(ErrorCodes.INVALID_TRANSITION,
+                    transition.Message ?? $"不允许从 {currentStatus.GetDescription()} 转换到 {targetStatus.GetDescription()}");
+
+            // 归档完结：current_step=6，status=目标状态。两条分支各自的配套列与状态机写入口径一致
+            // （见 TransitionAsync）：Approved 写 first_approved_at 只写一次（导入建档的纳入时间已在
+            // 补全 MarkDataCompletedAsync 写入，COALESCE 保留；普通申请即审批时刻 NOW()）；
+            // Stopped 写 stop_reason / stop_date（归档终结的停保原因）。
+            var sets = new List<string> { "status = $1", "current_step = $2", "updated_at = NOW()" };
+            var args = new List<object> { targetStatus.GetCode(), WorkflowSteps.ARCHIVED };
+            void Set(string col, object? v) { args.Add(v!); sets.Add($"{col} = ${args.Count}"); }
+
+            if (targetStatus == ApplicationStatus.Approved)
+                sets.Add("first_approved_at = COALESCE(first_approved_at, NOW())");
+            else if (targetStatus == ApplicationStatus.Stopped)
+            {
+                Set("stop_reason", BuildIneligibleStopReason(current.ClassificationResult));
+                Set("stop_date", DateTime.Today);
+            }
+            Set("updated_by", operatorName);
+
+            args.Add(applicationId);
+            var sql = $@"UPDATE nc_biz_applications SET {string.Join(", ", sets)}
+                         WHERE id = ${args.Count} AND deleted_at IS NULL";
+            // 事务包裹（§8）：状态推进 + 配套列 + 审计同生共死（原无事务，UPDATE 成功而审计
+            // 失败会留下"状态变了没审计"孤儿行）。后续台账/告警动作各有自身容错，保持事务外。
+            await using (var tx = await _db.BeginTransactionScopeAsync(ct))
+            {
+                var result = await _db.ExecuteNonQueryAsync(sql, ct, args.ToArray());
+                if (result.IsFailure)
+                    return Result.Failure(result.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                        result.Message ?? "归档完成失败");
+                if (result.Value == 0)
+                    return Result.Failure(ErrorCodes.APPLICATION_NOT_FOUND, "申请不存在");
+
+                var auditMain = await _db.ExecuteNonQueryAsync(
+                    @"INSERT INTO nc_biz_application_logs
+                          (application_id, action, action_detail, old_value, new_value, operator_name, operated_at)
+                      VALUES ($1, '完成归档', $2, $3, $4, $5, NOW())",
+                    ct, applicationId,
+                    targetStatus == ApplicationStatus.Stopped
+                        ? "归档终结：判定不合格，status=Stopped、current_step=6、stop_reason/stop_date 落库"
+                        : "归档完结：status=Approved、current_step=6、first_approved_at 落库",
+                    current.Status, targetStatus.GetCode(), operatorName);
+                if (auditMain.IsFailure)
+                    return Result.Failure(auditMain.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                        $"审计留痕写入失败，归档已回滚: {auditMain.Message}");
+
+                // 归档终结拒保补写 CategoryStop（2026-11-19 丁玉花 app113）：链上有在保前分类时，
+                // 本档是"曾享受 → 判不合格被拒"而非"首次申请即被拒"，补记停保变更记录——
+                // 《档案_变更告知书》方向②按 old_classification 判「停止」（而非「不予认定」），
+                // 动态管理变更留痕同步。守卫不满足（真·首拒/链上已有停保记录）→ 跳过；
+                // 失败 → 回滚归档（§7 显式失败，与经济复核 WriteCategoryStopRecordAsync 先例一致）。
+                if (targetStatus == ApplicationStatus.Stopped)
+                {
+                    var refusalStop = await WriteArchiveRefusalCategoryStopAsync(current, operatorName, ct);
+                    if (refusalStop.IsFailure)
+                        return Result.Failure(refusalStop.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                            $"归档终结拒保停保记录补写失败，归档已回滚: {refusalStop.Message}");
+                }
+                await tx.CommitAsync(ct);
+            }
+
+            // 归档终结判不合格同样属于非死亡性停保 → 按同一规则尝试转入其他困难人员台账
+            if (targetStatus == ApplicationStatus.Stopped)
+                await TryTransferToOtherDifficultyAsync(applicationId, BuildIneligibleStopReason(current.ClassificationResult), DateTime.Today, ct);
+
+            // 时序闸口（告警不拦）：转 Approved 时检查建档/审批与受理截止、公示期的先后
+            if (targetStatus == ApplicationStatus.Approved)
+                await LogTimelineOrderWarningsAsync(applicationId, operatorName, ct);
+
+            // 户内单人保审批通过 → 在旧户档案记一条"转出单人保"减员记录（旧档/成员行均不删）
+            if (targetStatus == ApplicationStatus.Approved)
+                await TryWriteSingleRescueTransferAsync(applicationId, ct);
+
+            // 审批通过 → 若保障成员已在其他困难人员台账中，登记"转出/停止"（台账原行保留）
+            if (targetStatus == ApplicationStatus.Approved)
+                await TryRecordOtherDifficultyTransferOutAsync(applicationId, ct);
+            else if (targetStatus == ApplicationStatus.Stopped)
+                await TryRemoveOtherDifficultyTransferOutAsync(applicationId, ct);
+
+            Logger.LogBusiness("完成归档", ("ApplicationId", applicationId),
+                ("Status", targetStatus.GetCode()), ("Operator", operatorName ?? string.Empty));
+            LogInfo($"归档完成: ApplicationId={applicationId}, {currentStatus.GetDescription()} → {targetStatus.GetDescription()}");
+            return Result.Success();
+        }
+        catch (Exception ex)
+        {
+            LogException(ex, "完成归档");
+            return Result.FromException(ex);
+        }
+    }
+
+    /// <summary>
+    /// 归档终结拒保补写 CategoryStop（须在调用方已开启的事务内执行；2026-11-19 丁玉花 app113）：
+    /// 链上有在保前分类的拒保档补记停保事实（old=链上前分类、new=档案自身停保码、triggered_stop=true、
+    /// change_reason_type=归档终结拒保），《档案_变更告知书》方向②据此出「停止」而非「不予认定」。
+    /// 链上前分类与装配端兜底同源（Helpers\ChainPreClassification 单点），两侧口径不劈叉。
+    /// 守卫：① 自身为停保码；② 链上前分类非空且非停保码（否则=真·首次申请即被拒，不补写）；
+    /// ③ 链上无既有 CategoryStop（幂等，经济复核/成员变更的停保记录优先）。
+    /// 金额两列置 NULL：追缴历史（RecoveryHistoryProvider）按 new_guarantee_amount IS NOT NULL 取数，
+    /// 写值会把本记录误入追缴链；月报停保行由终结档/状态过滤排除，不依赖本记录金额。
+    /// 直写 SQL 而非注入 IChangeService：ChangeService→IApplicationService→IApplicationStatusService
+    /// 构成 DI 构造环。失败由调用方回滚归档。
+    /// </summary>
+    private async Task<Result> WriteArchiveRefusalCategoryStopAsync(
+        StatusRow current, string operatorName, CancellationToken ct)
+    {
+        var ownCode = current.ClassificationResult ?? string.Empty;
+        if (!ClassificationConstants.IsCodeStop(ownCode))
+            return Result.Success(); // 非停保码不属本记录语义（调用方已按判不合格分流，理论不可达）
+
+        var preResult = await ChainPreClassification.ResolveAsync(_db, current.Id, ct);
+        if (preResult.IsFailure)
+            return Result.Failure(preResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                preResult.Message ?? "链上前分类查询失败");
+        var pre = preResult.Value;
+        if (string.IsNullOrEmpty(pre) || ClassificationConstants.IsCodeStop(pre))
+        {
+            LogInfo($"归档终结拒保跳过停保记录补写（无在保前分类，按首次申请即被拒处理）: ApplicationId={current.Id}");
+            return Result.Success();
+        }
+
+        var existsResult = await _db.ExecuteScalarAsync<bool>(
+            @"SELECT EXISTS(SELECT 1 FROM nc_biz_change_records
+                            WHERE (application_id = $1 OR new_application_id = $1)
+                              AND change_type = 'CategoryStop' AND deleted_at IS NULL)",
+            ct, current.Id);
+        if (existsResult.IsFailure)
+            return Result.Failure(existsResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                existsResult.Message ?? "停保变更记录幂等检查失败");
+        if (existsResult.Value)
+            return Result.Success(); // 链上已有停保记录，方向由既有记录承载
+
+        var insertResult = await _db.ExecuteNonQueryAsync(
+            @"INSERT INTO nc_biz_change_records
+                (application_id, change_no, change_type, change_reason, change_reason_type, change_date,
+                 old_classification, new_classification, triggered_stop, operator_name,
+                 new_application_id, changed_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9, NULL, NOW())",
+            ct,
+            current.Id,
+            $"CHG{DateTime.Now:yyyyMMddHHmmssfff}",
+            DictionaryConstants.ChangeType.CATEGORY_STOP,
+            BuildIneligibleStopReason(current.ClassificationResult),
+            ChangeReasonTypeConstants.ArchiveRefusalStop,
+            DateTime.Today,
+            pre,
+            ownCode,
+            operatorName);
+        if (insertResult.IsFailure)
+            return Result.Failure(insertResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                insertResult.Message ?? "写入归档终结拒保停保记录失败");
+
+        LogInfo($"归档终结拒保补写 CategoryStop: ApplicationId={current.Id}, {pre} → {ownCode}");
+        return Result.Success();
+    }
+
+    /// <inheritdoc />
+    public Task<Result> StopAsync(
+        long applicationId,
+        string stopReason,
+        DateTime stopDate,
+        string operatorName,
+        bool allowSubmittedOverride = false,
+        CancellationToken ct = default)
+        => TransitionAsync(applicationId, ApplicationStatus.Stopped, operatorName, stopReason, stopDate,
+            action: "停保", detail: stopReason, allowSubmittedOverride: allowSubmittedOverride, ct: ct);
+
+    /// <inheritdoc />
+    public async Task<Result> ResumeAsync(long applicationId, string operatorName, CancellationToken ct = default)
+    {
+        const string action = "恢复保障";
+        try
+        {
+            var appResult = await _db.QuerySingleAsync<StatusRow>(
+                "SELECT id, status, current_step, stop_reason FROM nc_biz_applications WHERE id = $1 AND deleted_at IS NULL",
+                ct, applicationId);
+            if (appResult.IsFailure)
+                return Result.Failure(appResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                    appResult.Message ?? "读取申请状态失败");
+            if (appResult.Value == null)
+                return Result.Failure(ErrorCodes.APPLICATION_NOT_FOUND, "申请不存在");
+
+            var current = appResult.Value;
+            var currentStatus = ApplicationStatusExtensions.FromCode(current.Status ?? string.Empty);
+
+            // 幂等：已在保无需恢复
+            if (currentStatus is ApplicationStatus.Approved or ApplicationStatus.Completed)
+                return Result.Success();
+
+            // 只有已停保档案可恢复（Draft/Refused 从未进入保障，不存在"恢复"一说）
+            if (currentStatus != ApplicationStatus.Stopped)
+                return Result.Failure(ErrorCodes.INVALID_TRANSITION,
+                    $"仅已停保档案可恢复保障，当前状态：{currentStatus.GetDescription()}");
+
+            var transition = ApplicationStateMachine.ValidateTransition(currentStatus, ApplicationStatus.Approved);
+            if (transition.IsFailure)
+                return Result.Failure(ErrorCodes.INVALID_TRANSITION,
+                    transition.Message ?? $"不允许从 {currentStatus.GetDescription()} 转换到 {ApplicationStatus.Approved.GetDescription()}");
+
+            // 守卫：停旧建新链上已有未删除的下游新档 → 拒绝恢复，
+            // 否则旧档与新档同时在保，同一家庭会出现两份在保档案（统计、月报口径同时失真）。
+            var chainResult = await _db.ExecuteScalarAsync(
+                "SELECT COUNT(*) FROM nc_biz_applications WHERE original_application_id = $1 AND deleted_at IS NULL",
+                ct, applicationId);
+            if (chainResult.IsFailure)
+                return Result.Failure(chainResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                    chainResult.Message ?? "恢复保障前置检查失败");
+            if (Convert.ToInt32(chainResult.Value) > 0)
+                return Result.Failure(ErrorCodes.INVALID_TRANSITION,
+                    "该停保档案已停旧建新生成新档案，不可恢复；请在新档案上办理业务");
+
+            // 状态与配套列单点写入：恢复为在保并清空停保标记（current_step 不动）。
+            // first_approved_at 只补空不覆盖（COALESCE，与 ApproveAsync/完成归档/补全同一口径）：
+            // 「归档判停 → 恢复在保」是 Approved 的旁路出口，若不补空，先判停后恢复的档案
+            // 首次审批时间永久为 NULL（补打中心按月查询、月报"本月新增"均按该列过滤，会永远漏掉它）。
+            var sets = new List<string>
+            {
+                "status = $1", "stop_reason = NULL", "stop_date = NULL",
+                "first_approved_at = COALESCE(first_approved_at, NOW())", "updated_at = NOW()"
+            };
+            var args = new List<object?> { ApplicationStatus.Approved.GetCode() };
+            if (!string.IsNullOrEmpty(operatorName))
+            {
+                args.Add(operatorName);
+                sets.Add($"updated_by = ${args.Count}");
+            }
+            args.Add(applicationId);
+            var updateSql = $@"UPDATE nc_biz_applications SET {string.Join(", ", sets)}
+                               WHERE id = ${args.Count} AND deleted_at IS NULL";
+            var updateResult = await _db.ExecuteNonQueryAsync(updateSql, ct, args.ToArray());
+            if (updateResult.IsFailure)
+                return Result.Failure(updateResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                    updateResult.Message ?? "状态更新失败");
+            if (updateResult.Value == 0)
+                return Result.Failure(ErrorCodes.APPLICATION_NOT_FOUND, "申请不存在");
+
+            await WriteAuditAsync(applicationId, action,
+                $"恢复在保：status=Approved、stop_reason/stop_date 清空（原停保原因：{current.StopReason ?? "无"}）",
+                currentStatus.GetDescription(), ApplicationStatus.Approved.GetDescription(), operatorName, ct);
+
+            // 时序闸口（告警不拦）：恢复在保等同转 Approved，检查建档/审批与受理截止、公示期的先后
+            await LogTimelineOrderWarningsAsync(applicationId, operatorName, ct);
+
+            // 恢复在保的单人保档案：幂等补写旧户"转出单人保"记录（此前若未写过）
+            await TryWriteSingleRescueTransferAsync(applicationId, ct);
+
+            // 恢复在保 → 撤回该档案停保时转入其他困难人员台账的行（导入行不受影响）
+            var removeLedger = await _otherDifficultyLedger.RemoveOnResumeAsync(applicationId, ct);
+            if (removeLedger.IsFailure)
+                LogWarn($"撤回其他困难人员台账失败: ApplicationId={applicationId}, {removeLedger.Message}");
+
+            // 撤回停保转入行之后，若成员仍在导入台账中，重新登记转出（避免把刚撤回的停保转入行又当成转出）
+            await TryRecordOtherDifficultyTransferOutAsync(applicationId, ct);
+
+            Logger.LogBusiness(action, ("ApplicationId", applicationId),
+                ("Operator", operatorName ?? string.Empty));
+            LogInfo($"{action}: ApplicationId={applicationId}, {currentStatus.GetDescription()} → {ApplicationStatus.Approved.GetDescription()}");
+            return Result.Success();
+        }
+        catch (Exception ex)
+        {
+            LogException(ex, action);
+            return Result.FromException(ex);
+        }
+    }
+
+    /// <summary>
+    /// 状态流转单点实现：校验 → 写状态与配套列 → 审计留痕。
+    /// </summary>
+    private async Task<Result> TransitionAsync(
+        long applicationId,
+        ApplicationStatus target,
+        string? operatorName,
+        string? stopReason,
+        DateTime? stopDate,
+        string action,
+        string? detail,
+        bool allowSubmittedOverride,
+        CancellationToken ct)
+    {
+        try
+        {
+            var appResult = await _db.QuerySingleAsync<StatusRow>(
+                "SELECT id, status, current_step FROM nc_biz_applications WHERE id = $1 AND deleted_at IS NULL",
+                ct, applicationId);
+            if (appResult.IsFailure)
+                return Result.Failure(appResult.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                    appResult.Message ?? "读取申请状态失败");
+            if (appResult.Value == null)
+                return Result.Failure(ErrorCodes.APPLICATION_NOT_FOUND, "申请不存在");
+
+            var current = appResult.Value;
+            var currentStatus = ApplicationStatusExtensions.FromCode(current.Status ?? string.Empty);
+            if (currentStatus == target)
+                return Result.Success(); // 幂等：已是目标状态
+
+            var transition = ApplicationStateMachine.ValidateTransition(currentStatus, target);
+
+            // 业务放行：Submitted → Stopped（在途申请的全员死亡需能关闭）。
+            // Draft/Refused → Stopped 仍拒绝：从未进入保障，不存在"停保"一说。
+            if (transition.IsFailure
+                && target == ApplicationStatus.Stopped
+                && allowSubmittedOverride
+                && currentStatus == ApplicationStatus.Submitted)
+            {
+                LogWarn($"状态 {currentStatus.GetDescription()} → {target.GetDescription()} 不在严格状态机允许范围内，按业务规则放行并记警告: ApplicationId={applicationId}");
+                transition = Result.Success();
+            }
+
+            if (transition.IsFailure)
+                return Result.Failure(ErrorCodes.INVALID_TRANSITION,
+                    transition.Message ?? $"不允许从 {currentStatus.GetDescription()} 转换到 {target.GetDescription()}");
+
+            // 状态与配套列的单点写入
+            var sets = new List<string> { "status = $1", "updated_at = NOW()" };
+            var args = new List<object?> { target.GetCode() };
+            void Set(string col, object? v) { args.Add(v); sets.Add($"{col} = ${args.Count}"); }
+
+            if (target == ApplicationStatus.Submitted)
+            {
+                Set("submit_at", DateTime.Now);
+                Set("submit_by", operatorName);
+            }
+            if (target == ApplicationStatus.Approved)
+            {
+                // 首次审批时间只写一次。普通新建申请的"纳入时间"即审批时刻（NOW()）；
+                // 导入建档档案的纳入时间已在建库时写入（ImportedArchiveService / MarkDataCompletedAsync），
+                // 此处 COALESCE 保留其值，不覆盖。
+                sets.Add("first_approved_at = COALESCE(first_approved_at, NOW())");
+            }
+            if (target == ApplicationStatus.Stopped)
+            {
+                Set("stop_reason", stopReason ?? string.Empty);
+                Set("stop_date", stopDate ?? DateTime.Today);
+            }
+            if (!string.IsNullOrEmpty(operatorName))
+                Set("updated_by", operatorName);
+
+            args.Add(applicationId);
+            var sql = $@"UPDATE nc_biz_applications SET {string.Join(", ", sets)}
+                         WHERE id = ${args.Count} AND deleted_at IS NULL";
+
+            var result = await _db.ExecuteNonQueryAsync(sql, ct, args.ToArray());
+            if (result.IsFailure)
+                return Result.Failure(result.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                    result.Message ?? "状态更新失败");
+            if (result.Value == 0)
+                return Result.Failure(ErrorCodes.APPLICATION_NOT_FOUND, "申请不存在");
+
+            await WriteAuditAsync(applicationId, action, detail,
+                currentStatus.GetDescription(), target.GetDescription(), operatorName, ct);
+
+            // 非死亡性停保 → 转入其他困难人员台账（失败只告警：停保本身已落库，台账可后续人工核对）
+            if (target == ApplicationStatus.Stopped)
+                await TryTransferToOtherDifficultyAsync(applicationId, stopReason, stopDate, ct);
+
+            // 时序闸口（告警不拦）：审批通过时检查建档/审批与受理截止、公示期的先后
+            if (target == ApplicationStatus.Approved)
+                await LogTimelineOrderWarningsAsync(applicationId, operatorName, ct);
+
+            // 户内单人保审批通过 → 在旧户档案记一条"转出单人保"减员记录（旧档/成员行均不删）
+            if (target == ApplicationStatus.Approved)
+                await TryWriteSingleRescueTransferAsync(applicationId, ct);
+
+            // 审批通过 → 其他困难人员台账转出登记；停保 → 撤回该档案的自动转出记录
+            if (target == ApplicationStatus.Approved)
+                await TryRecordOtherDifficultyTransferOutAsync(applicationId, ct);
+            else if (target == ApplicationStatus.Stopped)
+                await TryRemoveOtherDifficultyTransferOutAsync(applicationId, ct);
+
+            Logger.LogBusiness(action, ("ApplicationId", applicationId),
+                ("From", currentStatus.GetDescription()), ("To", target.GetDescription()),
+                ("Operator", operatorName ?? string.Empty));
+            LogInfo($"{action}: ApplicationId={applicationId}, {currentStatus.GetDescription()} → {target.GetDescription()}");
+            return Result.Success();
+        }
+        catch (Exception ex)
+        {
+            LogException(ex, action);
+            return Result.FromException(ex);
+        }
+    }
+
+    /// <summary>
+    /// 非死亡性停保转台账：调用台账服务转入其他困难人员（服务内部自带死亡/接续/已存在等门槛）。
+    /// 失败只告警不抛错——停保状态已落库，台账缺失可人工补录；异常在调用方事务内会使事务回滚，属预期护栏。
+    /// </summary>
+    private async Task TryTransferToOtherDifficultyAsync(long applicationId, string? stopReason, DateTime? stopDate, CancellationToken ct)
+    {
+        try
+        {
+            var transfer = await _otherDifficultyLedger.TransferOnStopAsync(applicationId, stopReason, stopDate, ct);
+            if (transfer.IsFailure)
+                LogWarn($"停保转入其他困难人员台账失败: ApplicationId={applicationId}, {transfer.Message}");
+        }
+        catch (Exception ex)
+        {
+            LogWarn($"停保转入其他困难人员台账异常: ApplicationId={applicationId}, {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 户内单人保审批通过：在旧户档案写一条 <see cref="DictionaryConstants.ChangeType.SINGLE_RESCUE_OUT"/> 减员记录。
+    /// 业务口径（2026-10 确认）：旧户档案继续有效、成员行一律不删除，只记录该成员转出为独立单人保；
+    /// 供「最低生活保障边缘家庭停止、减员汇总表」体现减员，避免同一人同时计入低收入户与单人保。
+    /// 幂等（同一新档只写一次）；失败只告警，不阻断审批主流程。
+    /// </summary>
+    private async Task TryWriteSingleRescueTransferAsync(long applicationId, CancellationToken ct)
+    {
+        try
+        {
+            var appResult = await _db.QuerySingleAsync<SingleRescueTransferRow>(
+                @"SELECT id, applicant_name, applicant_id_card, original_application_id, chain_type,
+                         classification_result, first_approved_at
+                  FROM nc_biz_applications WHERE id = $1 AND deleted_at IS NULL", ct, applicationId);
+            if (appResult.IsFailure)
+            {
+                LogWarn($"单人保转出留痕：读取申请失败，已跳过: ApplicationId={applicationId}, {appResult.ErrorCode} {appResult.Message}");
+                return;
+            }
+            if (appResult.Value == null)
+                return;
+
+            var app = appResult.Value;
+            if (!string.Equals(app.ChainType, ChainTypeConstants.SINGLE_RESCUE, StringComparison.Ordinal)
+                || app.OriginalApplicationId is not > 0)
+                return;
+
+            var sourceResult = await _db.QuerySingleAsync<SingleRescueSourceRow>(
+                @"SELECT id, applicant_name, applicant_id_card, classification_result
+                  FROM nc_biz_applications WHERE id = $1 AND deleted_at IS NULL", ct, app.OriginalApplicationId.Value);
+            if (sourceResult.IsFailure)
+            {
+                LogWarn($"单人保转出留痕：读取源申请失败，已跳过: SourceId={app.OriginalApplicationId}, {sourceResult.ErrorCode} {sourceResult.Message}");
+                return;
+            }
+            if (sourceResult.Value == null)
+                return;
+
+            var source = sourceResult.Value;
+
+            var exists = await _db.ExecuteScalarAsync(
+                @"SELECT COUNT(*) FROM nc_biz_change_records
+                  WHERE application_id = $1 AND change_type = $2 AND new_application_id = $3 AND deleted_at IS NULL",
+                ct, source.Id, DictionaryConstants.ChangeType.SINGLE_RESCUE_OUT, app.Id);
+            if (exists.IsFailure)
+            {
+                LogWarn($"单人保转出记录幂等检查失败: ApplicationId={applicationId}, {exists.Message}");
+                return;
+            }
+            if (Convert.ToInt64(exists.Value) > 0)
+                return;
+
+            var changeDate = (app.FirstApprovedAt ?? DateTime.Today).Date;
+            var changeNo = $"SRO{DateTime.Now:yyyyMMddHHmmssfff}";
+            var reason = $"单人保转出: {app.ApplicantName}({app.ApplicantIdCard}) → 新档{app.Id}";
+            var changeIdResult = await _db.ExecuteScalarAsync<long?>(
+                @"INSERT INTO nc_biz_change_records
+                    (application_id, change_no, change_type, change_reason, change_reason_type, change_date,
+                     original_application_id, new_application_id, old_classification, new_classification,
+                     triggered_grace_period, triggered_stop, operator_name, changed_at)
+                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,FALSE,FALSE,'System',NOW())
+                  RETURNING id",
+                ct, source.Id, changeNo, DictionaryConstants.ChangeType.SINGLE_RESCUE_OUT, reason,
+                "转出单人保", changeDate, source.Id, app.Id,
+                source.ClassificationResult ?? string.Empty, app.ClassificationResult ?? string.Empty);
+            if (changeIdResult.IsFailure || changeIdResult.Value is not > 0)
+            {
+                LogWarn($"单人保转出记录写入失败: ApplicationId={applicationId}, {changeIdResult.Message}");
+                return;
+            }
+
+            var changeId = changeIdResult.Value.Value;
+            var detail = await _db.ExecuteNonQueryAsync(
+                @"INSERT INTO nc_biz_change_details
+                      (change_id, field_name, field_label, old_value, new_value, created_at)
+                  VALUES ($1,'MemberRemove',$2,$3,'转出单人保',NOW())",
+                ct, changeId, app.ApplicantName ?? string.Empty,
+                $"{app.ApplicantName}({app.ApplicantIdCard}) SharedLiving");
+            if (detail.IsFailure)
+                LogWarn($"单人保转出明细写入失败: ApplicationId={applicationId}, ChangeId={changeId}, {detail.Message}");
+            else
+                Logger.LogBusiness("单人保转出登记",
+                    ("SourceApplicationId", source.Id.ToString()),
+                    ("NewApplicationId", app.Id.ToString()),
+                    ("Member", DataMasker.MaskName(app.ApplicantName ?? string.Empty)),
+                    ("MemberIdCard", DataMasker.MaskIdCard(app.ApplicantIdCard ?? string.Empty)));
+        }
+        catch (Exception ex)
+        {
+            LogWarn($"单人保转出登记异常（不影响审批）: ApplicationId={applicationId}, {ex.Message}");
+        }
+    }
+
+    /// <summary>单人保转出判定读取行</summary>
+    private sealed class SingleRescueTransferRow
+    {
+        public long Id { get; set; }
+        public string? ApplicantName { get; set; }
+        public string? ApplicantIdCard { get; set; }
+        public long? OriginalApplicationId { get; set; }
+        public string? ChainType { get; set; }
+        public string? ClassificationResult { get; set; }
+        public DateTime? FirstApprovedAt { get; set; }
+    }
+
+    /// <summary>单人保转出源档案读取行</summary>
+    private sealed class SingleRescueSourceRow
+    {
+        public long Id { get; set; }
+        public string? ApplicantName { get; set; }
+        public string? ApplicantIdCard { get; set; }
+        public string? ClassificationResult { get; set; }
+    }
+
+    /// <summary>
+    /// 审批通过 → 其他困难人员台账转出登记（服务内部按保障成员身份证匹配，台账原行保留）。
+    /// 失败只告警，不影响审批主流程。
+    /// </summary>
+    private async Task TryRecordOtherDifficultyTransferOutAsync(long applicationId, CancellationToken ct)
+    {
+        try
+        {
+            var result = await _otherDifficultyLedger.RecordTransferOutAsync(applicationId, ct);
+            if (result.IsFailure)
+                LogWarn($"其他困难人员转出登记失败: ApplicationId={applicationId}, {result.Message}");
+        }
+        catch (Exception ex)
+        {
+            LogWarn($"其他困难人员转出登记异常: ApplicationId={applicationId}, {ex.Message}");
+        }
+    }
+
+    /// <summary>档案停保 → 撤回该档案审批时自动写入的其他困难人员转出记录（手工补录行不动）。</summary>
+    private async Task TryRemoveOtherDifficultyTransferOutAsync(long applicationId, CancellationToken ct)
+    {
+        try
+        {
+            var result = await _otherDifficultyLedger.RemoveTransferOutAsync(applicationId, ct);
+            if (result.IsFailure)
+                LogWarn($"撤回其他困难人员转出记录失败: ApplicationId={applicationId}, {result.Message}");
+        }
+        catch (Exception ex)
+        {
+            LogWarn($"撤回其他困难人员转出记录异常: ApplicationId={applicationId}, {ex.Message}");
+        }
+    }
+
+    /// <summary>审计留痕（AGENTS.md §8）：状态流转写 nc_biz_application_logs，失败仅告警不阻断主流程。</summary>
+    private async Task WriteAuditAsync(long applicationId, string action, string? detail,
+        string? oldValue, string? newValue, string? operatorName, CancellationToken ct)
+    {
+        try
+        {
+            var audit = await _db.ExecuteNonQueryAsync(
+                @"INSERT INTO nc_biz_application_logs
+                      (application_id, action, action_detail, old_value, new_value, operator_name, operated_at)
+                  VALUES ($1, $2, $3, $4, $5, $6, NOW())",
+                ct, applicationId, action, detail, oldValue, newValue, operatorName);
+            if (audit.IsFailure)
+                LogWarn($"审计留痕写入失败: ApplicationId={applicationId}, Action={action}, {audit.Message}");
+        }
+        catch (Exception ex)
+        {
+            LogWarn($"审计留痕写入异常: ApplicationId={applicationId}, Action={action}, {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 归档/审批时序闸口（告警不拦，AGENTS §10：低频操作日志 + 审计留痕）：
+    /// ① 建档日期 &gt; 该档案 B 线受理截止（AcceptanceDeadline）→ 逾期受理告警；
+    /// ② 审批时刻 &lt; 该档案 B 线公示结束日（PublicityEndDate）→ 审批先于公示完成告警。
+    /// 窗口按申请日期锚定（GetTimelineForApplicationDate，与文书产出/Step4 校验同源）。
+    /// 只在转 Approved（归档通过 / 审批通过 / 恢复在保）时触发；检查失败只留日志，绝不影响归档主流程。
+    /// </summary>
+    private async Task LogTimelineOrderWarningsAsync(long applicationId, string? operatorName, CancellationToken ct)
+    {
+        try
+        {
+            var rowResult = await _db.QuerySingleAsync<TimelineCheckRow>(
+                @"SELECT application_no, created_at, first_approved_at, data_completed_at, updated_at
+                  FROM nc_biz_applications WHERE id = $1 AND deleted_at IS NULL", ct, applicationId);
+            var row = rowResult.IsSuccess ? rowResult.Value : null;
+            if (row == null) return;
+
+            // 窗口锚点 = 申请日期（申请编号内嵌日期优先，与文书产出同源）
+            var applicationDate = ArchiveAnchorHelper.ResolveApplicationDate(
+                row.ApplicationNo, row.CreatedAt, row.FirstApprovedAt, row.DataCompletedAt, row.UpdatedAt);
+            var tl = _timelineService.GetTimelineForApplicationDate(applicationDate, TimelineType.BusinessProcess);
+
+            var warnings = new List<string>();
+            if (row.CreatedAt != default && row.CreatedAt.Date > tl.AcceptanceDeadline.Date)
+                warnings.Add($"建档 {row.CreatedAt:yyyy-MM-dd} 晚于受理截止 {tl.AcceptanceDeadline:yyyy-MM-dd}（逾期受理）");
+
+            if (DateTime.Today < tl.PublicityEndDate.Date)
+                warnings.Add($"审批早于公示结束 {tl.PublicityEndDate:yyyy-MM-dd}"
+                    + $"（本档案公示期 {tl.PublicityStartDate:yyyy-MM-dd}~{tl.PublicityEndDate:yyyy-MM-dd}，先归档后公示）");
+
+            if (warnings.Count == 0) return;
+
+            var detail = string.Join("；", warnings);
+            LogWarn($"时序告警: ApplicationId={applicationId}, {detail}");
+            await WriteAuditAsync(applicationId, "时序告警", detail, null, null, operatorName, ct);
+        }
+        catch (Exception ex)
+        {
+            LogWarn($"时序告警检查失败（不影响归档）: ApplicationId={applicationId}, {ex.Message}");
+        }
+    }
+
+    /// <summary>时序告警检查读取行（申请日期锚定所需列）</summary>
+    private sealed class TimelineCheckRow
+    {
+        public string? ApplicationNo { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTime? FirstApprovedAt { get; set; }
+        public DateTime? DataCompletedAt { get; set; }
+        public DateTime UpdatedAt { get; set; }
+    }
+
+    /// <summary>状态流转读取行</summary>
+    private sealed class StatusRow
+    {
+        public long Id { get; set; }
+        public string? Status { get; set; }
+        public int CurrentStep { get; set; }
+        public bool? IsEligible { get; set; }
+        public string? ClassificationResult { get; set; }
+        public string? StopReason { get; set; }
+    }
+
+    /// <summary>归档终结的停保原因（复核判定不合格），如「复核判定不合格 · 收入超标」。</summary>
+    private static string BuildIneligibleStopReason(string? classificationResult)
+        => $"复核判定不合格 · {ClassificationConstants.ConvertToMajorCategoryName(classificationResult ?? string.Empty)}";
+}

@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/NewCosmos.Agent/NewCosmos.Agent.csproj" />
+    <Project Path="src/NewCosmos.Core/NewCosmos.Core.csproj" />
+    <Project Path="src/NewCosmos.Office/NewCosmos.Office.csproj" />
+    <Project Path="src/NewCosmos.Server/NewCosmos.Server.csproj" />
+    <Project Path="src/NewCosmos.Shell/NewCosmos.Shell.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/NewCosmos.Core.Tests/NewCosmos.Core.Tests.csproj" />
+  </Folder>
+</Solution>

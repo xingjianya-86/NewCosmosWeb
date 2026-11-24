@@ -1,0 +1,37 @@
+# =============================================================================
+# NewCosmos .2 — 可选的 Brotli 配置（ngx_brotli）
+# -----------------------------------------------------------------------------
+# 发行版 nginx 默认不带 ngx_brotli；确认模块存在后再启用：
+#   nginx -V 2>&1 | grep -o brotli
+#
+# 安装：
+#   sudo install -d -m 0755 /etc/nginx/snippets
+#   sudo install -m 0644 deploy/app-2/brotli.conf.example \
+#        /etc/nginx/snippets/newcosmos-brotli.conf
+# 然后在 deploy/app-2/nginx-cosmos-static.sua17.cn.conf 里取消这一行注释：
+#   include /etc/nginx/snippets/newcosmos-brotli.conf;
+#
+# 最后：sudo nginx -t && sudo systemctl reload nginx
+#
+# 没有该模块时不要 include，否则 nginx 会因未知指令启动失败。
+# =============================================================================
+
+brotli on;
+brotli_comp_level 5;
+brotli_min_length 1024;
+brotli_static on;
+
+brotli_types
+    text/plain
+    text/css
+    text/javascript
+    application/javascript
+    application/json
+    application/xml
+    application/rss+xml
+    image/svg+xml
+    application/wasm
+    font/ttf
+    font/otf
+    font/woff
+    font/woff2;

@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <NoWarn>$(NoWarn);CA1416;CA1707;CA1859;CA1845;CA1822;CA1852;CA2201;CA1000;CA1001;CA1716;CA1816;CS8625</NoWarn>
+  </PropertyGroup>
+</Project>

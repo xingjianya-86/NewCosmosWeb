@@ -1,0 +1,14 @@
+# 部署树里的运行时密钥 / 构建产物，绝不入库。
+# 模板（*.example）仍可提交。
+
+**/server.env
+**/backup.env
+**/.env
+**/*.local.ps1
+
+# 证书/私钥（若临时放在 deploy 下）
+**/*.pem
+**/*.key
+
+# dotnet publish / 手工构建产物
+**/publish/

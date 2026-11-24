@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>NewCosmos.Server</RootNamespace>
+    <AssemblyName>NewCosmos.Server</AssemblyName>
+    <Version>2.0.0</Version>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NewCosmos.Core\NewCosmos.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 迁移脚本随输出/发布目录复制；启动时由 DatabaseMigrator 读取。 -->
+    <None Update="Migrations\001_printer_binding.sql"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

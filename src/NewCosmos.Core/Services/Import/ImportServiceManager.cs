@@ -1,0 +1,435 @@
+using NewCosmos.Constants;
+using NewCosmos.Models.Results;
+using NewCosmos.Services.Core;
+
+namespace NewCosmos.Services.Import;
+
+public interface IImportServiceManager
+{
+    Dictionary<string, string> GetImportTypes();
+    Task<CombinedPreviewResult> PreviewCombinedAsync(string importType, string familyFilePath, string personFilePath, int previewRows = 10, CancellationToken ct = default);
+    Task<CombinedImportResult> ImportCombinedAsync(string importType, string familyFilePath, string personFilePath,  bool clearBeforeImport, IProgress<string> progress = null, CancellationToken ct = default);
+    Task<CombinedImportResult> ImportFromFolderAsync(string importType, string folderPath,  bool clearBeforeImport, IProgress<string> progress = null, CancellationToken ct = default);
+    Task<ImportResult> ImportSingleFilesAsync(string importType, IEnumerable<string> filePaths,  bool clearBeforeImport, IProgress<string> progress = null, CancellationToken ct = default, ImportScope? scope = null);
+    ICombinedImportService? GetCombinedService(string importType);
+    (string FamilyPath, string PersonPath) FindMatchingFiles(string importType, string folderPath);
+    string? DetectImportType(string filePath);
+    Task<List<SelectedFileInfo>> GetExcelFilesAsync(string folderPath);
+    Task<string> ExportImportLogAsync(string importTypeName, List<string> logLines);
+    /// <summary>该导入类型是否有可导出的标准模板</summary>
+    bool HasTemplate(string importType);
+    /// <summary>该导入类型是否支持导入范围（年份覆盖/区间校验/年段清空）</summary>
+    bool SupportsScope(string importType);
+    /// <summary>把导入模板导出到本地目录，返回生成的文件路径</summary>
+    Task<NewCosmos.Models.Results.Result<string>> ExportTemplateAsync(string importType, string folderPath, CancellationToken ct = default);
+}
+
+public class SelectedFileInfo
+{
+    public string FileName { get; set; } = string.Empty;
+    public string FilePath { get; set; } = string.Empty;
+    public long FileSize { get; set; }
+
+    public string FileSizeText
+    {
+        get
+        {
+            if (FileSize < 1024) return $"{FileSize} B";
+            if (FileSize < 1024 * 1024) return $"{FileSize / 1024.0:F1} KB";
+            return $"{FileSize / 1024.0 / 1024.0:F1} MB";
+        }
+    }
+}
+
+public class ImportServiceManager : BaseService, IImportServiceManager
+{
+    private static readonly EnumerationOptions _recursiveOptions = new()
+    {
+        IgnoreInaccessible = true,
+        RecurseSubdirectories = true
+    };
+
+    protected override string ServiceName => "ImportServiceManager";
+
+    private readonly Dictionary<string, ICombinedImportService> _combinedServices;
+    private readonly IEnumerable<IImportService> _singleFileServices;
+    private readonly Services.Core.IDatabaseBackupService _backupService;
+    private readonly Models.Options.StorageOptions _storageOptions;
+
+    public ImportServiceManager(
+        IEnumerable<ICombinedImportService> combinedServices,
+        IEnumerable<IImportService> singleFileServices,
+        Services.Core.IDatabaseBackupService backupService,
+        Models.Options.StorageOptions storageOptions,
+        ILoggerService logger) : base(logger)
+    {
+        _combinedServices = combinedServices.ToDictionary(s => s.ImportTypeName, s => s);
+        _singleFileServices = singleFileServices;
+        _backupService = backupService;
+        _storageOptions = storageOptions;
+        LogInfo($"已注册{_combinedServices.Count}个整合导入服务, {_singleFileServices.Count()}个单文件服务");
+    }
+
+    public Dictionary<string, string> GetImportTypes()
+    {
+        var types = new Dictionary<string, string>();
+        foreach (var code in ImportTypeCodes.Implemented)
+        {
+            types[code] = ImportTypeCodes.GetDisplayName(code);
+        }
+        return types;
+    }
+
+    public async Task<CombinedPreviewResult> PreviewCombinedAsync(string importType, string familyFilePath, string personFilePath, int previewRows = 10, CancellationToken ct = default)
+    {
+        if (!_combinedServices.TryGetValue(importType, out var service))
+        {
+            LogError($"双文件预览失败：不支持的导入类型 {importType}");
+            return new CombinedPreviewResult { ErrorMessage = $"不支持的导入类型: {importType}" };
+        }
+
+        LogInfo($"预览: {importType}");
+        return await service.PreviewCombinedAsync(familyFilePath, personFilePath, previewRows, ct);
+    }
+
+    public async Task<CombinedImportResult> ImportCombinedAsync(string importType, string familyFilePath, string personFilePath,  bool clearBeforeImport, IProgress<string> progress = null, CancellationToken ct = default)
+    {
+        if (!_combinedServices.TryGetValue(importType, out var service))
+        {
+            LogError($"双文件导入失败：不支持的导入类型 {importType}");
+            return new CombinedImportResult { ErrorMessage = $"不支持的导入类型: {importType}" };
+        }
+
+        LogInfo($"执行整合导入: {importType}");
+        if (clearBeforeImport)
+        {
+            var backup = await BackupBeforeClearAsync(progress, ct);
+            if (backup.IsFailure)
+                return new CombinedImportResult { ErrorMessage = backup.Message };
+        }
+        return await service.ImportCombinedAsync(familyFilePath, personFilePath, clearBeforeImport, progress, ct);
+    }
+
+    public async Task<CombinedImportResult> ImportFromFolderAsync(string importType, string folderPath,  bool clearBeforeImport, IProgress<string> progress = null, CancellationToken ct = default)
+    {
+        if (!_combinedServices.TryGetValue(importType, out var service))
+        {
+            return new CombinedImportResult { ErrorMessage = $"不支持的导入类型: {importType}" };
+        }
+
+        var (familyPath, personPath) = FindMatchingFiles(importType, folderPath);
+
+        if (string.IsNullOrEmpty(familyPath))
+        {
+            return new CombinedImportResult { ErrorMessage = $"未找到家庭文件，请确保文件夹包含匹配的文件: {service.FamilyFilePattern}" };
+        }
+
+        if (string.IsNullOrEmpty(personPath))
+        {
+            return new CombinedImportResult { ErrorMessage = $"未找到人员文件，请确保文件夹包含匹配的文件: {service.PersonFilePattern}" };
+        }
+
+        progress?.Report($"找到文件: 家庭={Path.GetFileName(familyPath)}");
+        LogInfo($"从文件夹导入: 家庭={familyPath}");
+
+        if (clearBeforeImport)
+        {
+            var backup = await BackupBeforeClearAsync(progress, ct);
+            if (backup.IsFailure)
+                return new CombinedImportResult { ErrorMessage = backup.Message };
+        }
+        return await service.ImportCombinedAsync(familyPath, personPath, clearBeforeImport, progress, ct);
+    }
+
+    /// <summary>
+    /// 破坏性清表（TRUNCATE）前自动 pg_dump 备份（对照 DatabaseManagementService 清理前备份做法）。
+    /// 备份失败返回 Failure，调用方中止导入，防止清空后无回滚介质。
+    /// </summary>
+    private async Task<NewCosmos.Models.Results.Result<string>> BackupBeforeClearAsync(IProgress<string>? progress, CancellationToken ct)
+    {
+        progress?.Report("正在备份数据库（清表前）...");
+        var backup = await _backupService.BackupDatabaseAsync(_storageOptions.GetBackupPath(), ct);
+        if (backup.IsFailure)
+        {
+            LogError($"清表前备份失败，已中止导入: {backup.Message}");
+            return backup;
+        }
+        LogInfo($"清表前备份完成: {backup.Value}");
+        return backup;
+    }
+
+    public ICombinedImportService? GetCombinedService(string importType)
+    {
+        return _combinedServices.TryGetValue(importType, out var service) ? service : null;
+    }
+
+    public (string FamilyPath, string PersonPath) FindMatchingFiles(string importType, string folderPath)
+    {
+        if (!ImportTypeCodes.IsCombinedType(importType))
+        {
+            return (string.Empty, string.Empty);
+        }
+
+        var patterns = ImportTypeCodes.GetFilePatterns(importType);
+        var familyPattern = patterns.FamilyPattern;
+        var personPattern = patterns.PersonPattern;
+
+        var familyPath = FindFileByPattern(folderPath, familyPattern);
+        var personPath = FindFileByPattern(folderPath, personPattern);
+
+        return (familyPath, personPath);
+    }
+
+    private string FindFileByPattern(string folderPath, string pattern)
+    {
+        if (string.IsNullOrEmpty(pattern)) return string.Empty;
+
+        var files = Directory.GetFiles(folderPath, pattern, _recursiveOptions);
+        return files.FirstOrDefault() ?? string.Empty;
+    }
+
+    public string? DetectImportType(string filePath)
+    {
+        var fileName = Path.GetFileNameWithoutExtension(filePath);
+
+        foreach (var kvp in _combinedServices)
+        {
+            var service = kvp.Value;
+            if (MatchesPattern(fileName, service.FamilyFilePattern) ||
+                MatchesPattern(fileName, service.PersonFilePattern))
+            {
+                return kvp.Key;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool MatchesPattern(string fileName, string pattern)
+    {
+        if (string.IsNullOrEmpty(pattern)) return false;
+
+        pattern = Path.GetFileNameWithoutExtension(pattern);
+        if (pattern.Contains('*'))
+        {
+            var parts = pattern.Split('*');
+            if (parts.Length == 2)
+            {
+                var prefix = parts[0];
+                var suffix = parts[1];
+                return fileName.StartsWith(prefix) && fileName.EndsWith(suffix);
+            }
+        }
+        return fileName.Equals(pattern, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public Task<List<SelectedFileInfo>> GetExcelFilesAsync(string folderPath)
+    {        // 文件系统遍历为同步阻塞操作，移出调用线程执行；结果返回 Excel 文件清单。
+        // 一次枚举 + 扩展名过滤：避免 "*.xls" 在 Windows 下同时命中 ".xlsx" 造成重复扫描/重复导入。
+        return Task.Run(() =>
+        {
+            var files = Directory.EnumerateFiles(folderPath, "*", _recursiveOptions)
+                .Where(SheetReaderFactory.IsExcelFile)
+                .ToList();
+
+            var result = files.Select(file =>
+            {
+                var fileInfo = new FileInfo(file);
+                var relativePath = file.Substring(folderPath.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                return new SelectedFileInfo
+                {
+                    FileName = relativePath,
+                    FilePath = file,
+                    FileSize = fileInfo.Length
+                };
+            }).ToList();
+
+            return result;
+        });
+    }
+
+    public async Task<string> ExportImportLogAsync(string importTypeName, List<string> logLines)
+    {
+        var fileName = $"导入日志_{importTypeName}_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
+        var tempPath = Path.Combine(Path.GetTempPath(), fileName);
+
+        var lines = new List<string> { "时间,类型,消息" };
+        foreach (var line in logLines)
+        {
+            var parts = line.Split(']', 3);
+            if (parts.Length >= 3)
+            {
+                var time = parts[0].TrimStart('[');
+                var type = parts[1].Trim();
+                var msg = parts[2].Trim().Replace("\"", "");
+                lines.Add($"\"{time}\",\"{type}\",\"{msg}\"");
+            }
+            else
+            {
+                lines.Add($"\"\",\"\",\"{line.Replace("\"", "")}\"");
+            }
+        }
+
+        await File.WriteAllLinesAsync(tempPath, lines);
+        return tempPath;
+    }
+
+    public async Task<ImportResult> ImportSingleFilesAsync(
+        string importType,
+        IEnumerable<string> filePaths,
+        bool clearBeforeImport,
+        IProgress<string> progress = null,
+        CancellationToken ct = default,
+        ImportScope? scope = null)
+    {
+        if (!ImportTypeCodes.IsSingleFileType(importType))
+        {
+            LogError($"单文件导入失败：非单文件导入类型 {importType}");
+            return ImportResult.Failed($"不支持的导入类型: {importType}");
+        }
+
+        var service = _singleFileServices.FirstOrDefault(s => s.ImportTypeName == importType);
+        if (service == null)
+        {
+            LogError($"单文件导入失败：未找到导入服务 {importType}");
+            return ImportResult.Failed($"未找到导入服务: {importType}");
+        }
+
+        var fileList = filePaths.ToList();
+        if (fileList.Count == 0)
+        {
+            return ImportResult.Failed("未选择任何文件");
+        }
+
+        LogInfo($"开始单文件批量导入: {importType}");
+
+        var result = new ImportResult();
+        var totalImported = 0;
+        var totalErrors = 0;
+
+        if (clearBeforeImport)
+        {
+            // 破坏性清空（TRUNCATE 或 年段 DELETE）前自动 pg_dump 备份；备份失败中止导入，防止清空后无回滚介质
+            var backup = await BackupBeforeClearAsync(progress, ct);
+            if (backup.IsFailure)
+                return ImportResult.Failed($"清表前备份失败，已中止导入: {backup.Message}");
+
+            if (service.SupportsScope)
+            {
+                // 年份管理型（年度种植补贴）：**不**整表清空——清空交给服务按「本次涉及年段」逐段执行（方案A），
+                // 同一批次多文件只清一次（scope.ClearedYears 去重），其余年段原样保留。
+                scope ??= new ImportScope();
+                scope.ClearBeforeImport = true;
+                progress?.Report($"清空范围：{scope.Describe()} 下本次实际涉及的年段（其余年段保留）");
+                LogInfo($"年段清空模式: {scope.Describe()}");
+            }
+            else
+            {
+                progress?.Report("正在清空现有数据...");
+                var clearResult = await service.ClearTableAsync(ct);
+                if (clearResult.IsFailure)
+                {
+                    LogError($"{importType}: 清空数据表失败（中止导入）");
+                    return ImportResult.Failed("清空数据失败");
+                }
+                LogInfo($"已清空现有数据");
+            }
+        }
+
+        for (var i = 0; i < fileList.Count; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var filePath = fileList[i];
+            var fileName = Path.GetFileName(filePath);
+            progress?.Report($"正在处理 ({i + 1}/{fileList.Count})");
+
+            try
+            {
+                var fileResult = await service.ImportAsync(
+                    new[] { filePath },
+                    service.SupportsScope ? scope : null,
+                    false,
+                    progress,
+                    ct);
+
+                totalImported += fileResult.ImportedCount;
+                totalErrors += fileResult.ErrorCount;
+
+                // 警告必须透传到 UI 与日志：导入会"跳过"部分行（如身份证不合规），
+                // 不透传就是静默丢数据（曾因此丢 1228 行 / 268 万元未被发现）
+                foreach (var warn in fileResult.Warnings)
+                {
+                    result.Warnings.Add($"文件: {fileName}, {warn}");
+                    LogWarn($"导入警告: {fileName} - {warn}");
+                }
+
+                if (fileResult.ErrorCount > 0)
+                {
+                    // UI 只展示每文件前 3 条（避免刷屏），但【全部错误必须落日志】——
+                    // 旧实现 Take(3) 后其余错误既不入 result 也不留痕，排障时无从追查
+                    var errors = fileResult.Errors.ToList();
+                    foreach (var error in errors.Take(3))
+                    {
+                        result.Errors.Add($"文件: {fileName}, 错误: {error}");
+                    }
+                    foreach (var error in errors)
+                    {
+                        LogError($"导入错误: {fileName} - {error}");
+                    }
+                    if (errors.Count > 3)
+                    {
+                        result.Errors.Add($"文件: {fileName}, 另有 {errors.Count - 3} 条错误（详见导入日志）");
+                    }
+                }
+
+                LogInfo($"文件导入完成: {fileName}");
+            }
+            catch (Exception ex)
+            {
+                totalErrors++;
+                result.Errors.Add($"文件: {fileName}, 异常: {ex.Message}");
+                LogError($"文件导入异常: {fileName}");
+            }
+        }
+
+        result.ImportedCount = totalImported;
+        result.ErrorCount = totalErrors;
+        result.Success = totalErrors == 0;
+
+        progress?.Report($"导入完成: 成功 {totalImported} 条, 失败 {totalErrors} 条");
+        LogInfo($"单文件批量导入完成: 成功 {totalImported}");
+
+        return result;
+    }
+
+    public bool HasTemplate(string importType)
+        => ImportTemplateCatalog.Get(importType) != null;
+
+    public bool SupportsScope(string importType)
+        => _singleFileServices.FirstOrDefault(s => s.ImportTypeName == importType)?.SupportsScope ?? false;
+
+    public Task<NewCosmos.Models.Results.Result<string>> ExportTemplateAsync(
+        string importType, string folderPath, CancellationToken ct = default)
+    {
+        var spec = ImportTemplateCatalog.Get(importType);
+        if (spec == null)
+        {
+            LogError($"该导入类型无模板可导出: {importType}");
+            return Task.FromResult(NewCosmos.Models.Results.Result.Failure<string>(
+                "TEMPLATE_NOT_FOUND", $"「{ImportTypeCodes.GetDisplayName(importType)}」暂无可导出的模板"));
+        }
+
+        var result = ImportTemplateExporter.Export(spec, folderPath);
+        if (result.IsSuccess)
+        {
+            Logger.LogBusiness("导入模板导出", ("Type", importType), ("Path", result.Value));
+            LogInfo($"模板已导出: {result.Value}");
+        }
+        else
+        {
+            LogError($"模板导出失败: {result.Message}");
+        }
+        return Task.FromResult(result);
+    }
+}

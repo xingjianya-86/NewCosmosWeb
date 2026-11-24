@@ -1,0 +1,722 @@
+using System.Linq;
+using NewCosmos.Constants;
+using NewCosmos.Helpers;
+using NewCosmos.Models.Entities;
+using NewCosmos.Services.Domain.TempRelief;
+using NewCosmos.Services.Utilities;
+
+namespace NewCosmos.Services.Domain.TempRelief;
+
+/// <summary>
+/// 临时救助打印数据组装（填充 PrintNavigationData.FieldData / TableData）
+/// 字段键见 Constants/FieldKeys.cs 的 TEMP_* 常量；模板 config_json 将中文占位符映射到这些键。
+/// </summary>
+public static class TempReliefPrintDataBuilder
+{
+    /// <summary>授权承诺书家庭成员槽位数（_1.._6）</summary>
+    private const int ArchiveMemberSlots = 6;
+
+    /// <summary>
+    /// 构建单值字段字典（主表 + 家庭成员索引槽位）
+    /// </summary>
+    /// <param name="app">临时救助申请实体</param>
+    /// <param name="members">家庭成员明细</param>
+    /// <param name="contactUnitPhone">公示异议反馈电话（当前登录用户所在单位联系电话）</param>
+    /// <param name="acceptanceDate">验收日期（C线：公示止次日历日；为空则回退公示结束日/当天）</param>
+    /// <param name="investigationDate">入户调查时间（动态：clamp(今日最近工作日, [申请日, 公示起])；为空则不输出）</param>
+    public static Dictionary<string, string> BuildSingleFields(
+        TempReliefApplication app,
+        List<TempReliefMember> members,
+        string? contactUnitPhone = null,
+        DateTime? acceptanceDate = null,
+        DateTime? investigationDate = null)
+    {
+        var acceptance = acceptanceDate ?? app.PublicizeEndDate ?? DateTime.Today;
+
+        // 表单无成员时会保留一行空白占位行，历史落库也可能残留；打印前统一剔除，
+        // 否则空白行会被当成一名成员（授权承诺书会多印一个"居民身份证"）。
+        var effectiveMembers = members?
+            .Where(m => !string.IsNullOrWhiteSpace(m.MemberName))
+            .ToList() ?? new List<TempReliefMember>();
+
+        // 审批表成员行 / 授权承诺书槽位共用：剔除户主本人与重复身份证（历史脏数据），
+        // 避免同一人占两行；无身份证时按"户主关系 + 姓名"兜底识别户主。
+        string? applicantIdCardRaw = app.ApplicantIdCard;
+        string? applicantNameRaw = app.ApplicantName;
+        var applicantIdCard = (applicantIdCardRaw ?? string.Empty).Trim();
+        var applicantName = (applicantNameRaw ?? string.Empty).Trim();
+        var seenIdCards = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (applicantIdCard.Length > 0)
+            seenIdCards.Add(applicantIdCard);
+
+        var memberRows = new List<TempReliefMember>(effectiveMembers.Count);
+        foreach (var m in effectiveMembers)
+        {
+            var idCard = (m.IdCard ?? string.Empty).Trim();
+            if (idCard.Length > 0)
+            {
+                if (!seenIdCards.Add(idCard)) continue;
+            }
+            else if (TempReliefConstants.GetRelationshipDisplayName(m.Relation) == TempReliefConstants.RelationHead
+                     && string.Equals(m.MemberName?.Trim(), applicantName, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            memberRows.Add(m);
+        }
+
+        // 家庭人口统一口径（户主 1 人 + 有效家庭成员行数；赡养抚养扶养义务人不计入）：
+        // 打印时按实际成员明细重算，保证与逐行家庭成员自洽、不受历史快照影响；
+        // 无成员明细时退回主表存储快照（纯台账来源、历史导入记录）。
+        // 口径唯一实现见 TempReliefConstants.ResolveFamilySize。
+        var familySize = TempReliefConstants.ResolveFamilySize(
+            app.FamilySize, TempReliefConstants.CountEffectiveMembers(memberRows.Select(m => m.MemberName)));
+
+        var fields = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [FieldKeys.TEMP_APPLICATION_NO] = app.ApplicationNo,
+            [FieldKeys.TEMP_RELIEF_TYPE_NAME] = TempReliefConstants.GetReliefTypeName(app.ReliefType),
+            // 批5 双写→清理：原 TEMP_REPORT_UNIT 已删（同源同值，T226 config 已迁本键；
+            // BatchAndArchive:934 的兜底读取方已同步改读 REPORT_UNIT）
+            [FieldKeys.REPORT_UNIT] = app.ReportUnit,
+            [FieldKeys.TEMP_REPORT_TIME] = app.ReportTime?.ToString("yyyy年M月d日") ?? string.Empty,
+            // ── 2026-10-16 批3（MIRROR 合并，config 侧 5 规则/18 行已迁新键）──
+            // TEMP_APPLICANT_NAME / TEMP_APPLICANT_ID_CARD：config 已改指本方法尾部「通用档案键」段的
+            // APPLICANT_NAME / APPLICANT_ID_CARD（同字典同值），但 ArchiveOutputViewModel.BatchAndArchive
+            // 的档案目录题名(910/1059)与版权信息(937) 仍读这两个键（取不到回退「未知」），
+            // 故此处供给必须保留——不是 config 冗余，勿连同已删行一起清理。
+            // 已删除的真冗余（迁移后代码读取方 = 0）：TEMP_FAMILY_ADDRESS、TEMP_HUKOU_ADDRESS。
+            [FieldKeys.TEMP_APPLICANT_NAME] = app.ApplicantName,
+            [FieldKeys.TEMP_APPLICANT_ID_CARD] = app.ApplicantIdCard, // 批3 保留：ArchiveOutputViewModel:937 版权信息读取
+            // 批5 双写→清理（2026-10-16）：原 TEMP_APPLICANT_GENDER/AGE/PHONE 已删（同源同值，config 已迁）；
+            // CONTACT_PHONE 取申请人电话 app.Phone，非 TEMP_CONTACT_PHONE 的公示异议反馈电话
+            [FieldKeys.APPLICANT_GENDER] = app.Gender,
+            [FieldKeys.APPLICANT_AGE] = app.Age?.ToString() ?? string.Empty,
+            [FieldKeys.CONTACT_PHONE] = app.Phone,
+            [FieldKeys.FAMILY_ADDRESS] = BuildLivingAddress(app),
+            [FieldKeys.TEMP_POLICY_ENJOYED] = app.PolicyEnjoyed,
+            [FieldKeys.TEMP_POLICY_CHECKLIST] = BuildPolicyChecklist(app.PolicyEnjoyed),
+            [FieldKeys.TEMP_FAMILY_MEMBER_STATUS] = BuildFamilyMemberStatus(app),
+            [FieldKeys.TEMP_DIFFICULTY_REASON] = BuildDifficultyReason(app),
+            [FieldKeys.TEMP_APPLY_STATEMENT] = app.DifficultyReason ?? string.Empty,
+            [FieldKeys.TEMP_ACCEPTANCE_REASON] = BuildAcceptanceReason(app),
+            [FieldKeys.TEMP_DIFFICULTY_SUMMARY] = BuildDifficultySummary(app),
+            [FieldKeys.TEMP_AUDIT_REASON] = BuildAuditReason(app, familySize),
+            [FieldKeys.TEMP_BENEFICIARY_NAME] = ResolveBeneficiaryName(app),
+            [FieldKeys.TEMP_BENEFICIARY_ID_CARD] = FirstNonEmpty(app.BeneficiaryIdCard, app.ApplicantIdCard),
+            [FieldKeys.TEMP_BENEFICIARY_GENDER] = FirstNonEmpty(app.BeneficiaryGender, app.Gender),
+            [FieldKeys.TEMP_BENEFICIARY_AGE] = (app.BeneficiaryAge ?? app.Age)?.ToString() ?? string.Empty,
+            [FieldKeys.TEMP_BENEFICIARY_RELATION] = TempReliefConstants.GetRelationshipDisplayName(app.BeneficiaryRelation),
+            [FieldKeys.TEMP_DIFFICULTY_TYPE] = string.IsNullOrWhiteSpace(app.DifficultyType)
+                ? TempReliefConstants.DifficultyTypeOther : app.DifficultyType,
+            [FieldKeys.TEMP_DIFFICULTY_DETAILS] = BuildDifficultyDetails(app),
+            [FieldKeys.TEMP_DISEASE_DIAGNOSIS] = JoinDiseaseFields(app.Diseases, d => d.DiseaseName),
+            [FieldKeys.TEMP_DISEASE_CODE] = JoinDiseaseFields(app.Diseases, d => d.DiseaseCode),
+            [FieldKeys.TEMP_DISEASE_SELF_PAID] = FormatDiseaseSelfPaid(app.Diseases),
+            [FieldKeys.TEMP_DISEASE_HOSPITAL] = FormatDiseaseHospital(app.Diseases),
+            [FieldKeys.TEMP_ACCIDENT_DETAILS] = BuildAccidentDetails(app.Accidents),
+            [FieldKeys.TEMP_EDUCATION_DETAILS] = BuildEducationDetails(app.Educations),
+            [FieldKeys.TEMP_APPLY_DATE] = app.ApplyDate?.ToString("yyyy年M月d日") ?? string.Empty,
+            // 批4 双写→清理：原 TEMP_FAMILY_SIZE 已删（同源同值，config 已迁本键）
+            [FieldKeys.FAMILY_SIZE] = familySize?.ToString() ?? string.Empty,
+            [FieldKeys.TEMP_FAMILY_CATEGORY] = app.FamilyCategory,
+            [FieldKeys.TEMP_VERIFY_RESULT] = "情况属实",
+            [FieldKeys.TEMP_CONFIRM_AMOUNT] = app.ReliefType == TempReliefConstants.ReliefTypeSmall && app.ConfirmAmount.HasValue
+                ? app.ConfirmAmount.Value.ToString("F2") : new string(' ', 12),
+            [FieldKeys.TEMP_PARENT_UNIT] = app.ReliefType == TempReliefConstants.ReliefTypeLarge
+                ? "县民政部门意见" : "镇政府意见",
+            [FieldKeys.TEMP_FAMILY_CATEGORY_CHECKLIST] = BuildAuditFamilyCategoryChecklist(app),
+            [FieldKeys.TEMP_ACCEPTANCE_DATE] = acceptance.ToString("yyyy年M月d日"),
+            [FieldKeys.TEMP_ACCEPTANCE_CONCLUSION] = BuildAcceptanceConclusion(app, acceptance),
+            [FieldKeys.TEMP_INVESTIGATION_DATE] = investigationDate?.ToString("yyyy年M月d日") ?? string.Empty,
+            [FieldKeys.TEMP_TOWN_OPINION_DATE] = FormatCnDate(app.PublicizeEndDate),
+            [FieldKeys.TEMP_PUBLICIZE_RANGE] = BuildPublicizeRange(app),
+            [FieldKeys.TEMP_PUBLICIZE_START] = FormatCnDate(app.PublicizeStartDate),
+            [FieldKeys.TEMP_PUBLICIZE_END] = FormatCnDate(app.PublicizeEndDate),
+            // 批5 双写→清理：原 TEMP_VILLAGE/TEMP_TOWN 已删（同源同值，config 已迁本键）
+            [FieldKeys.COMMUNITY] = app.Village,
+            [FieldKeys.TOWN] = app.Town,
+            [FieldKeys.TEMP_ACCEPTANCE_PERSON] = app.AcceptancePerson,
+            [FieldKeys.TEMP_CONTACT_PHONE] = contactUnitPhone ?? string.Empty,
+
+            // ── 通用档案键：档案_授权承诺书_P1（即通用_授权委托书）复用临时救助打印流 ──
+            [FieldKeys.APPLICANT_NAME] = app.ApplicantName,
+            [FieldKeys.APPLICANT_ID_CARD] = app.ApplicantIdCard,
+            [FieldKeys.APPLICATION_REASON] = string.IsNullOrWhiteSpace(app.DifficultyType)
+                ? TempReliefConstants.DifficultyTypeOther : app.DifficultyType,
+            [FieldKeys.APPLICATION_DATE] = (investigationDate ?? app.ApplyDate)?.ToString("yyyy-MM-dd") ?? string.Empty,
+            // 通用_申请人承诺书(174)/通用_经办人承诺书(178) 的 {诚信承诺时间}：
+            // C 线（临时救助）不套 B 线「承诺不早于公示」规则（2026-10-16 决策：维持现状值）
+            [FieldKeys.PROMISE_DATE] = (investigationDate ?? app.ApplyDate)?.ToString("yyyy-MM-dd") ?? string.Empty,
+
+            // ── 通用承诺书键：通用_申请人承诺书(174) / 通用_经办人承诺书(178) 复用临时救助打印流 ──
+            [FieldKeys.HUKOU_ADDRESS] = app.HukouAddress,
+            [FieldKeys.APPLICANT_COUNT] = familySize?.ToString() ?? string.Empty,
+            [FieldKeys.OPERATOR_UNIT] = app.ReportUnit,
+            [FieldKeys.OPERATOR_NAME] = app.AcceptancePerson,
+
+            [FieldKeys.AGENT_NAME] = string.Empty,
+            [FieldKeys.AGENT_CERT_TYPE] = string.Empty,
+            [FieldKeys.AGENT_ID_CARD] = string.Empty,
+            [FieldKeys.AGENT_RELATION] = string.Empty,
+
+            // ── 档案封面专用字段 ──
+            [FieldKeys.COVER_CLASSIFICATION] = $"临时救助（{TempReliefConstants.GetReliefTypeName(app.ReliefType)}）",
+            [FieldKeys.ARCHIVE_NUMBER] = app.ApplicationNo,
+            [FieldKeys.COPYRIGHT_INFO] = CopyrightHelper.BuildCopyrightInfo(app.ApplicantIdCard)
+        };
+
+        // 家庭成员索引槽位（审批表 5 行）：只用有效成员（空白占位行/户主本人/重复身份证不占行）
+        for (var i = 0; i < TempReliefConstants.MaxMemberRows; i++)
+        {
+            var idx = i + 1;
+            var member = i < memberRows.Count ? memberRows[i] : null;
+            fields[FieldKeys.TEMP_MEMBER_NAME + "_" + idx] = member?.MemberName ?? string.Empty;
+            fields[FieldKeys.TEMP_MEMBER_GENDER + "_" + idx] = member?.Gender ?? string.Empty;
+            fields[FieldKeys.TEMP_MEMBER_RELATION + "_" + idx] = TempReliefConstants.GetRelationshipDisplayName(member?.Relation);
+            fields[FieldKeys.TEMP_MEMBER_ID_CARD + "_" + idx] = member?.IdCard ?? string.Empty;
+            fields[FieldKeys.TEMP_MEMBER_WORK_UNIT + "_" + idx] = member?.WorkUnit ?? string.Empty;
+            fields[FieldKeys.TEMP_MEMBER_ANNUAL_INCOME + "_" + idx] = member?.AnnualIncome?.ToString("F2") ?? string.Empty;
+        }
+
+        // 授权承诺书家庭成员槽位（1..6）：户主（申请人）恒为索引 1（与 FamilyFieldBuilder 约定一致），
+        // 有效成员依次占槽位 2..6（最多 5 人）；关系转中文，空槽不写证件类型
+        //（曾因空白占位行姓名是空串而非 null，单成员家庭多印一个"居民身份证"）。
+        // 不依赖 Members 是否为空：无成员数据时仍输出户主一行
+        var archiveMembers = new List<(string? Name, string Gender, string Relation, string IdCard)>(ArchiveMemberSlots)
+        {
+            (applicantName, app.Gender, TempReliefConstants.RelationHead, applicantIdCard)
+        };
+
+        foreach (var m in memberRows)
+        {
+            if (archiveMembers.Count >= ArchiveMemberSlots) break;
+
+            archiveMembers.Add((m.MemberName?.Trim() ?? string.Empty, m.Gender ?? string.Empty,
+                TempReliefConstants.GetRelationshipDisplayName(m.Relation), (m.IdCard ?? string.Empty).Trim()));
+        }
+
+        while (archiveMembers.Count < ArchiveMemberSlots)
+            archiveMembers.Add((null, string.Empty, string.Empty, string.Empty));
+
+        for (var i = 0; i < ArchiveMemberSlots; i++)
+        {
+            var idx = i + 1;
+            var slot = archiveMembers[i];
+            fields[FieldKeys.FAMILY_MEMBER_NAME + "_" + idx] = slot.Name ?? string.Empty;
+            fields[FieldKeys.FAMILY_MEMBER_CERT_TYPE + "_" + idx] = string.IsNullOrWhiteSpace(slot.Name) ? string.Empty : "居民身份证";
+            fields[FieldKeys.FAMILY_MEMBER_ID_CARD + "_" + idx] = slot.IdCard ?? string.Empty;
+            fields[FieldKeys.FAMILY_MEMBER_RELATION + "_" + idx] = slot.Relation ?? string.Empty;
+        }
+
+        return fields;
+    }
+
+    private static string FormatCnDate(DateTime? dt) => dt?.ToString("yyyy年M月d日") ?? string.Empty;
+
+    /// <summary>
+    /// 解析打印用日期（2026-11-13 起逐笔 5 天曲线）：
+    /// 验收日 = 公示止 + 1 日历日（存量公示止 = A−1 时结果恒等于 A，与旧算法一致、零漂移）；
+    /// 入户调查时间 = clamp(今日的最近工作日, [申请日, 公示起])：今日是工作日填今日、非工作日往回取、
+    /// 早于申请日取申请日、补打超期兜底公示起日。
+    /// 锚点 = 申请日（无则公示起/公示止/当天）；公示起有库中值时按库中值回放（存量档不重算）。
+    /// 打印调用方统一走此方法，避免各自重抄。
+    /// </summary>
+    public static Task<(DateTime Acceptance, DateTime Investigation)> ResolveScheduleAsync(
+        IBusinessTimelineService timelineService, TempReliefApplication app)
+    {
+        var acceptance = timelineService.GetTempReliefAcceptanceDate(app.PublicizeEndDate);
+
+        var anchor = app.ApplyDate ?? app.PublicizeStartDate ?? app.PublicizeEndDate ?? DateTime.Today;
+        var curve = timelineService.BuildTempReliefCurve(anchor, app.PublicizeStartDate);
+
+        return Task.FromResult((acceptance, timelineService.GetTempReliefInvestigationPrintDate(curve)));
+    }
+
+    /// <summary>
+    /// 验收结论整句：{因病|因学|因灾|因突发困难}，于{公示起}至{公示止}公示，{验收日}验收通过。
+    /// 公示日期缺失一侧时只输出已有侧；两侧皆空时省略"于…公示"分句。
+    /// </summary>
+    private static string BuildAcceptanceConclusion(TempReliefApplication app, DateTime acceptanceDate)
+    {
+        var reasonWord = (app.DifficultyType ?? string.Empty).Trim() switch
+        {
+            TempReliefConstants.DifficultyTypeDisease => "因病",
+            TempReliefConstants.DifficultyTypeEducation => "因学",
+            TempReliefConstants.DifficultyTypeAccident => "因灾",
+            _ => "因突发困难"
+        };
+
+        var start = FormatCnDate(app.PublicizeStartDate);
+        var end = FormatCnDate(app.PublicizeEndDate);
+        var rangeText = (string.IsNullOrEmpty(start), string.IsNullOrEmpty(end)) switch
+        {
+            (true, true) => string.Empty,
+            (true, false) => end,
+            (false, true) => start,
+            _ => $"{start}至{end}"
+        };
+
+        var acceptanceText = acceptanceDate.ToString("yyyy年M月d日");
+        return string.IsNullOrEmpty(rangeText)
+            ? $"{reasonWord}，{acceptanceText}验收通过。"
+            : $"{reasonWord}，于{rangeText}公示，{acceptanceText}验收通过。";
+    }
+
+    /// <summary>
+    /// 审核审批表{户主家庭类别}勾选清单：9 项固定清单，命中项 □→☑；
+    /// 命中规则见 TempReliefConstants.ResolveAuditChecklistCategory（指定字段固定映射）。
+    /// 排版 5+4 两行，换行符由 ExcelEngine 自动启用单元格自动换行。
+    /// </summary>
+    private static string BuildAuditFamilyCategoryChecklist(TempReliefApplication app)
+    {
+        var hit = TempReliefConstants.ResolveAuditChecklistCategory(app.FamilyCategory, app.SourceTable, app.HukouType);
+        var options = TempReliefConstants.AuditChecklistOptions;
+        var line1 = new List<string>(5);
+        var line2 = new List<string>(4);
+        for (var i = 0; i < options.Length; i++)
+        {
+            var item = $"{(options[i] == hit ? "☑" : "□")}{options[i]}";
+            (i < 5 ? line1 : line2).Add(item);
+        }
+        return string.Join("  ", line1) + Environment.NewLine + string.Join("  ", line2);
+    }
+
+    /// <summary>
+    /// 公示日期区间（完整中文格式，如 2026年8月10日至2026年8月12日；单边时仅输出已有日期）
+    /// </summary>
+    private static string BuildPublicizeRange(TempReliefApplication app)
+    {
+        var start = FormatCnDate(app.PublicizeStartDate);
+        var end = FormatCnDate(app.PublicizeEndDate);
+        if (string.IsNullOrEmpty(start) && string.IsNullOrEmpty(end)) return string.Empty;
+        if (string.IsNullOrEmpty(end)) return start;
+        if (string.IsNullOrEmpty(start)) return end;
+        return $"{start} 至 {end}";
+    }
+
+    /// <summary>
+    /// 家庭成员状态详细文本：成员身体状况 + 申请人所报困难明细（疾病/意外灾害/教育支出），空段落省略
+    /// </summary>
+    private static string BuildFamilyMemberStatus(TempReliefApplication app)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(app.FamilyMemberStatus))
+            parts.Add($"家庭成员身体状况：{app.FamilyMemberStatus}");
+
+        var diseaseOwners = ResolveDetailOwners(app, TempReliefConstants.DifficultyTypeDisease);
+        var diseaseText = BuildDiseaseBrief(app.Diseases, diseaseOwners);
+        if (!string.IsNullOrWhiteSpace(diseaseText)) parts.Add($"患病情况：{diseaseText}");
+
+        var accidentText = BuildAccidentBrief(app.Accidents, ResolveDetailOwners(app, TempReliefConstants.DifficultyTypeAccident));
+        if (!string.IsNullOrWhiteSpace(accidentText)) parts.Add($"意外灾害：{accidentText}");
+
+        var educationText = BuildEducationBrief(app.Educations);
+        if (!string.IsNullOrWhiteSpace(educationText)) parts.Add($"教育支出：{educationText}");
+
+        return string.Join("；", parts);
+    }
+
+    /// <summary>
+    /// 申请救助原因/困难情况：原救助原因 + 家庭成员状态详细内容（审批表/公示/验收报告共用）
+    /// </summary>
+    private static string BuildDifficultyReason(TempReliefApplication app)
+    {
+        var memberStatus = BuildFamilyMemberStatus(app);
+        if (string.IsNullOrWhiteSpace(app.DifficultyReason)) return memberStatus;
+        if (string.IsNullOrWhiteSpace(memberStatus)) return app.DifficultyReason;
+        return $"{app.DifficultyReason}\n{memberStatus}";
+    }
+
+    private static string BuildDiseaseBrief(List<TempReliefDisease>? diseases, IReadOnlyList<string>? owners = null)
+    {
+        if (diseases == null || diseases.Count == 0) return string.Empty;
+        var parts = new List<string>();
+        for (var i = 0; i < diseases.Count; i++)
+        {
+            var d = diseases[i];
+            // 归属成员空时回退对应顺序的解析名（明细归属优先，空则申请人），保证打印点名患病人
+            var ownerName = !string.IsNullOrWhiteSpace(d.MemberName)
+                ? d.MemberName.Trim()
+                : owners != null && i < owners.Count && !string.IsNullOrWhiteSpace(owners[i])
+                    ? owners[i].Trim()
+                    : "";
+            var owner = string.IsNullOrEmpty(ownerName) ? "" : ownerName + " ";
+            var seg = $"{owner}{d.DiseaseName}".Trim();
+            if (!string.IsNullOrWhiteSpace(d.DiseaseCode)) seg += $"（编码 {d.DiseaseCode}）";
+            parts.Add(seg);
+        }
+        return string.Join("、", parts);
+    }
+
+    /// <summary>
+    /// 明细归属人解析列表（与明细行一一对应）：明细 MemberName 优先，空则回退申请人；
+    /// 用于打印 brief/摘要在归属字段为空时仍能点名患病人/受灾人。
+    /// </summary>
+    private static List<string> ResolveDetailOwners(TempReliefApplication app, string difficultyType)
+    {
+        IEnumerable<string?>? detailNames = difficultyType switch
+        {
+            TempReliefConstants.DifficultyTypeDisease => app.Diseases?.Select(d => d.MemberName),
+            TempReliefConstants.DifficultyTypeAccident => app.Accidents?.Select(a => a.MemberName),
+            TempReliefConstants.DifficultyTypeEducation => app.Educations?.Select(e => e.StudentName),
+            _ => null
+        };
+        if (detailNames == null) return new List<string>();
+        var fallback = app.ApplicantName ?? string.Empty;
+        return detailNames.Select(n => string.IsNullOrWhiteSpace(n) ? fallback : n!.Trim()).ToList();
+    }
+
+    private static string BuildAccidentBrief(List<TempReliefAccident>? accidents, IReadOnlyList<string>? owners = null)
+    {
+        if (accidents == null || accidents.Count == 0) return string.Empty;
+        var idx = 1;
+        var parts = new List<string>();
+        for (var i = 0; i < accidents.Count; i++)
+        {
+            var a = accidents[i];
+            var ownerName = !string.IsNullOrWhiteSpace(a.MemberName)
+                ? a.MemberName.Trim()
+                : owners != null && i < owners.Count && !string.IsNullOrWhiteSpace(owners[i])
+                    ? owners[i].Trim()
+                    : "";
+            var owner = string.IsNullOrEmpty(ownerName) ? "" : ownerName + " ";
+            var seg = $"【意外灾害{idx}】{owner}{a.AccidentType}".Trim();
+            if (!string.IsNullOrWhiteSpace(a.InjurySituation)) seg += $"：{a.InjurySituation}";
+            parts.Add(seg);
+            idx++;
+        }
+        return string.Join("、", parts);
+    }
+
+    private static string BuildEducationBrief(List<TempReliefEducation>? educations)
+    {
+        if (educations == null || educations.Count == 0) return string.Empty;
+        var idx = 1;
+        var parts = new List<string>();
+        foreach (var e in educations)
+        {
+            var seg = $"【教育支出{idx}】{e.StudentName}（{e.EducationStage}）".Trim();
+            parts.Add(seg);
+            idx++;
+        }
+        return string.Join("、", parts);
+    }
+
+    private static string JoinDiseaseFields(List<TempReliefDisease>? diseases, Func<TempReliefDisease, string> selector)
+    {
+        if (diseases == null || diseases.Count == 0) return string.Empty;
+        return string.Join("；", diseases.Select(selector).Where(s => !string.IsNullOrWhiteSpace(s)));
+    }
+
+    /// <summary>疾病自付费用：多条时求和汇总</summary>
+    private static string FormatDiseaseSelfPaid(List<TempReliefDisease>? diseases)
+    {
+        if (diseases == null || diseases.Count == 0) return string.Empty;
+        var total = DistinctDiseasesByExpense(diseases)
+            .Where(d => d.SelfPaid.HasValue)
+            .Sum(d => d.SelfPaid!.Value);
+        return total > 0 ? total.ToString("F2") : string.Empty;
+    }
+
+    /// <summary>疾病所在医院：单条取值，多条去重拼接</summary>
+    private static string FormatDiseaseHospital(List<TempReliefDisease>? diseases)
+    {
+        if (diseases == null || diseases.Count == 0) return string.Empty;
+        var hospitals = diseases
+            .Select(d => d.Hospital ?? string.Empty)
+            .Where(h => !string.IsNullOrWhiteSpace(h))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return hospitals.Count switch
+        {
+            0 => string.Empty,
+            1 => hospitals[0],
+            _ => string.Join("/", hospitals)
+        };
+    }
+
+    private static string BuildDifficultyDetails(TempReliefApplication app)
+    {
+        var parts = new List<string>();
+        if (app.Diseases != null && app.Diseases.Count > 0)
+        {
+            var diseaseOwners = ResolveDetailOwners(app, TempReliefConstants.DifficultyTypeDisease);
+            for (var i = 0; i < app.Diseases.Count; i++)
+            {
+                var d = app.Diseases[i];
+                var ownerName = !string.IsNullOrWhiteSpace(d.MemberName)
+                    ? d.MemberName.Trim()
+                    : i < diseaseOwners.Count && !string.IsNullOrWhiteSpace(diseaseOwners[i])
+                        ? diseaseOwners[i].Trim()
+                        : "";
+                // 申请书（模板238）疾病明细改为住院句：姓名在起至止因患XX，在XX医院住院
+                // （原「姓名 疾病（编码）」罗列已废止；ICD 编码不再进申请书正文）
+                parts.Add(BuildHospitalizationSentence(d, ownerName));
+            }
+        }
+
+        if (app.Accidents != null && app.Accidents.Count > 0)
+        {
+            var accidentOwners = ResolveDetailOwners(app, TempReliefConstants.DifficultyTypeAccident);
+            var idx = 1;
+            for (var i = 0; i < app.Accidents.Count; i++)
+            {
+                var a = app.Accidents[i];
+                var ownerName = !string.IsNullOrWhiteSpace(a.MemberName)
+                    ? a.MemberName.Trim()
+                    : i < accidentOwners.Count && !string.IsNullOrWhiteSpace(accidentOwners[i])
+                        ? accidentOwners[i].Trim()
+                        : "";
+                var owner = string.IsNullOrEmpty(ownerName) ? "" : ownerName + " ";
+                var seg = $"【意外灾害{idx}】{owner}{a.AccidentType}".Trim();
+                if (a.HappenDate != default) seg += $"（{a.HappenDate:yyyy-MM-dd}）";
+                if (!string.IsNullOrWhiteSpace(a.HappenPlace)) seg += $"；地点：{a.HappenPlace}";
+                if (!string.IsNullOrWhiteSpace(a.InjurySituation)) seg += $"；伤亡：{a.InjurySituation}";
+                if (a.PropertyLoss.HasValue) seg += $"；财产损失：{a.PropertyLoss.Value:F2}元";
+                parts.Add(seg);
+                idx++;
+            }
+        }
+
+        if (app.Educations != null && app.Educations.Count > 0)
+        {
+            var idx = 1;
+            foreach (var e in app.Educations)
+            {
+                var seg = $"【教育支出{idx}】{e.StudentName}（{e.EducationStage}）".Trim();
+                if (!string.IsNullOrWhiteSpace(e.SchoolName)) seg += $"；学校：{e.SchoolName}";
+                if (e.TuitionFee.HasValue) seg += $"；学费：{e.TuitionFee.Value:F2}元";
+                parts.Add(seg);
+                idx++;
+            }
+        }
+
+        return string.Join(Environment.NewLine, parts);
+    }
+
+    /// <summary>
+    /// 申请书疾病明细句：姓名在起至止因患XX，在XX医院住院；句尾有编码时追加（ICD-10编码：XXX）。
+    /// 缺什么省什么：缺日期省日期段、缺医院省「在XX医院」、缺病名省「因患X，」段；
+    /// 主语姓名取不到时用「本人」（申请书通篇第一人口吻，避免空主语）。
+    /// 日期口径见 FormatTreatSpanAlways（与表单救助原因的同日单日口径不同）。
+    /// </summary>
+    private static string BuildHospitalizationSentence(TempReliefDisease d, string ownerName)
+    {
+        var subject = string.IsNullOrWhiteSpace(ownerName) ? "本人" : ownerName.Trim();
+        var span = FormatTreatSpanAlways(d.TreatStartDate, d.TreatEndDate);
+        var head = string.IsNullOrWhiteSpace(span) ? subject : $"{subject}在{span}";
+
+        var hospital = string.IsNullOrWhiteSpace(d.Hospital) ? string.Empty : d.Hospital.Trim();
+        var hospitalPart = string.IsNullOrEmpty(hospital) ? "住院" : $"在{hospital}住院";
+
+        var disease = string.IsNullOrWhiteSpace(d.DiseaseName) ? string.Empty : d.DiseaseName.Trim();
+        var sentence = string.IsNullOrEmpty(disease)
+            ? head + hospitalPart
+            : string.IsNullOrEmpty(hospital)
+                ? $"{head}因患{disease}住院"
+                : $"{head}因患{disease}，{hospitalPart}";
+
+        // 句尾追加 ICD-10 编码（审核对照用；无编码不追加）
+        if (!string.IsNullOrWhiteSpace(d.DiseaseCode)) sentence += $"（ICD-10编码：{d.DiseaseCode.Trim()}）";
+        return sentence;
+    }
+
+    /// <summary>
+    /// 申请书住院区间文本：起止都填时始终输出「起至止」（起止同日也保留「至」，按申请书句式要求）；
+    /// 单边只输出已有日期；均未填返回空串。
+    /// ⚠️ 与表单救助原因 TempReliefFormViewModel.FormatTreatRange（同日只显单日）口径不同，勿相互替换。
+    /// </summary>
+    private static string FormatTreatSpanAlways(DateTime start, DateTime end)
+    {
+        var hasStart = start != DateTime.MinValue;
+        var hasEnd = end != DateTime.MinValue;
+        if (hasStart && hasEnd) return $"{start:yyyy年M月d日}至{end:yyyy年M月d日}";
+        if (hasStart) return start.ToString("yyyy年M月d日");
+        if (hasEnd) return end.ToString("yyyy年M月d日");
+        return string.Empty;
+    }
+
+    private static string BuildAccidentDetails(List<TempReliefAccident>? accidents)
+    {
+        if (accidents == null || accidents.Count == 0) return string.Empty;
+        var parts = new List<string>();
+        var idx = 1;
+        foreach (var a in accidents)
+        {
+            var seg = $"{idx}. {a.AccidentType}".Trim();
+            if (a.HappenDate != default) seg += $"（{a.HappenDate:yyyy-MM-dd}）";
+            if (!string.IsNullOrWhiteSpace(a.HappenPlace)) seg += $" {a.HappenPlace}";
+            if (!string.IsNullOrWhiteSpace(a.InjurySituation)) seg += $"，伤亡：{a.InjurySituation}";
+            if (a.PropertyLoss.HasValue) seg += $"，财产损失：{a.PropertyLoss.Value:F2}元";
+            parts.Add(seg);
+            idx++;
+        }
+        return string.Join(Environment.NewLine, parts);
+    }
+
+    private static string BuildEducationDetails(List<TempReliefEducation>? educations)
+    {
+        if (educations == null || educations.Count == 0) return string.Empty;
+        var parts = new List<string>();
+        var idx = 1;
+        foreach (var e in educations)
+        {
+            var seg = $"{idx}. {e.StudentName}（{e.EducationStage}）".Trim();
+            if (!string.IsNullOrWhiteSpace(e.SchoolName)) seg += $" {e.SchoolName}";
+            if (!string.IsNullOrWhiteSpace(e.SchoolDurationDisplay)) seg += $" {e.SchoolDurationDisplay}";
+            if (e.TuitionFee.HasValue) seg += $"，学费：{e.TuitionFee.Value:F2}元";
+            parts.Add(seg);
+            idx++;
+        }
+        return string.Join(Environment.NewLine, parts);
+    }
+
+    /// <summary>现居住地：镇+村+详细地址（门牌号），与档案封面格式一致</summary>
+    private static string BuildLivingAddress(TempReliefApplication app)
+    {
+        return string.Join(" ", new[] { app.FamilyTown, app.Village, app.FamilyDetail }
+            .Where(s => !string.IsNullOrWhiteSpace(s)));
+    }
+
+    /// <summary>
+    /// 享受政策清单（□/√ 勾选格式）：以全量家庭类别为清单，对 PolicyEnjoyed 做模糊匹配
+    /// 输出示例：☑最低生活保障家庭  □特困人员  □最低生活保障边缘家庭 ...
+    /// </summary>
+    private static string BuildPolicyChecklist(string? policyEnjoyed)
+    {
+        var parts = new List<string>();
+        foreach (var option in TempReliefConstants.FamilyCategoryOptions)
+        {
+            var checked_ = !string.IsNullOrWhiteSpace(policyEnjoyed) && policyEnjoyed.Contains(option);
+            parts.Add($"{(checked_ ? "☑" : "□")}{option}");
+        }
+        return string.Join("  ", parts);
+    }
+
+    /// <summary>临时救助原因（验收报告专用）：存库叙述 + 费用明细汇总</summary>
+    private static string BuildAcceptanceReason(TempReliefApplication app)
+    {
+        var reason = app.DifficultyReason ?? string.Empty;
+
+        var costParts = new List<string>();
+        if (app.Diseases != null && app.Diseases.Count > 0)
+        {
+            var distinctDiseases = DistinctDiseasesByExpense(app.Diseases).ToList();
+            var totalMedical = distinctDiseases.Where(d => d.MedicalTotal.HasValue).Sum(d => d.MedicalTotal!.Value);
+            var totalInsurance = distinctDiseases.Where(d => d.InsurancePaid.HasValue).Sum(d => d.InsurancePaid!.Value);
+            var totalSelfPaid = distinctDiseases.Where(d => d.SelfPaid.HasValue).Sum(d => d.SelfPaid!.Value);
+
+            if (totalMedical > 0) costParts.Add($"本次医疗费用总额{totalMedical:F2}元");
+            if (totalInsurance > 0) costParts.Add($"经基本医疗保险及大病保险等报销{totalInsurance:F2}元");
+            if (totalSelfPaid > 0) costParts.Add($"个人自付{totalSelfPaid:F2}元");
+        }
+
+        if (costParts.Count == 0) return reason;
+        var costSummary = string.Join("，", costParts);
+        return string.IsNullOrWhiteSpace(reason) ? costSummary : $"{reason}\n{costSummary}";
+    }
+
+    /// <summary>
+    /// 困难情况摘要（概括句，不含疾病名称/编码/费用明细；点名患病人/受灾人/就学生）：
+    /// 用于入户调查表{申请救助情况说明}和信息公示{困难情况}
+    /// </summary>
+    private static string BuildDifficultySummary(TempReliefApplication app)
+    {
+        var type = (app.DifficultyType ?? string.Empty).Trim();
+        var owners = ResolveDetailOwners(app, type);
+        var distinctOwners = owners
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        // 主语：单一对象点名，多对象或无明细回退"申请人家庭成员"
+        var subject = distinctOwners.Count == 1
+            ? $"申请人家庭成员{distinctOwners[0]}"
+            : "申请人家庭成员";
+
+        return type switch
+        {
+            "疾病" => $"{subject}因患疾病，医疗费用支出较高，造成家庭基本生活暂时陷入困境，特申请临时救助。",
+            "意外灾害" => $"{subject}因遭遇意外灾害，造成家庭基本生活暂时陷入困境，特申请临时救助。",
+            "教育支出" => $"{subject}因教育支出较大，造成家庭基本生活暂时陷入困境，特申请临时救助。",
+            _ => "申请人家庭因突发困难导致基本生活暂时陷入困境，特申请临时救助。"
+        };
+    }
+
+    /// <summary>
+    /// 审核审批表{申请救助原因}精简句：本户家庭类别 + 人口 + 困难概括 + 成员姓名 + 原因词。
+    /// 不含户籍分类与疾病/费用明细（详细内容见入户调查表等其它表格）。
+    /// </summary>
+    private static string BuildAuditReason(TempReliefApplication app, int? familySize)
+    {
+        var category = string.IsNullOrWhiteSpace(app.FamilyCategory) ? "困难群众" : app.FamilyCategory.Trim();
+        var sizeText = familySize is > 0 ? $"{familySize}口人" : string.Empty;
+        var member = ResolveAuditReasonMemberName(app);
+        var reasonWord = (app.DifficultyType ?? string.Empty).Trim() switch
+        {
+            TempReliefConstants.DifficultyTypeEducation => "因学",
+            TempReliefConstants.DifficultyTypeDisease => "因病",
+            TempReliefConstants.DifficultyTypeAccident => "因灾",
+            _ => "因突发困难"
+        };
+        return $"本户{category}{sizeText}，家庭困难，家庭成员{member}{reasonWord}申请临时救助。";
+    }
+
+    /// <summary>
+    /// 精简句成员姓名：按困难类型收集全部明细成员（教育=学生、疾病/意外=患病受灾成员），
+    /// 按出现顺序去重后以「、」连接；明细成员名为空视为申请人本人补申请人姓名；
+    /// 无任何明细成员时回退户主/申请人。
+    /// </summary>
+    private static string ResolveAuditReasonMemberName(TempReliefApplication app)
+    {
+        var type = (app.DifficultyType ?? string.Empty).Trim();
+        IEnumerable<string?>? detailNames = type switch
+        {
+            TempReliefConstants.DifficultyTypeEducation => app.Educations?.Select(e => e.StudentName),
+            TempReliefConstants.DifficultyTypeDisease => app.Diseases?.Select(d => d.MemberName),
+            TempReliefConstants.DifficultyTypeAccident => app.Accidents?.Select(a => a.MemberName),
+            _ => null
+        };
+
+        var names = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        if (detailNames != null)
+        {
+            foreach (var raw in detailNames)
+            {
+                // 明细成员名为空时视为申请人本人
+                var name = string.IsNullOrWhiteSpace(raw) ? app.ApplicantName : raw.Trim();
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                if (seen.Add(name)) names.Add(name);
+            }
+        }
+
+        return names.Count > 0 ? string.Join("、", names) : app.ApplicantName;
+    }
+
+    /// <summary>救助对象姓名：未指定时兜底回退申请人（户主），保证旧数据打印不空</summary>
+    private static string ResolveBeneficiaryName(TempReliefApplication app)
+        => FirstNonEmpty(app.BeneficiaryName, app.ApplicantName);
+
+    /// <summary>取第一个非空字符串（全空返回空串）</summary>
+    private static string FirstNonEmpty(params string?[] values)
+        => values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v)) ?? string.Empty;
+
+    /// <summary>
+    /// 疾病明细按"同一次医疗事件"去重（单人多病例口径）：
+    /// 同一医院 + 同一治疗起止日期 + 同一费用三元组（医疗总额/报销/自付）视为一次住院，
+    /// 该次住院下的多条诊断只计一份费用，避免支出总额/验收报告/月报自付合计重复累计；
+    /// 不同住院（医院或治疗起止不同）即便金额相同也分别计入。
+    /// 唯一事实来源：打印 builder 与月报自付合计共用本方法，禁止各自重抄。
+    /// </summary>
+    public static IEnumerable<TempReliefDisease> DistinctDiseasesByExpense(List<TempReliefDisease>? diseases)
+    {
+        if (diseases == null || diseases.Count == 0)
+            return Enumerable.Empty<TempReliefDisease>();
+
+        return diseases
+            .GroupBy(d => (d.Hospital, d.TreatStartDate, d.TreatEndDate, d.MedicalTotal, d.InsurancePaid, d.SelfPaid))
+            .Select(g => g.First());
+    }
+}

@@ -1,0 +1,71 @@
+# NewCosmos 彩票 Worker 单机编排
+# 端口只绑 127.0.0.1:8790（供同机 NewCosmos.Server 调用），不映射公网。
+# 使用：cp .env.example .env && 编辑 .env && docker compose up -d --build
+
+services:
+  lottery:
+    build:
+      context: ../../src/NewCosmos.LotteryWorker
+      dockerfile: ../../deploy/lottery/Dockerfile
+    image: newcosmos/lottery-worker:0.1.0
+    container_name: newcosmos-lottery
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:8790:8790"
+
+    environment:
+      NC_DB_HOST: ${NC_DB_HOST:-host.docker.internal}
+      NC_DB_PORT: ${NC_DB_PORT:-5432}
+      NC_DB_NAME: ${NC_DB_NAME:-new_cosmos}
+      NC_DB_USER: ${NC_DB_USER:-new_cosmos}
+      NC_DB_PASSWORD: ${NC_DB_PASSWORD:-}
+      NC_LOTTERY_MODEL_DIR: /models
+      NC_LOTTERY_JOBS: /jobs
+      NC_LOTTERY_MAX_MEMORY_MB: ${NC_LOTTERY_MAX_MEMORY_MB:-1536}
+      NC_LOTTERY_DEFAULT_WINDOW: ${NC_LOTTERY_DEFAULT_WINDOW:-73}
+      NC_LOTTERY_MAX_PENDING: ${NC_LOTTERY_MAX_PENDING:-32}
+      NC_LOTTERY_TRAIN_TIMEOUT_SEC: ${NC_LOTTERY_TRAIN_TIMEOUT_SEC:-21600}
+      NC_LOTTERY_PREDICT_TIMEOUT_SEC: ${NC_LOTTERY_PREDICT_TIMEOUT_SEC:-1800}
+
+    # PostgreSQL 在宿主机（10.110.0.2）时使用；若 PG 也在 compose 网络中，改 NC_DB_HOST 为服务名
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      - ./data/models:/models
+      - ./data/jobs:/jobs
+
+    # 需求：memory 2g / cpus 1.5。CPU 预留用于保证 API 响应，不被训练饿死。
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2g
+        reservations:
+          cpus: "0.25"
+          memory: 256m
+
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/health', timeout=4)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

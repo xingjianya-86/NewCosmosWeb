@@ -1,0 +1,63 @@
+# =============================================================================
+# NewCosmos.Server — 运行镜像（只接收已发布产物）
+# -----------------------------------------------------------------------------
+# 构建上下文 = /srv/newcosmos/server（或仓库 deploy/app-2 的父级布局），要求：
+#   <context>/publish/NewCosmos.Server.dll
+#   <context>/publish/...（其余发布文件）
+# 本仓库里由 deploy/scripts/deploy-server.ps1 先在本地 dotnet publish，
+# 再把 publish/ 上传到服务器后构建；不要在服务器上直接编译源码。
+#
+# 手动构建：
+#   dotnet publish src/NewCosmos.Server/NewCosmos.Server.csproj \
+#       -c Release -r linux-x64 --self-contained false \
+#       -p:UseAppHost=false -o deploy/app-2/publish
+#   docker build -f deploy/app-2/Dockerfile.server \
+#       --build-arg INSTALL_CJK_FONTS=true -t newcosmos-server:local deploy/app-2
+#
+# 说明：
+#   - 基于 aspnet:10.0（Debian），不要换 Alpine（字体/时区/ICU 兼容性差）。
+#   - 非 root 运行，UID/GID 固定 10001，挂载目录需对应 chown。
+#   - fonts-noto-cjk 体积大（约 100MB+），仅在服务端需要生成/预览中文
+#     文书或图片时开启：--build-arg INSTALL_CJK_FONTS=true
+# =============================================================================
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+
+ARG INSTALL_CJK_FONTS=false
+
+ENV TZ=Asia/Shanghai \
+    ASPNETCORE_ENVIRONMENT=Production \
+    ASPNETCORE_URLS=http://0.0.0.0:8787 \
+    DOTNET_RUNNING_IN_CONTAINER=true \
+    DOTNET_gcServer=0 \
+    DOTNET_GCHeapHardLimit=0xC0000000 \
+    DOTNET_EnableDiagnostics=0 \
+    DOTNET_TieredPGO=1
+
+# curl 供 healthcheck / 运维排查；tzdata 保证 Asia/Shanghai 正确。
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl ca-certificates tzdata; \
+    if [ "$INSTALL_CJK_FONTS" = "true" ]; then \
+        apt-get install -y --no-install-recommends fonts-noto-cjk; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    groupadd --gid 10001 newcosmos; \
+    useradd --uid 10001 --gid newcosmos --create-home --home-dir /app \
+            --shell /usr/sbin/nologin newcosmos; \
+    install -d -o newcosmos -g newcosmos -m 0750 \
+        /srv/newcosmos/backups \
+        /srv/newcosmos/logs
+
+WORKDIR /app
+
+# publish/ 必须先由 dotnet publish 生成；缺失时构建会失败而不是带空目录上线。
+COPY --chown=10001:10001 publish/ /app/
+
+USER 10001:10001
+
+EXPOSE 8787
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD ["curl", "-fsS", "http://127.0.0.1:8787/health"]
+
+ENTRYPOINT ["dotnet", "NewCosmos.Server.dll"]

@@ -1,0 +1,221 @@
+namespace NewCosmos.Helpers;
+
+/// <summary>
+/// 通用输出路径生成。
+/// 目录结构: {输出根}/{分类}/{日期}/{主体名_主体ID}/{文件类型_时间戳}.{扩展名}
+/// 输出根由 config/document_output.yaml 的 output.base_directory 决定（App 启动时 Configure 注入）；
+/// 未 Configure 时回退历史相对目录"输出"，保持旧行为。
+/// 预览临时文件统一落 {输出根}/{temp 子目录}（清理规则见 yaml 的 cleanup 节）。
+/// </summary>
+public static class OutputPathHelper
+{
+    /// <summary>历史相对输出根：Configure 缺省时的回退值，同时是迁移源目录</summary>
+    public const string LegacyOutputRoot = "输出";
+
+    private static string? _outputRoot;
+    private static string _tempSubdirectory = "temp";
+
+    /// <summary>
+    /// 启动时注入输出根与预览临时子目录（App.CreateWindow 调用，见 IConfigService.GetDocumentOutputOptions）
+    /// </summary>
+    public static void Configure(string outputRoot, string tempSubdirectory = "temp")
+    {
+        if (!string.IsNullOrWhiteSpace(outputRoot))
+            _outputRoot = Path.GetFullPath(outputRoot);
+        if (!string.IsNullOrWhiteSpace(tempSubdirectory))
+            _tempSubdirectory = tempSubdirectory;
+    }
+
+    /// <summary>当前输出根（绝对路径；未 Configure 时回退相对"输出"）</summary>
+    public static string OutputRoot => _outputRoot ?? Path.GetFullPath(LegacyOutputRoot);
+
+    /// <summary>历史输出根（绝对路径），供一次性迁移定位旧文件</summary>
+    public static string LegacyRoot => Path.GetFullPath(LegacyOutputRoot);
+
+    /// <summary>
+    /// 预览临时目录（{输出根}/{temp 子目录}），不存在时自动创建。
+    /// 预览 PDF 落这里，由启动清理按 yaml cleanup 规则回收。
+    /// </summary>
+    public static string GetTempDirectory()
+    {
+        var dir = Path.Combine(OutputRoot, _tempSubdirectory);
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    /// <summary>
+    /// 获取完整输出文件路径
+    /// {输出根}/{category}/{date}/{subjectName_subjectId}/{fileType}_{timestamp}.{extension}
+    /// </summary>
+    public static string GetFilePath(
+        string category,
+        string subjectName,
+        string subjectId,
+        string fileType,
+        string extension,
+        DateTime? date = null,
+        string? timestamp = null)
+    {
+        var effectiveDate = date ?? DateTime.Today;
+        // 历史 Bug："N2" 是数值格式符，DateTime.ToString("N2") 输出字面量 "N2"——
+        // 导致日期目录恒为 "N2"、文件名无时间戳，同人同模板每次打印互相覆盖，
+        // 且打印记录 file_path 全部指向同一个被覆盖的文件（打印留痕失效）。
+        var effectiveTimestamp = timestamp ?? DateTime.Now.ToString("yyyyMMddHHmmssfff");
+
+        var dateStr = effectiveDate.ToString("yyyy-MM-dd");
+        var subjectDir = $"{subjectName}_{subjectId}";
+        var fileName = $"{fileType}_{effectiveTimestamp}{extension}";
+
+        var fullPath = Path.Combine(OutputRoot, category, dateStr, subjectDir, fileName);
+        return Path.GetFullPath(fullPath);
+    }
+
+    /// <summary>
+    /// 获取同目录下其他扩展名的文件路径
+    /// </summary>
+    public static string GetSiblingPath(string sourcePath, string newExtension)
+    {
+        var dir = Path.GetDirectoryName(sourcePath) ?? ".";
+        var fileName = Path.GetFileNameWithoutExtension(sourcePath);
+        return Path.Combine(dir, $"{fileName}{newExtension}");
+    }
+
+    /// <summary>
+    /// B 类·分类目录：{输出根}\{分类}\（核查报告/档案照片/彩票预测等平铺落文件的分类），自动创建。
+    /// 分类名取 <see cref="Constants.OutputCategories"/>，禁止调用方自拼 OutputRoot。
+    /// </summary>
+    public static string GetCategoryDirectory(string category)
+    {
+        var dir = Path.GetFullPath(Path.Combine(OutputRoot, category));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    /// <summary>
+    /// B 类·期间目录：{输出根}\{分类}\{期间}\（月报表/高龄月报/公示文件等按期组织），自动创建。
+    /// 期间格式由调用方给定（月报 yyyyMM、公示 yyyy-MM），分类名取 <see cref="Constants.OutputCategories"/>。
+    /// </summary>
+    public static string GetPeriodDirectory(string category, string period)
+    {
+        if (string.IsNullOrWhiteSpace(period))
+            throw new ArgumentException("期间不能为空（B 类目录需要 yyyyMM / yyyy-MM 等期间段）", nameof(period));
+
+        var dir = Path.GetFullPath(Path.Combine(OutputRoot, category, period));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    /// <summary>
+    /// 确保输出目录存在
+    /// </summary>
+    public static string EnsureDirectoryExists(
+        string category,
+        string subjectName,
+        string subjectId,
+        DateTime? date = null)
+    {
+        var effectiveDate = date ?? DateTime.Today;
+        var dateStr = effectiveDate.ToString("yyyy-MM-dd");
+        var subjectDir = $"{subjectName}_{subjectId}";
+
+        var dirPath = Path.Combine(OutputRoot, category, dateStr, subjectDir);
+        var fullPath = Path.GetFullPath(dirPath);
+
+        if (!Directory.Exists(fullPath))
+        {
+            Directory.CreateDirectory(fullPath);
+        }
+
+        return fullPath;
+    }
+
+    /// <summary>
+    /// 获取主体目录路径（不含文件名）
+/// </summary>
+    public static string GetSubjectDirectory(
+        string category,
+        string subjectName,
+        string subjectId,
+        DateTime? date = null)
+    {
+        var effectiveDate = date ?? DateTime.Today;
+        var dateStr = effectiveDate.ToString("yyyy-MM-dd");
+        var subjectDir = $"{subjectName}_{subjectId}";
+
+        var fullPath = Path.Combine(OutputRoot, category, dateStr, subjectDir);
+        return Path.GetFullPath(fullPath);
+    }
+
+    /// <summary>
+    /// 获取业务类型对应的中文分类名（输出目录名 + UI 业务类型显示名共用）。
+    /// 登记范围以 <see cref="Constants.PrintBusinessTypes"/> 与 PrintExecuteService.PrintPermissionMap
+    /// 的键集为准——新增业务打印类型时必须在此同步登记，否则会产出英文目录。
+    /// 未登记类型一律落「未分类」并告警（原实现原样返回英文，已实际产出
+    /// AssetVerificationMonthlyReport / Recovery 两个英文目录，见输出路径规范）。
+    /// </summary>
+    public static string GetCategoryDisplayName(string businessType)
+    {
+        if (string.IsNullOrWhiteSpace(businessType))
+            return UnregisteredCategory;
+
+        var display = businessType switch
+        {
+            "AssetVerification" => "资产核查",
+            "FamilyApplication" => "社会救助申请",
+            "MonthlyReport" => "月报表",
+            "AssetVerificationMonthlyReport" => "资产核查月报表", // 与 CategoryDisplayConverter 同名
+            "EconomicReview" => "经济复核",
+            "ArchiveQuery" => "档案查询",
+            "TemporaryAssistance" => "临时救助",
+            "TempRelief" => "临时救助",
+            "ElderlyBenefits" => "普惠高龄",
+            "LowIncomeProof" => "低保证明",
+            "DeathStatement" => "死亡情况说明",
+            "NearRelative" => "近亲属备案", // 近亲属备案独立输出域（NearRelativeConstants.BusinessType）
+            "Recovery" => "追缴", // 与 ArchiveCategoryResolver 的分类名一致
+            "ArchivePhoto" => "档案照片", // 与 ArchivePhotoQueryViewModel 导出目录同名
+            "DynamicRecord" or "DynamicManagementRecord" => "动态管理档案", // 与 DynamicManagementRecordService.OutputCategory 同名
+            _ => string.Empty
+        };
+
+        if (display.Length == 0)
+        {
+            Serilog.Log.Warning(
+                "[OutputPathHelper] 业务类型 {BusinessType} 未登记中文分类名，输出目录与显示名回退为「{Category}」；请在 OutputPathHelper.GetCategoryDisplayName 补登记",
+                businessType, UnregisteredCategory);
+            return UnregisteredCategory;
+        }
+
+        return display;
+    }
+
+    /// <summary>未登记业务类型的兜底分类名（保证不产出英文目录）</summary>
+    private const string UnregisteredCategory = "未分类";
+
+    /// <summary>
+    /// 判断两路径是否存在包含关系（任一方向，含同一路径）——输出根切换前的迁移安全校验：
+    /// 旧根与新根互嵌套时，"复制旧根到新根"会变成自复制（枚举器持续看到新写入文件）→ 无限循环，必须拒绝。
+    /// </summary>
+    public static bool ArePathsNested(string pathA, string pathB)
+    {
+        var a = TrimSeparators(Path.GetFullPath(pathA));
+        var b = TrimSeparators(Path.GetFullPath(pathB));
+
+        if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return IsUnder(a, b) || IsUnder(b, a);
+    }
+
+    /// <summary>child 是否位于 parent 之内（不含相等）</summary>
+    private static bool IsUnder(string parent, string child)
+    {
+        var rel = Path.GetRelativePath(parent, child);
+        if (rel == "." || Path.IsPathRooted(rel))
+            return false;
+        return !rel.StartsWith("..", StringComparison.Ordinal);
+    }
+
+    private static string TrimSeparators(string path) =>
+        path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+}

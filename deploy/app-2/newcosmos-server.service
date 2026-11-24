@@ -1,0 +1,73 @@
+# =============================================================================
+# NewCosmos.Server — systemd 单元（不使用 Docker 时）
+# -----------------------------------------------------------------------------
+# 安装：
+#   sudo install -m 0644 deploy/app-2/newcosmos-server.service \
+#        /etc/systemd/system/newcosmos-server.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now newcosmos-server
+#
+# 前置条件：
+#   - .NET 10 ASP.NET Core Runtime 已安装（/usr/bin/dotnet）
+#   - 系统用户 newcosmos 存在：
+#       sudo groupadd --system newcosmos
+#       sudo useradd --system --gid newcosmos --home-dir /srv/newcosmos \
+#            --shell /usr/sbin/nologin newcosmos
+#   - /srv/newcosmos/server/publish 下有 NewCosmos.Server.dll
+#   - /srv/newcosmos/server/server.env 由 server.env.example 复制并 chmod 600
+#   - /srv/newcosmos/backups、/srv/newcosmos/logs 归 newcosmos 可写
+#
+# 监听 127.0.0.1:8787（本机 nginx）与 10.110.0.2:8787（.1 认证反代）；
+# 防火墙只允许 10.110.0.1 访问 10.110.0.2:8787，禁止 0.0.0.0。
+# =============================================================================
+[Unit]
+Description=NewCosmos Server (ASP.NET Core API)
+Documentation=file:///srv/newcosmos/server/README.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=newcosmos
+Group=newcosmos
+WorkingDirectory=/srv/newcosmos/server/publish
+
+# EnvironmentFile 会覆盖 Environment=，因此环境文件里不要写 ASPNETCORE_URLS。
+EnvironmentFile=/srv/newcosmos/server/server.env
+# 两处都必须能连：.1 边缘认证反代走 10.110.0.2:8787，.2 本机 nginx 走 127.0.0.1:8787。
+# 防火墙只允许 10.110.0.1 访问 10.110.0.2:8787。
+Environment="ASPNETCORE_URLS=http://127.0.0.1:8787;http://10.110.0.2:8787"
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=DOTNET_gcServer=0
+Environment=DOTNET_GCHeapHardLimit=0xC0000000
+
+ExecStartPre=/usr/bin/test -f /srv/newcosmos/server/publish/NewCosmos.Server.dll
+ExecStart=/usr/bin/dotnet /srv/newcosmos/server/publish/NewCosmos.Server.dll
+
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+SyslogIdentifier=newcosmos-server
+StandardOutput=journal
+StandardError=journal
+UMask=0027
+LimitNOFILE=65535
+
+# ---- 基础加固 --------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+# 不要开启 MemoryDenyWriteExecute：.NET JIT 需要可写可执行内存。
+
+[Install]
+WantedBy=multi-user.target
