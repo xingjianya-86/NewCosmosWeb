@@ -34,7 +34,10 @@ public sealed class ApplicationFormService(
     IGuaranteeAmountService guaranteeAmountService,
     IFamilyMemberService familyMembers,
     ISupporterService supporters,
+    ICaregiverService caregivers,
     IHouseholdSurveyService householdSurveys,
+    IVisitRecordService visitRecords,
+    IEconomicDetailService economicDetails,
     DataScopeFilterBuilder dataScope,
     IDatabaseService database,
     ILoggerService logger)
@@ -74,6 +77,25 @@ public sealed class ApplicationFormService(
             return Result.Failure<ApplicationFormDto>(surveyResult.ErrorCode!, surveyResult.Message!);
         }
 
+        var caregiversResult = await caregivers.GetByApplicationIdAsync(applicationId, ct);
+        if (caregiversResult.IsFailure)
+        {
+            return Result.Failure<ApplicationFormDto>(caregiversResult.ErrorCode!, caregiversResult.Message!);
+        }
+
+        var visitsResult = await visitRecords.GetListByApplicationIdAsync(applicationId, ct);
+        if (visitsResult.IsFailure)
+        {
+            return Result.Failure<ApplicationFormDto>(visitsResult.ErrorCode!, visitsResult.Message!);
+        }
+
+        var economicDetailsResult = await economicDetails.LoadAllAsync(applicationId, ct);
+        if (economicDetailsResult.IsFailure)
+        {
+            return Result.Failure<ApplicationFormDto>(
+                economicDetailsResult.ErrorCode!, economicDetailsResult.Message!);
+        }
+
         var dto = new ApplicationFormDto(
             app.Id,
             app.ApplicationNo ?? string.Empty,
@@ -89,7 +111,10 @@ public sealed class ApplicationFormService(
             (supportersResult.Value ?? []).Select(ToSupporterDto).ToList(),
             ToEconomyDto(app),
             ToSurveyDto(surveyResult.Value),
-            ToClassificationDto(app));
+            ToClassificationDto(app),
+            ToEconomicDetailsDto(economicDetailsResult.Value),
+            caregiversResult.Value ?? [],
+            visitsResult.Value ?? []);
 
         return Result.Success(dto);
     }
@@ -113,6 +138,7 @@ public sealed class ApplicationFormService(
         }
         ApplyHeadMemberToApplication(application, members);
         ApplyEconomy(application, request.Economy, familySize, totals);
+        ApplyEconomicDetailsTotals(application, request.EconomicDetails, request.Economy, familySize);
 
         if (string.IsNullOrWhiteSpace(application.ApplicantName)
             || string.IsNullOrWhiteSpace(application.ApplicantIdCard))
@@ -228,6 +254,7 @@ public sealed class ApplicationFormService(
             ? CalculateIncome(economy, familySize)
             : null;
         ApplyEconomy(application, request.Economy, familySize, totals);
+        ApplyEconomicDetailsTotals(application, request.EconomicDetails, request.Economy, familySize);
 
         if (string.IsNullOrWhiteSpace(application.ApplicantName)
             || string.IsNullOrWhiteSpace(application.ApplicantIdCard))
@@ -415,6 +442,72 @@ public sealed class ApplicationFormService(
             ApplicationStatusCodes.APPROVED, WorkflowSteps.ARCHIVED));
     }
 
+    // ───────────────────────────── 回访补录 ─────────────────────────────
+
+    /// <summary>
+    /// 补录一条回访。申请必须存在且在当前用户数据范围内；applicant_id_card 由
+    /// IVisitRecordService.AddAsync 从主表同源带出，不接受前端传入。
+    /// </summary>
+    public async Task<Result<ApplicationVisitCreatedResult>> AddVisitAsync(
+        long applicationId,
+        ApplicationVisitCreateRequest request,
+        int userId,
+        string operatorName,
+        CancellationToken ct = default)
+    {
+        var appResult = await LoadInScopeAsync(applicationId, userId, ct);
+        if (appResult.IsFailure)
+        {
+            return Result.Failure<ApplicationVisitCreatedResult>(appResult.ErrorCode, appResult.Message);
+        }
+
+        var visitAt = ParseDate(request.VisitAt);
+        if (visitAt is null)
+        {
+            if (!string.IsNullOrWhiteSpace(request.VisitAt))
+            {
+                return Result.Failure<ApplicationVisitCreatedResult>(
+                    ErrorCodes.VALIDATION_FAILED, "回访时间格式无效");
+            }
+
+            visitAt = DateTime.Today;
+        }
+
+        if (string.IsNullOrWhiteSpace(request.VisitResult))
+        {
+            return Result.Failure<ApplicationVisitCreatedResult>(
+                ErrorCodes.VALIDATION_FAILED, "回访情况不能为空");
+        }
+
+        var record = new VisitRecord
+        {
+            ApplicationId = applicationId,
+            VisitAt = visitAt.Value,
+            VisitBy = string.IsNullOrWhiteSpace(request.VisitBy)
+                ? operatorName
+                : request.VisitBy.Trim(),
+            VisitResult = request.VisitResult.Trim(),
+            VisitRemark = request.VisitRemark ?? string.Empty
+        };
+
+        var addResult = await visitRecords.AddAsync(record, operatorName, ct);
+        if (addResult.IsFailure)
+        {
+            logger.Warn(
+                $"低收入表单回访补录失败: ApplicationId={applicationId}, Operator={operatorName}, " +
+                $"{addResult.ErrorCode} {addResult.Message}");
+            return Result.Failure<ApplicationVisitCreatedResult>(
+                addResult.ErrorCode!, addResult.Message!);
+        }
+
+        logger.LogBusiness("低收入表单回访补录",
+            ("ApplicationId", applicationId),
+            ("VisitRecordId", addResult.Value),
+            ("Operator", operatorName));
+
+        return Result.Success(new ApplicationVisitCreatedResult(addResult.Value));
+    }
+
     // ───────────────────────────── 删除草稿 ─────────────────────────────
 
     public async Task<Result> DeleteAsync(
@@ -505,13 +598,16 @@ public sealed class ApplicationFormService(
         string operatorName,
         CancellationToken ct)
     {
+        var memberIdMap = new Dictionary<long, long>();
         if (request.Members is { } memberDtos)
         {
             var saveMembers = await SaveMembersAsync(applicationId, memberDtos, request.Basic, ct);
             if (saveMembers.IsFailure)
             {
-                return saveMembers;
+                return Result.Failure(saveMembers.ErrorCode, saveMembers.Message);
             }
+
+            memberIdMap = saveMembers.Value;
         }
 
         // 户主行由主表单向维护（成员表不参与全删全插），每次保存后同步一次，幂等。
@@ -539,10 +635,176 @@ public sealed class ApplicationFormService(
             }
         }
 
+        if (request.EconomicDetails is { } detailsDto)
+        {
+            var saveDetails = await SaveEconomicDetailsAsync(
+                applicationId, detailsDto, memberIdMap, ct);
+            if (saveDetails.IsFailure)
+            {
+                return saveDetails;
+            }
+        }
+
+        if (request.Caregivers is { } caregiverDtos)
+        {
+            var saveCaregivers = await SaveCaregiversAsync(applicationId, caregiverDtos, memberIdMap, ct);
+            if (saveCaregivers.IsFailure)
+            {
+                return saveCaregivers;
+            }
+        }
+
         return Result.Success();
     }
 
-    private async Task<Result> SaveMembersAsync(
+    /// <summary>
+    /// 经济明细整批重写。表单暂无土地确权组，先读取旧组再原样回写，
+    /// 避免 SaveAllAsync 的“全删全插”把确权记录/共有人清空。
+    /// </summary>
+    private async Task<Result> SaveEconomicDetailsAsync(
+        long applicationId,
+        ApplicationFormEconomicDetailsDto dto,
+        IReadOnlyDictionary<long, long> memberIdMap,
+        CancellationToken ct)
+    {
+        var existingResult = await economicDetails.LoadAllAsync(applicationId, ct);
+        if (existingResult.IsFailure)
+        {
+            return Result.Failure(existingResult.ErrorCode!, existingResult.Message!);
+        }
+
+        var landGroups = existingResult.Value.LandConfirmationGroups ?? [];
+
+        // 明细行统一归到当前申请；成员行全删全插换了 id，明细的 member_id 同步迁移。
+        long MapMember(long memberId)
+            => memberId > 0 && memberIdMap.TryGetValue(memberId, out var newId) ? newId : memberId;
+
+        foreach (var item in dto.LaborIncomes ?? [])
+        {
+            item.ApplicationId = applicationId;
+            item.MemberId = MapMember(item.MemberId);
+        }
+        foreach (var item in dto.BusinessIncomes ?? [])
+        {
+            item.ApplicationId = applicationId;
+            item.MemberId = MapMember(item.MemberId);
+        }
+        foreach (var item in dto.PropertyIncomes ?? [])
+        {
+            item.ApplicationId = applicationId;
+            item.MemberId = MapMember(item.MemberId);
+        }
+        foreach (var item in dto.TransferIncomes ?? [])
+        {
+            item.ApplicationId = applicationId;
+            item.MemberId = MapMember(item.MemberId);
+        }
+        foreach (var item in dto.RigidExpenditures ?? [])
+        {
+            item.ApplicationId = applicationId;
+            item.MemberId = MapMember(item.MemberId);
+        }
+        foreach (var item in dto.FamilyProperties ?? [])
+        {
+            item.ApplicationId = applicationId;
+            item.MemberId = MapMember(item.MemberId);
+        }
+        foreach (var item in dto.Vehicles ?? [])
+        {
+            item.ApplicationId = applicationId;
+            item.MemberId = MapMember(item.MemberId);
+        }
+        foreach (var item in dto.Machineries ?? [])
+        {
+            item.ApplicationId = applicationId;
+            item.MemberId = MapMember(item.MemberId);
+        }
+        foreach (var item in dto.OtherIncomes ?? []) item.ApplicationId = applicationId;
+        foreach (var item in dto.Subsidies ?? []) item.ApplicationId = applicationId;
+        foreach (var item in dto.BreedingIncomes ?? []) item.ApplicationId = applicationId;
+        foreach (var item in dto.FinancialAssets ?? []) item.ApplicationId = applicationId;
+        foreach (var item in dto.LandRegistrations ?? []) item.ApplicationId = applicationId;
+
+        var saveResult = await economicDetails.SaveAllAsync(
+            applicationId,
+            dto.LaborIncomes ?? [],
+            dto.BusinessIncomes ?? [],
+            dto.PropertyIncomes ?? [],
+            dto.TransferIncomes ?? [],
+            dto.OtherIncomes ?? [],
+            dto.Subsidies ?? [],
+            dto.BreedingIncomes ?? [],
+            dto.RigidExpenditures ?? [],
+            dto.FamilyProperties ?? [],
+            dto.Vehicles ?? [],
+            dto.Machineries ?? [],
+            dto.FinancialAssets ?? [],
+            dto.LandRegistrations ?? [],
+            landGroups,
+            ct);
+
+        return saveResult.IsFailure
+            ? Result.Failure(saveResult.ErrorCode!, saveResult.Message!)
+            : Result.Success();
+    }
+
+    private async Task<Result> SaveCaregiversAsync(
+        long applicationId,
+        List<Caregiver> caregiverDtos,
+        IReadOnlyDictionary<long, long> memberIdMap,
+        CancellationToken ct)
+    {
+        // 不直接回写请求实体：Caregiver 的 Selected* 绑定属性 setter 会联动清空
+        // EmploymentStatus/MainIncomeSource（GET 回传的 null 选项），这里只复制落库列。
+        var list = new List<Caregiver>(caregiverDtos.Count);
+        foreach (var dto in caregiverDtos)
+        {
+            if (dto is null)
+            {
+                continue;
+            }
+
+            list.Add(new Caregiver
+            {
+                ApplicationId = applicationId,
+                // 共同生活成员保存时全删全插会换新 id，按旧→新映射迁移被照料人引用；
+                // 户主行不重建，其旧 id 继续有效（映射表里没有则原样保留）。
+                CaredMemberId = dto.CaredMemberId > 0
+                                 && memberIdMap.TryGetValue(dto.CaredMemberId, out var newMemberId)
+                    ? newMemberId
+                    : dto.CaredMemberId,
+                Name = dto.Name ?? string.Empty,
+                IdCard = (dto.IdCard ?? string.Empty).Trim(),
+                Phone = dto.Phone ?? string.Empty,
+                Relationship = dto.Relationship ?? string.Empty,
+                Gender = NormalizeGender(dto.Gender),
+                Age = dto.Age,
+                Ethnicity = dto.Ethnicity ?? string.Empty,
+                MaritalStatus = dto.MaritalStatus ?? string.Empty,
+                HukouType = dto.HukouType ?? string.Empty,
+                EducationLevel = dto.EducationLevel ?? string.Empty,
+                PoliticalStatus = dto.PoliticalStatus ?? string.Empty,
+                HealthStatus = dto.HealthStatus ?? string.Empty,
+                EmploymentStatus = dto.EmploymentStatus ?? string.Empty,
+                MainIncomeSource = dto.MainIncomeSource ?? string.Empty,
+                WorkUnit = dto.WorkUnit ?? string.Empty,
+                Position = dto.Position ?? string.Empty,
+                Address = dto.Address ?? string.Empty,
+                BankName = dto.BankName ?? string.Empty,
+                BankAccount = dto.BankAccount ?? string.Empty
+            });
+        }
+
+        var saveResult = await caregivers.SaveAsync(applicationId, list, ct);
+        return saveResult.IsFailure
+            ? Result.Failure(saveResult.ErrorCode!, saveResult.Message!)
+            : Result.Success();
+    }
+
+    /// <summary>
+    /// 全删全插共同生活成员，返回“旧成员 id → 新成员 id”映射，供照料人 cared_member_id 迁移。
+    /// </summary>
+    private async Task<Result<Dictionary<long, long>>> SaveMembersAsync(
         long applicationId,
         List<ApplicationFormMemberDto> memberDtos,
         ApplicationFormBasicDto? basic,
@@ -553,7 +815,8 @@ public sealed class ApplicationFormService(
         var existingResult = await familyMembers.GetByApplicationIdAsync(applicationId, ct);
         if (existingResult.IsFailure)
         {
-            return Result.Failure(existingResult.ErrorCode!, existingResult.Message!);
+            return Result.Failure<Dictionary<long, long>>(
+                existingResult.ErrorCode!, existingResult.Message!);
         }
 
         var existingById = new Dictionary<long, FamilyMember>();
@@ -575,7 +838,8 @@ public sealed class ApplicationFormService(
         var deleteResult = await familyMembers.DeleteNonSupportByApplicationIdAsync(applicationId, ct);
         if (deleteResult.IsFailure)
         {
-            return Result.Failure(deleteResult.ErrorCode!, deleteResult.Message!);
+            return Result.Failure<Dictionary<long, long>>(
+                deleteResult.ErrorCode!, deleteResult.Message!);
         }
 
         var seenIdCards = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -636,16 +900,31 @@ public sealed class ApplicationFormService(
             requests.Add(createRequest);
         }
 
-        if (requests.Count > 0)
+        if (requests.Count == 0)
         {
-            var addResult = await familyMembers.AddRangeAsync(requests, ct);
-            if (addResult.IsFailure)
+            return Result.Success(new Dictionary<long, long>());
+        }
+
+        var addResult = await familyMembers.AddRangeAsync(requests, ct);
+        if (addResult.IsFailure)
+        {
+            return Result.Failure<Dictionary<long, long>>(
+                addResult.ErrorCode!, addResult.Message!);
+        }
+
+        // 旧行已删除，按身份证把旧 id 映射到新插入的 id（户主行未重建，不在此表）。
+        var newIdByIdCard = addResult.Value;
+        var idMap = new Dictionary<long, long>();
+        foreach (var (oldId, oldMember) in existingById)
+        {
+            var idCard = (oldMember.IdCard ?? string.Empty).Trim();
+            if (idCard.Length > 0 && newIdByIdCard.TryGetValue(idCard, out var newId))
             {
-                return Result.Failure(addResult.ErrorCode!, addResult.Message!);
+                idMap[oldId] = newId;
             }
         }
 
-        return Result.Success();
+        return Result.Success(idMap);
     }
 
     private async Task<Result> SaveSupportersAsync(
@@ -757,7 +1036,10 @@ public sealed class ApplicationFormService(
             || !string.IsNullOrWhiteSpace(dto.SurveyorOrganization)
             || !string.IsNullOrWhiteSpace(dto.ApplicationReason)
             || !string.IsNullOrWhiteSpace(dto.ApplicationReasonDetail)
-            || !string.IsNullOrWhiteSpace(dto.SurveyNotes);
+            || !string.IsNullOrWhiteSpace(dto.SurveyNotes)
+            || !string.IsNullOrWhiteSpace(dto.RespondentName)
+            || !string.IsNullOrWhiteSpace(dto.RespondentRelation)
+            || !string.IsNullOrWhiteSpace(dto.SurveyConclusion);
 
         // 空调查块不落库：避免把 0001-01-01 写成调查日期，影响批次锚点。
         if (!hasContent)
@@ -775,11 +1057,17 @@ public sealed class ApplicationFormService(
             ApplicationReason = dto.ApplicationReason ?? string.Empty,
             ApplicationReasonDetail = dto.ApplicationReasonDetail ?? string.Empty,
             SurveyNotes = dto.SurveyNotes ?? string.Empty,
-            RespondentName = existing?.RespondentName ?? string.Empty,
-            RespondentRelation = existing?.RespondentRelation ?? string.Empty,
-            SurveyConclusion = string.IsNullOrWhiteSpace(existing?.SurveyConclusion)
-                ? "属实"
-                : existing!.SurveyConclusion
+            RespondentName = string.IsNullOrWhiteSpace(dto.RespondentName)
+                ? existing?.RespondentName ?? string.Empty
+                : dto.RespondentName.Trim(),
+            RespondentRelation = string.IsNullOrWhiteSpace(dto.RespondentRelation)
+                ? existing?.RespondentRelation ?? string.Empty
+                : dto.RespondentRelation.Trim(),
+            SurveyConclusion = string.IsNullOrWhiteSpace(dto.SurveyConclusion)
+                ? string.IsNullOrWhiteSpace(existing?.SurveyConclusion)
+                    ? "属实"
+                    : existing!.SurveyConclusion
+                : dto.SurveyConclusion.Trim()
         };
 
         var saveResult = await householdSurveys.SaveAsync(applicationId, survey, ct);
@@ -835,6 +1123,17 @@ public sealed class ApplicationFormService(
         application.ApplicationReason = basic.ApplicationReason ?? string.Empty;
         application.ApplicationReasonDetail = basic.ApplicationReasonDetail ?? string.Empty;
 
+        // Step1 扩展字段（户主本人）。成员块若同时携带户主行，ApplyHeadMemberToApplication
+        // 会在其后覆盖健康/疾病/残疾三项，保证两处编辑口径一致。
+        application.EducationLevel = basic.EducationLevel ?? string.Empty;
+        application.MaritalStatus = basic.MaritalStatus ?? string.Empty;
+        application.PoliticalStatus = basic.PoliticalStatus ?? string.Empty;
+        application.HealthStatus = ToCoreHealthStatus(basic.HealthStatus);
+        application.DiseaseName = basic.DiseaseName ?? string.Empty;
+        application.DisabilityType = ToCoreDisabilityType(basic.DisabilityType);
+        application.DisabilityLevel = ToCoreDisabilityLevel(basic.DisabilityLevel);
+        application.MedicalSelfPaid12m = basic.MedicalSelfPaid12m;
+
         // basic.Remark 在主表没有对应列（ApplicationColumns.Full 已对 pg_dump 校验），
         // 契约保留字段以兼容前端模型，但服务端不持久化。
     }
@@ -875,6 +1174,25 @@ public sealed class ApplicationFormService(
         application.DisabilityLevel = ToCoreDisabilityLevel(head.DisabilityLevel);
         application.DiseaseName = head.DiseaseName ?? string.Empty;
         application.IsSevereDisease = head.IsSevereDisease;
+
+        // Step2 户主卡与 Step1 共用同一人：户主卡有值的新增字段回写主表，
+        // 避免“只在成员卡修改”时因户主行不参与全删全插而丢失。
+        if (!string.IsNullOrWhiteSpace(head.EducationLevel))
+        {
+            application.EducationLevel = head.EducationLevel.Trim();
+        }
+        if (!string.IsNullOrWhiteSpace(head.MaritalStatus))
+        {
+            application.MaritalStatus = head.MaritalStatus.Trim();
+        }
+        if (!string.IsNullOrWhiteSpace(head.PoliticalStatus))
+        {
+            application.PoliticalStatus = head.PoliticalStatus.Trim();
+        }
+        if (head.MedicalSelfPaid12m is { } medicalSelfPaid)
+        {
+            application.MedicalSelfPaid12m = medicalSelfPaid;
+        }
     }
 
     private static void ApplyEconomy(
@@ -936,6 +1254,74 @@ public sealed class ApplicationFormService(
             incomeCalculation.PerCapitaMonthly(totalAnnual, familySize));
     }
 
+    /// <summary>
+    /// 明细口径覆盖主表汇总：工资/经营/财产/转移/其他/补贴/刚性支出取明细求和，
+    /// 赡养与土地年值仍取本次 economy（未传则沿用主表现有值），再按 Core 公式重算年/月/人均。
+    /// 13 个明细列表全空时不重算，避免把用户手填的 economy 汇总清零。
+    /// </summary>
+    private void ApplyEconomicDetailsTotals(
+        ApplicationEntity application,
+        ApplicationFormEconomicDetailsDto? details,
+        ApplicationFormEconomyDto? economy,
+        int familySize)
+    {
+        if (details is null || !HasAnyEconomicDetail(details))
+        {
+            return;
+        }
+
+        var workIncome = incomeCalculation.CalculateLaborIncome(details.LaborIncomes ?? []);
+        var businessIncome = incomeCalculation.CalculateBusinessNetIncome(details.BusinessIncomes ?? []);
+        var propertyIncome = (details.PropertyIncomes ?? []).Sum(x => x.Amount);
+        var transferIncome = (details.TransferIncomes ?? []).Sum(x => x.TotalAmount);
+        var otherIncome = (details.OtherIncomes ?? []).Sum(x => x.Amount);
+        var subsidyIncome = incomeCalculation.CalculateSubsidyIncome(details.Subsidies ?? []);
+        var rigidExpenditure = incomeCalculation.CalculateRigidExpenditure(
+            details.RigidExpenditures ?? []);
+
+        var alimonyAnnual = economy?.AlimonyIncome ?? application.AlimonyIncome;
+        var landIncome = economy?.LandIncome ?? application.LandIncomeTotal;
+
+        var totalAnnual = incomeCalculation.CalculateAnnualFamilyIncome(
+            workIncome,
+            businessIncome,
+            propertyIncome,
+            transferIncome,
+            otherIncome,
+            alimonyAnnual,
+            landIncome,
+            subsidyIncome,
+            rigidExpenditure);
+
+        application.WorkIncomeTotal = workIncome;
+        application.BusinessIncomeTotal = businessIncome;
+        application.PropertyIncomeTotal = propertyIncome;
+        application.TransferIncomeTotal = transferIncome;
+        application.OtherIncomeTotal = otherIncome;
+        application.SubsidyTotal = subsidyIncome;
+        application.RigidExpenditure = rigidExpenditure;
+
+        application.TotalAnnualIncome = totalAnnual;
+        application.TotalFamilyIncome = incomeCalculation.MonthlyFromAnnual(totalAnnual);
+        application.PerCapitaAnnualIncome = incomeCalculation.CalculatePerCapitaAnnual(totalAnnual, familySize);
+        application.PerCapitaIncome = incomeCalculation.PerCapitaMonthly(totalAnnual, familySize);
+    }
+
+    private static bool HasAnyEconomicDetail(ApplicationFormEconomicDetailsDto details)
+        => (details.LaborIncomes?.Count ?? 0) > 0
+           || (details.BusinessIncomes?.Count ?? 0) > 0
+           || (details.PropertyIncomes?.Count ?? 0) > 0
+           || (details.TransferIncomes?.Count ?? 0) > 0
+           || (details.OtherIncomes?.Count ?? 0) > 0
+           || (details.Subsidies?.Count ?? 0) > 0
+           || (details.BreedingIncomes?.Count ?? 0) > 0
+           || (details.RigidExpenditures?.Count ?? 0) > 0
+           || (details.FamilyProperties?.Count ?? 0) > 0
+           || (details.Vehicles?.Count ?? 0) > 0
+           || (details.Machineries?.Count ?? 0) > 0
+           || (details.FinancialAssets?.Count ?? 0) > 0
+           || (details.LandRegistrations?.Count ?? 0) > 0;
+
     // ───────────────────────────── 成员/赡养人映射 ─────────────────────────────
 
     private static ApplicationFormMemberDto ToMemberDto(FamilyMember member)
@@ -964,7 +1350,18 @@ public sealed class ApplicationFormService(
             ToFormDisabilityLevel(member.DisabilityLevel),
             member.DiseaseName ?? string.Empty,
             member.IsSevereDisease,
-            member.IsLaborExempt);
+            member.IsLaborExempt,
+            member.EducationLevel ?? string.Empty,
+            member.MaritalStatus ?? string.Empty,
+            member.PoliticalStatus ?? string.Empty,
+            member.HukouAddress ?? string.Empty,
+            member.HomeAddress ?? string.Empty,
+            member.DiseaseCategory ?? string.Empty,
+            member.MedicalSelfPaid12m,
+            member.DisabilityCertificateNo ?? string.Empty,
+            member.PersonType ?? string.Empty,
+            member.IsSingleRescue,
+            member.SelfCareAbility ?? string.Empty);
 
     private static ApplicationFormSupporterDto ToSupporterDto(Supporter supporter)
         => new(
@@ -1011,6 +1408,14 @@ public sealed class ApplicationFormService(
             DiseaseName = member.DiseaseName ?? string.Empty,
             IsSevereDisease = member.IsSevereDisease,
             IsLaborExempt = member.IsLaborExempt,
+            EducationLevel = member.EducationLevel ?? string.Empty,
+            MaritalStatus = member.MaritalStatus ?? string.Empty,
+            PoliticalStatus = member.PoliticalStatus ?? string.Empty,
+            DiseaseCategory = member.DiseaseCategory ?? string.Empty,
+            MedicalSelfPaid12m = member.MedicalSelfPaid12m,
+            DisabilityCertificateNo = member.DisabilityCertificateNo ?? string.Empty,
+            PersonType = member.PersonType ?? string.Empty,
+            HomeAddress = member.HomeAddress ?? string.Empty,
             IsHouseholdHead = false,
             MemberCategory = MemberCategoryConstants.SHARED_LIVING,
             EmploymentStatus = member.EmploymentStatus ?? string.Empty,
@@ -1021,14 +1426,21 @@ public sealed class ApplicationFormService(
             IsSupportAbility = true
         };
 
-        // 共同生活成员户籍界面共享主申请人户籍，保存时同步，避免库里残留旧快照。
+        // 成员户籍分级仍沿用主申请人户籍；成员可覆盖完整户籍地址（前端 member.hukouAddress）。
+        var memberHukouAddress = (member.HukouAddress ?? string.Empty).Trim();
         if (basic is not null)
         {
             createRequest.HukouProvince = basic.HukouProvince ?? string.Empty;
             createRequest.HukouCity = basic.HukouCity ?? string.Empty;
             createRequest.HukouDistrict = basic.HukouDistrict ?? string.Empty;
             createRequest.HukouTown = basic.HukouTown ?? string.Empty;
-            createRequest.HukouAddress = ComposeHukouAddress(basic);
+            createRequest.HukouAddress = memberHukouAddress.Length > 0
+                ? memberHukouAddress
+                : ComposeHukouAddress(basic);
+        }
+        else if (memberHukouAddress.Length > 0)
+        {
+            createRequest.HukouAddress = memberHukouAddress;
         }
 
         return createRequest;
@@ -1047,21 +1459,42 @@ public sealed class ApplicationFormService(
             return;
         }
 
-        request.MaritalStatus = existing.MaritalStatus;
-        request.EducationLevel = existing.EducationLevel;
-        request.PoliticalStatus = existing.PoliticalStatus;
-        request.DiseaseCategory = existing.DiseaseCategory;
+        // 表单已建模的扩展字段只在本次为空时回填旧值；有值则以请求为准。
+        if (string.IsNullOrWhiteSpace(request.MaritalStatus))
+        {
+            request.MaritalStatus = existing.MaritalStatus;
+        }
+        if (string.IsNullOrWhiteSpace(request.EducationLevel))
+        {
+            request.EducationLevel = existing.EducationLevel;
+        }
+        if (string.IsNullOrWhiteSpace(request.PoliticalStatus))
+        {
+            request.PoliticalStatus = existing.PoliticalStatus;
+        }
+        if (string.IsNullOrWhiteSpace(request.DiseaseCategory))
+        {
+            request.DiseaseCategory = existing.DiseaseCategory;
+        }
+        if (string.IsNullOrWhiteSpace(request.DisabilityCertificateNo))
+        {
+            request.DisabilityCertificateNo = existing.DisabilityCertificateNo;
+        }
+        if (string.IsNullOrWhiteSpace(request.PersonType))
+        {
+            request.PersonType = existing.PersonType;
+        }
+        request.MedicalSelfPaid12m ??= existing.MedicalSelfPaid12m;
+
+        // 表单未建模的列仍原样沿用，避免全删全插静默丢失。
         request.SecondaryDiseaseName = existing.SecondaryDisease;
         request.DiseaseCode = existing.DiseaseCode;
-        request.DisabilityCertificateNo = existing.DisabilityCertificateNo;
         request.WorkCapacity = existing.WorkCapacity;
         request.FamilySize = existing.FamilySize;
-        request.PersonType = existing.PersonType;
         request.AnnualSupportFee = existing.AnnualSupportFee;
         request.MonthlySupportFee = existing.MonthlySupportFee;
         request.SupportMonths = existing.SupportMonths;
         request.IsSupportAbility = existing.IsSupportAbility;
-        request.MedicalSelfPaid12m = existing.MedicalSelfPaid12m;
 
         if (string.IsNullOrWhiteSpace(request.HukouProvince))
         {
@@ -1080,7 +1513,10 @@ public sealed class ApplicationFormService(
         request.HomeDistrict = existing.HomeDistrict;
         request.HomeTown = existing.HomeTown;
         request.HomeVillage = existing.HomeVillage;
-        request.HomeAddress = existing.HomeAddress;
+        if (string.IsNullOrWhiteSpace(request.HomeAddress))
+        {
+            request.HomeAddress = existing.HomeAddress;
+        }
 
         if (request.BirthDate is null && existing.BirthDate.Year >= 1900)
         {
@@ -1130,7 +1566,15 @@ public sealed class ApplicationFormService(
             app.DisabilityCardNo ?? string.Empty,
             app.ApplicationReason ?? string.Empty,
             app.ApplicationReasonDetail ?? string.Empty,
-            string.Empty);
+            string.Empty,
+            app.EducationLevel ?? string.Empty,
+            app.MaritalStatus ?? string.Empty,
+            app.PoliticalStatus ?? string.Empty,
+            ToFormHealthStatus(app.HealthStatus),
+            app.DiseaseName ?? string.Empty,
+            ToFormDisabilityType(app.DisabilityType),
+            ToFormDisabilityLevel(app.DisabilityLevel),
+            app.MedicalSelfPaid12m);
 
     private static ApplicationFormEconomyDto ToEconomyDto(ApplicationEntity app)
         => new(
@@ -1155,14 +1599,34 @@ public sealed class ApplicationFormService(
     private static ApplicationFormSurveyDto ToSurveyDto(HouseholdSurvey? survey)
         => survey is null
             ? new ApplicationFormSurveyDto(
-                string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty)
+                string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty,
+                string.Empty, string.Empty, string.Empty)
             : new ApplicationFormSurveyDto(
                 FormatDate(survey.SurveyDate),
                 survey.SurveyorName ?? string.Empty,
                 survey.SurveyorOrganization ?? string.Empty,
                 survey.ApplicationReason ?? string.Empty,
                 survey.ApplicationReasonDetail ?? string.Empty,
-                survey.SurveyNotes ?? string.Empty);
+                survey.SurveyNotes ?? string.Empty,
+                survey.RespondentName ?? string.Empty,
+                survey.RespondentRelation ?? string.Empty,
+                survey.SurveyConclusion ?? string.Empty);
+
+    private static ApplicationFormEconomicDetailsDto ToEconomicDetailsDto(EconomicDetailData data)
+        => new(
+            data.LaborIncomes,
+            data.BusinessIncomes,
+            data.PropertyIncomes,
+            data.TransferIncomes,
+            data.OtherIncomes,
+            data.Subsidies,
+            data.BreedingIncomes,
+            data.RigidExpenditures,
+            data.FamilyProperties,
+            data.Vehicles,
+            data.Machineries,
+            data.FinancialAssets,
+            data.LandRegistrations);
 
     private static ApplicationFormClassificationDto ToClassificationDto(ApplicationEntity app)
     {

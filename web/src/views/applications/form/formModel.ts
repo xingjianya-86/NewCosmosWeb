@@ -56,8 +56,14 @@ export function normalizeForm(
     supporters: Array.isArray(input.supporters)
       ? input.supporters.map((item) => createSupporter(item))
       : [],
+    caregivers: Array.isArray(input.caregivers) ? input.caregivers : [],
     economy: { ...empty.economy, ...(input.economy ?? {}) },
+    economicDetails: {
+      ...empty.economicDetails,
+      ...(input.economicDetails ?? {}),
+    },
     survey: { ...empty.survey, ...(input.survey ?? {}) },
+    visitRecords: Array.isArray(input.visitRecords) ? input.visitRecords : [],
     classification: { ...empty.classification, ...(input.classification ?? {}) },
   }
 }
@@ -91,6 +97,17 @@ export function createMember(
     diseaseName: '',
     isSevereDisease: false,
     isLaborExempt: false,
+    educationLevel: '',
+    maritalStatus: '',
+    politicalStatus: '',
+    hukouAddress: '',
+    homeAddress: '',
+    diseaseCategory: '',
+    medicalSelfPaid12m: null,
+    disabilityCertificateNo: '',
+    personType: '',
+    isSingleRescue: false,
+    selfCareAbility: '',
     ...overrides,
   }
 }

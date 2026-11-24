@@ -1,3 +1,5 @@
+using NewCosmos.Models.Entities;
+
 namespace NewCosmos.Server.Contracts;
 
 #region 低收入人口认定五步表单
@@ -31,7 +33,15 @@ public sealed record ApplicationFormBasicDto(
     string DisabilityCardNo,
     string ApplicationReason,
     string ApplicationReasonDetail,
-    string Remark);
+    string Remark,
+    string EducationLevel,
+    string MaritalStatus,
+    string PoliticalStatus,
+    string HealthStatus,
+    string DiseaseName,
+    string DisabilityType,
+    string DisabilityLevel,
+    decimal? MedicalSelfPaid12m);
 
 /// <summary>家庭成员（Step2）。id=0 表示新增；birthDate 使用 yyyy-MM-dd。</summary>
 public sealed record ApplicationFormMemberDto(
@@ -59,7 +69,18 @@ public sealed record ApplicationFormMemberDto(
     string DisabilityLevel,
     string DiseaseName,
     bool IsSevereDisease,
-    bool IsLaborExempt);
+    bool IsLaborExempt,
+    string EducationLevel,
+    string MaritalStatus,
+    string PoliticalStatus,
+    string HukouAddress,
+    string HomeAddress,
+    string DiseaseCategory,
+    decimal? MedicalSelfPaid12m,
+    string DisabilityCertificateNo,
+    string PersonType,
+    bool IsSingleRescue,
+    string SelfCareAbility);
 
 /// <summary>赡养/抚养/扶养义务人（Step3）。</summary>
 public sealed record ApplicationFormSupporterDto(
@@ -103,7 +124,40 @@ public sealed record ApplicationFormSurveyDto(
     string SurveyorOrganization,
     string ApplicationReason,
     string ApplicationReasonDetail,
-    string SurveyNotes);
+    string SurveyNotes,
+    string RespondentName,
+    string RespondentRelation,
+    string SurveyConclusion);
+
+/// <summary>
+/// 经济明细（Step4）。直接复用 Core 实体列表，字段名与前端 economicDetails 的花名册一致。
+/// 土地确权组（LandConfirmationGroup）含嵌套集合，暂不进入表单契约；保存时服务端沿用旧组，
+/// 避免整表重写把确权数据清空。
+/// </summary>
+public sealed record ApplicationFormEconomicDetailsDto(
+    List<LaborIncome>? LaborIncomes,
+    List<BusinessIncome>? BusinessIncomes,
+    List<PropertyIncome>? PropertyIncomes,
+    List<TransferIncome>? TransferIncomes,
+    List<OtherIncome>? OtherIncomes,
+    List<Subsidy>? Subsidies,
+    List<BreedingIncome>? BreedingIncomes,
+    List<RigidExpenditure>? RigidExpenditures,
+    List<FamilyProperty>? FamilyProperties,
+    List<Vehicle>? Vehicles,
+    List<Machinery>? Machineries,
+    List<FinancialAsset>? FinancialAssets,
+    List<LandRegistration>? LandRegistrations);
+
+/// <summary>回访补录请求。applicantIdCard 由服务端从主表同源带出，不接受前端传入。</summary>
+public sealed record ApplicationVisitCreateRequest(
+    string? VisitAt,
+    string? VisitBy,
+    string? VisitResult,
+    string? VisitRemark);
+
+/// <summary>回访补录返回。</summary>
+public sealed record ApplicationVisitCreatedResult(long Id);
 
 /// <summary>分类判定结果（Step5）。金额与分类只由 Core IClassificationService 产出。</summary>
 public sealed record ApplicationFormClassificationDto(
@@ -132,11 +186,15 @@ public sealed record ApplicationFormDto(
     IReadOnlyList<ApplicationFormSupporterDto> Supporters,
     ApplicationFormEconomyDto Economy,
     ApplicationFormSurveyDto Survey,
-    ApplicationFormClassificationDto Classification);
+    ApplicationFormClassificationDto Classification,
+    ApplicationFormEconomicDetailsDto? EconomicDetails,
+    List<Caregiver>? Caregivers,
+    List<VisitRecord> VisitRecords);
 
 /// <summary>
-/// 表单保存请求。与响应用同一结构；保存端只读取 basic/members/supporters/economy/survey，
-/// classification 块忽略（分类只能走 POST /classify，防止前端注入金额）。
+/// 表单保存请求。与响应用同一结构；保存端读取 basic/members/supporters/economy/survey/
+/// economicDetails/caregivers，classification 块忽略（分类只能走 POST /classify，防止前端注入金额）。
+/// visitRecords 只在 GET 返回，补录走 POST /api/applications/{id}/visits。
 /// 各块为 null 表示本次不修改该块（更新时保留原值；新建时按空处理）。
 /// </summary>
 public sealed record ApplicationFormSaveRequest(
@@ -150,7 +208,9 @@ public sealed record ApplicationFormSaveRequest(
     List<ApplicationFormSupporterDto>? Supporters,
     ApplicationFormEconomyDto? Economy,
     ApplicationFormSurveyDto? Survey,
-    ApplicationFormClassificationDto? Classification);
+    ApplicationFormClassificationDto? Classification,
+    ApplicationFormEconomicDetailsDto? EconomicDetails,
+    List<Caregiver>? Caregivers);
 
 /// <summary>新建/保存草稿返回。</summary>
 public sealed record ApplicationFormSaveResult(long Id, string ApplicationNo);

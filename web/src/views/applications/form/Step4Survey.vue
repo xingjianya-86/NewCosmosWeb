@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import NcCard from '@/components/NcCard.vue'
-import { APPLICATION_REASON_OPTIONS } from './options'
+import VisitRecords from './VisitRecords.vue'
+import { APPLICATION_REASON_OPTIONS, RELATION_OPTIONS } from './options'
 import type { ApplicationFormModel } from './types'
 
 const props = defineProps<{ form: ApplicationFormModel; busy?: boolean }>()
@@ -9,6 +10,14 @@ const props = defineProps<{ form: ApplicationFormModel; busy?: boolean }>()
 const survey = computed(() => props.form.survey)
 
 const reasonOptions = APPLICATION_REASON_OPTIONS
+const relationOptions = RELATION_OPTIONS
+
+const surveyConclusionOptions = [
+  { label: '属实', value: '属实' },
+  { label: '基本属实', value: '基本属实' },
+  { label: '不属实', value: '不属实' },
+  { label: '无法调查', value: '无法调查' },
+]
 
 function setSurveyDate(value: string | number | Date | null): void {
   props.form.survey.surveyDate = value == null ? '' : String(value)
@@ -55,6 +64,63 @@ function setSurveyDate(value: string | number | Date | null): void {
             placeholder="填写入户调查员姓名"
             :disabled="busy"
           />
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="survey-respondent-name">被调查人姓名</label>
+          <el-input
+            id="survey-respondent-name"
+            v-model="survey.respondentName"
+            class="nc-control"
+            maxlength="40"
+            placeholder="填写接受调查的被调查人姓名"
+            :disabled="busy"
+          />
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="survey-respondent-relation">与申请人关系</label>
+          <el-select
+            id="survey-respondent-relation"
+            v-model="survey.respondentRelation"
+            class="nc-control"
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            placeholder="选择或填写关系"
+            :disabled="busy"
+            aria-label="与申请人关系"
+          >
+            <el-option
+              v-for="item in relationOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="survey-conclusion">
+            <span class="required-mark" aria-hidden="true">*</span>
+            调查结论
+          </label>
+          <el-select
+            id="survey-conclusion"
+            v-model="survey.surveyConclusion"
+            class="nc-control"
+            placeholder="选择调查结论"
+            :disabled="busy"
+            aria-label="调查结论"
+          >
+            <el-option
+              v-for="item in surveyConclusionOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
         </div>
 
         <div class="field field--full">
@@ -119,6 +185,8 @@ function setSurveyDate(value: string | number | Date | null): void {
         </div>
       </div>
     </NcCard>
+
+    <VisitRecords :form="form" :busy="busy" />
 
     <NcCard title="调查记录" subtitle="记录入户走访情况与需要说明的事项。">
       <template #actions>

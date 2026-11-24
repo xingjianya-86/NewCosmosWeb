@@ -43,6 +43,73 @@ export const HEALTH_STATUS_OPTIONS: SelectOption[] = [
   { label: '患病', value: '患病' },
   { label: '残疾', value: '残疾' },
   { label: '重病', value: '重病' },
+  { label: '重残', value: '重残' },
+  { label: '重病且重残', value: '重病且重残' },
+  { label: '其他', value: '其他' },
+]
+
+/** 文化程度（与字典 EducationLevels 的中文显示值一致）。 */
+export const EDUCATION_LEVEL_OPTIONS: SelectOption[] = [
+  { label: '文盲/半文盲', value: '文盲/半文盲' },
+  { label: '小学', value: '小学' },
+  { label: '初中', value: '初中' },
+  { label: '高中/中专', value: '高中/中专' },
+  { label: '大专', value: '大专' },
+  { label: '本科', value: '本科' },
+  { label: '研究生及以上', value: '研究生及以上' },
+]
+
+/** 婚姻状况（与字典 MaritalStatuses 的中文显示值一致）。 */
+export const MARITAL_STATUS_OPTIONS: SelectOption[] = [
+  { label: '未婚', value: '未婚' },
+  { label: '已婚', value: '已婚' },
+  { label: '离婚', value: '离婚' },
+  { label: '丧偶', value: '丧偶' },
+  { label: '其他', value: '其他' },
+]
+
+/** 政治面貌（与字典 PoliticalStatuses 的中文显示值一致）。 */
+export const POLITICAL_STATUS_OPTIONS: SelectOption[] = [
+  { label: '中共党员', value: '中共党员' },
+  { label: '共青团员', value: '共青团员' },
+  { label: '群众', value: '群众' },
+  { label: '民主党派', value: '民主党派' },
+  { label: '其他', value: '其他' },
+]
+
+/** 疾病分类（与字典 DiseaseCategories 的 item_key 一致，本身为中文）。 */
+export const DISEASE_CATEGORY_OPTIONS: SelectOption[] = [
+  { label: '无任何疾病', value: '无任何疾病' },
+  { label: '恶性肿瘤', value: '恶性肿瘤' },
+  { label: '慢性肾功能不全', value: '慢性肾功能不全' },
+  { label: '心脏病', value: '心脏病' },
+  { label: '脑血管疾病', value: '脑血管疾病' },
+  { label: '糖尿病', value: '糖尿病' },
+  { label: '慢性呼吸系统疾病', value: '慢性呼吸系统疾病' },
+  { label: '泌尿系统疾病', value: '泌尿系统疾病' },
+  { label: '儿科先天性疾病', value: '儿科先天性疾病' },
+  { label: '感染性疾病', value: '感染性疾病' },
+  { label: '骨科及结缔组织疾病', value: '骨科及结缔组织疾病' },
+  { label: '精神神经系统疾病', value: '精神神经系统疾病' },
+  { label: '免疫系统疾病', value: '免疫系统疾病' },
+  { label: '消化系统疾病', value: '消化系统疾病' },
+  { label: '血液系统疾病', value: '血液系统疾病' },
+  { label: '严重创伤及并发症', value: '严重创伤及并发症' },
+  { label: '其他', value: '其他' },
+]
+
+/** 自理能力（三档常用口径）。 */
+export const SELF_CARE_ABILITY_OPTIONS: SelectOption[] = [
+  { label: '自理', value: '自理' },
+  { label: '半自理', value: '半自理' },
+  { label: '不能自理', value: '不能自理' },
+]
+
+/** 人员类型：赡养 / 抚养 / 扶养（与后端 PersonType 约定一致）。 */
+export const PERSON_TYPE_OPTIONS: SelectOption[] = [
+  { label: '赡养', value: '赡养' },
+  { label: '抚养', value: '抚养' },
+  { label: '扶养', value: '扶养' },
 ]
 
 export const EMPLOYMENT_STATUS_OPTIONS: SelectOption[] = [

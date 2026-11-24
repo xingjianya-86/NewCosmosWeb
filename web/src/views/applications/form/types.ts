@@ -25,6 +25,14 @@ export interface ApplicationFormBasic {
   applicationReason: string
   applicationReasonDetail: string
   remark: string
+  educationLevel: string
+  maritalStatus: string
+  politicalStatus: string
+  healthStatus: string
+  diseaseName: string
+  disabilityType: string
+  disabilityLevel: string
+  medicalSelfPaid12m: number | null
 }
 
 export interface ApplicationFormMember {
@@ -53,6 +61,17 @@ export interface ApplicationFormMember {
   diseaseName: string
   isSevereDisease: boolean
   isLaborExempt: boolean
+  educationLevel: string
+  maritalStatus: string
+  politicalStatus: string
+  hukouAddress: string
+  homeAddress: string
+  diseaseCategory: string
+  medicalSelfPaid12m: number | null
+  disabilityCertificateNo: string
+  personType: string
+  isSingleRescue: boolean
+  selfCareAbility: string
 }
 
 export interface ApplicationFormSupporter {
@@ -91,8 +110,11 @@ export interface ApplicationFormSurvey {
   surveyDate: string
   surveyorName: string
   surveyorOrganization: string
+  respondentName: string
+  respondentRelation: string
   applicationReason: string
   applicationReasonDetail: string
+  surveyConclusion: string
   surveyNotes: string
 }
 
@@ -111,6 +133,57 @@ export interface ApplicationFormClassification {
   gracePeriodEndDate: string
 }
 
+export interface ApplicationFormEconomicDetails {
+  laborIncomes: Record<string, unknown>[]
+  businessIncomes: Record<string, unknown>[]
+  propertyIncomes: Record<string, unknown>[]
+  transferIncomes: Record<string, unknown>[]
+  otherIncomes: Record<string, unknown>[]
+  subsidies: Record<string, unknown>[]
+  breedingIncomes: Record<string, unknown>[]
+  rigidExpenditures: Record<string, unknown>[]
+  familyProperties: Record<string, unknown>[]
+  vehicles: Record<string, unknown>[]
+  machineries: Record<string, unknown>[]
+  financialAssets: Record<string, unknown>[]
+  landRegistrations: Record<string, unknown>[]
+  landConfirmationGroups: Record<string, unknown>[]
+}
+
+export interface ApplicationFormCaregiver {
+  id: number
+  caredMemberId: number
+  name: string
+  idCard: string
+  phone: string
+  relationship: string
+  gender: string
+  age: number | null
+  ethnicity: string
+  maritalStatus: string
+  hukouType: string
+  educationLevel: string
+  politicalStatus: string
+  healthStatus: string
+  employmentStatus: string
+  mainIncomeSource: string
+  workUnit: string
+  position: string
+  address: string
+  bankName: string
+  bankAccount: string
+}
+
+export interface ApplicationFormVisit {
+  id: number
+  applicationId: number
+  applicantIdCard: string
+  visitAt: string
+  visitBy: string
+  visitResult: string
+  visitRemark: string
+}
+
 export interface ApplicationFormModel {
   id: number
   applicationNo: string
@@ -120,8 +193,11 @@ export interface ApplicationFormModel {
   basic: ApplicationFormBasic
   members: ApplicationFormMember[]
   supporters: ApplicationFormSupporter[]
+  caregivers: ApplicationFormCaregiver[]
   economy: ApplicationFormEconomy
+  economicDetails: ApplicationFormEconomicDetails
   survey: ApplicationFormSurvey
+  visitRecords: ApplicationFormVisit[]
   classification: ApplicationFormClassification
 }
 
@@ -157,9 +233,34 @@ export function createEmptyForm(): ApplicationFormModel {
       applicationReason: '',
       applicationReasonDetail: '',
       remark: '',
+      educationLevel: '',
+      maritalStatus: '',
+      politicalStatus: '',
+      healthStatus: '',
+      diseaseName: '',
+      disabilityType: '',
+      disabilityLevel: '',
+      medicalSelfPaid12m: null,
     },
     members: [],
     supporters: [],
+    caregivers: [],
+    economicDetails: {
+      laborIncomes: [],
+      businessIncomes: [],
+      propertyIncomes: [],
+      transferIncomes: [],
+      otherIncomes: [],
+      subsidies: [],
+      breedingIncomes: [],
+      rigidExpenditures: [],
+      familyProperties: [],
+      vehicles: [],
+      machineries: [],
+      financialAssets: [],
+      landRegistrations: [],
+      landConfirmationGroups: [],
+    },
     economy: {
       workIncome: 0,
       businessIncome: 0,
@@ -183,10 +284,14 @@ export function createEmptyForm(): ApplicationFormModel {
       surveyDate: '',
       surveyorName: '',
       surveyorOrganization: '',
+      respondentName: '',
+      respondentRelation: '',
       applicationReason: '',
       applicationReasonDetail: '',
+      surveyConclusion: '属实',
       surveyNotes: '',
     },
+    visitRecords: [],
     classification: {
       classificationResult: '',
       classificationText: '',

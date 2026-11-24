@@ -4,171 +4,117 @@ import { InfoFilled } from '@element-plus/icons-vue'
 import NcCard from '@/components/NcCard.vue'
 import NcStat from '@/components/NcStat.vue'
 import { formatMoney } from '../format'
+import EconomicLedgerTable from './EconomicLedgerTable.vue'
+import {
+  LEDGER_GROUPS,
+  createLedgerRow,
+  type EditableLedgerKey,
+  type LedgerConfig,
+  type LedgerGroup,
+} from './economy'
 import type { ApplicationFormModel } from './types'
 
 const props = defineProps<{ form: ApplicationFormModel; busy?: boolean }>()
 
-/** 经济状况中的可编辑数值字段（合计与人均由服务端回写，不在此列）。 */
-type EconomyInputKey =
-  | 'workIncome'
-  | 'businessIncome'
-  | 'propertyIncome'
-  | 'transferIncome'
-  | 'otherIncome'
-  | 'alimonyIncome'
-  | 'landIncome'
-  | 'subsidyTotal'
-  | 'rigidExpenditure'
-  | 'familyLandArea'
-  | 'selfFarmedLandArea'
-  | 'subleasedLandArea'
-  | 'contractedLandArea'
+const economy = computed(() => props.form.economy)
+const members = computed(() => props.form.members)
+const groups = LEDGER_GROUPS
 
-interface EconomyField {
-  key: EconomyInputKey
-  label: string
-  hint?: string
-  step?: number
+/** 兼容后端未回填或返回 null 的明细数组；首次访问时补成空数组。 */
+function ledgerRows(key: EditableLedgerKey): Record<string, unknown>[] {
+  const details = props.form.economicDetails
+  const current = details[key]
+  if (Array.isArray(current)) return current
+
+  const rows: Record<string, unknown>[] = []
+  details[key] = rows
+  return rows
 }
 
-const economy = computed(() => props.form.economy)
+function addLedgerRow(ledger: LedgerConfig): void {
+  ledgerRows(ledger.key).push(createLedgerRow(ledger))
+}
 
-const incomeFields: EconomyField[] = [
-  { key: 'workIncome', label: '工资性收入' },
-  { key: 'businessIncome', label: '经营净收入' },
-  { key: 'propertyIncome', label: '财产性收入' },
-  { key: 'transferIncome', label: '转移性收入' },
-  { key: 'otherIncome', label: '其他收入' },
-]
+function removeLedgerRow(ledger: LedgerConfig, row: Record<string, unknown>): void {
+  const rows = ledgerRows(ledger.key)
+  const index = rows.indexOf(row)
+  if (index >= 0) rows.splice(index, 1)
+}
 
-const annualFields: EconomyField[] = [
-  { key: 'alimonyIncome', label: '赡养费（年值）' },
-  { key: 'landIncome', label: '土地收入（年值）' },
-  { key: 'subsidyTotal', label: '农业补贴（年值）', hint: '按折算后年值填报' },
-]
+function groupCount(group: LedgerGroup): number {
+  return group.ledgers.reduce((sum, ledger) => sum + ledgerRows(ledger.key).length, 0)
+}
 
-const landFields: EconomyField[] = [
-  { key: 'familyLandArea', label: '家庭承包土地面积', step: 0.1 },
-  { key: 'selfFarmedLandArea', label: '自种面积', step: 0.1 },
-  { key: 'subleasedLandArea', label: '转包面积', step: 0.1 },
-  { key: 'contractedLandArea', label: '托管面积', step: 0.1 },
-]
+const detailCount = computed(() =>
+  groups.reduce((sum, group) => sum + groupCount(group), 0),
+)
 
-function setEconomy(key: EconomyInputKey, value: number | null | undefined): void {
-  props.form.economy[key] = value ?? null
+const landConfirmationCount = computed(() => {
+  const rows = props.form.economicDetails.landConfirmationGroups
+  return Array.isArray(rows) ? rows.length : 0
+})
+
+function groupTone(group: LedgerGroup): 'income' | 'expense' | 'asset' {
+  if (group.key === 'expense') return 'expense'
+  if (group.key === 'assets') return 'asset'
+  return 'income'
 }
 </script>
 
 <template>
   <div class="step-economy">
-    <NcCard title="收入分项" subtitle="按家庭月均口径填报，允许填 0。">
+    <div class="ledger-intro">
+      <div class="ledger-intro__main">
+        <strong>按明细台账录入经济状况</strong>
+        <p>
+          各收入、支出与财产分项逐条登记；成员类台账可直接从第 2 步家庭成员中选择。
+          合计与人均不在此填写，保存后由服务端按 Core 口径重算。
+        </p>
+      </div>
+      <div class="ledger-intro__meta">
+        <span>已录明细</span>
+        <strong>{{ detailCount }}</strong>
+        <span>条</span>
+      </div>
+    </div>
+
+    <NcCard
+      v-for="group in groups"
+      :key="group.key"
+      :title="group.title"
+      :subtitle="group.subtitle"
+    >
       <template #actions>
-        <span class="section-meta">元 / 月</span>
+        <span class="section-meta">{{ groupCount(group) }} 条明细</span>
       </template>
 
-      <div class="field-grid">
-        <div v-for="field in incomeFields" :key="field.key" class="field">
-          <label class="field-label" :for="`economy-${field.key}`">{{ field.label }}</label>
-          <el-input-number
-            :id="`economy-${field.key}`"
-            class="nc-number"
-            :model-value="economy[field.key]"
-            :min="0"
-            :step="100"
-            :precision="2"
-            :value-on-clear="0"
-            :disabled="busy"
-            controls-position="right"
-            :aria-label="field.label"
-            @update:model-value="setEconomy(field.key, $event)"
-          />
-          <p v-if="field.hint" class="field-hint">{{ field.hint }}</p>
-        </div>
+      <div class="ledger-stack">
+        <EconomicLedgerTable
+          v-for="ledger in group.ledgers"
+          :key="ledger.key"
+          :title="ledger.title"
+          :hint="ledger.hint"
+          :rows="ledgerRows(ledger.key)"
+          :columns="ledger.columns"
+          :members="members"
+          :busy="busy"
+          :default-open="ledger.defaultOpen"
+          :add-label="ledger.addLabel ?? '新增一行'"
+          :tone="groupTone(group)"
+          @add="addLedgerRow(ledger)"
+          @remove="removeLedgerRow(ledger, $event)"
+        />
+
+        <p v-if="group.key === 'assets' && landConfirmationCount > 0" class="aside-note">
+          已载入 {{ landConfirmationCount }} 组土地确权数据，暂不在本页编辑，保存时按原数据回写。
+        </p>
       </div>
     </NcCard>
 
-    <NcCard title="年度收入" subtitle="赡养费、土地收入与农业补贴按年值填报。">
-      <template #actions>
-        <span class="section-meta">元 / 年</span>
-      </template>
-
-      <div class="field-grid">
-        <div v-for="field in annualFields" :key="field.key" class="field">
-          <label class="field-label" :for="`economy-${field.key}`">{{ field.label }}</label>
-          <el-input-number
-            :id="`economy-${field.key}`"
-            class="nc-number"
-            :model-value="economy[field.key]"
-            :min="0"
-            :step="100"
-            :precision="2"
-            :value-on-clear="0"
-            :disabled="busy"
-            controls-position="right"
-            :aria-label="field.label"
-            @update:model-value="setEconomy(field.key, $event)"
-          />
-          <p v-if="field.hint" class="field-hint">{{ field.hint }}</p>
-        </div>
-      </div>
-    </NcCard>
-
-    <NcCard title="刚性支出" subtitle="医疗、教育、残疾康复、居住等分项合并填报。">
-      <template #actions>
-        <span class="section-meta">元 / 月</span>
-      </template>
-
-      <div class="field-grid">
-        <div class="field">
-          <label class="field-label" for="economy-rigidExpenditure">刚性支出合计</label>
-          <el-input-number
-            id="economy-rigidExpenditure"
-            class="nc-number"
-            :model-value="economy.rigidExpenditure"
-            :min="0"
-            :step="100"
-            :precision="2"
-            :value-on-clear="0"
-            :disabled="busy"
-            controls-position="right"
-            aria-label="刚性支出合计"
-            @update:model-value="setEconomy('rigidExpenditure', $event)"
-          />
-          <p class="field-hint">按家庭月均口径合并填报。</p>
-        </div>
-
-        <aside class="aside-note">
-          含医疗、教育、残疾康复、居住等刚性支出；分项不再单列，统一计入合计。
-        </aside>
-      </div>
-    </NcCard>
-
-    <NcCard title="土地情况" subtitle="按家庭实际土地经营情况填报。">
-      <template #actions>
-        <span class="section-meta">亩</span>
-      </template>
-
-      <div class="field-grid">
-        <div v-for="field in landFields" :key="field.key" class="field">
-          <label class="field-label" :for="`economy-${field.key}`">{{ field.label }}</label>
-          <el-input-number
-            :id="`economy-${field.key}`"
-            class="nc-number"
-            :model-value="economy[field.key]"
-            :min="0"
-            :step="field.step ?? 0.1"
-            :precision="2"
-            :value-on-clear="0"
-            :disabled="busy"
-            controls-position="right"
-            :aria-label="field.label"
-            @update:model-value="setEconomy(field.key, $event)"
-          />
-        </div>
-      </div>
-    </NcCard>
-
-    <NcCard title="收入核算" subtitle="合计与人均为只读值，保存后由服务端按 Core 口径重新计算。">
+    <NcCard
+      title="收入核算"
+      subtitle="合计与人均为只读值。保存后由服务端按 Core 口径重算，明细优先。"
+    >
       <template #actions>
         <span class="section-meta">只读 · 服务端回写</span>
       </template>
@@ -228,63 +174,72 @@ function setEconomy(key: EconomyInputKey, value: number | null | undefined): voi
   white-space: nowrap;
 }
 
-.field-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px 18px;
+.ledger-intro {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 16px;
+  border: 1px solid var(--nc-line);
+  border-left: 3px solid var(--nc-seal);
+  background-color: var(--nc-paper-2);
 }
 
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.ledger-intro__main {
   min-width: 0;
 }
 
-.field-label {
-  color: var(--nc-ink-2);
-  font-size: var(--nc-text-sm);
-  font-weight: 600;
+.ledger-intro__main strong {
+  display: block;
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-md);
+  font-weight: 700;
   letter-spacing: 0.02em;
-  line-height: 1.45;
 }
 
-.field-hint {
-  margin: 0;
+.ledger-intro__main p {
+  margin: 4px 0 0;
+  color: var(--nc-muted-2);
+  font-size: var(--nc-text-sm);
+  line-height: 1.65;
+}
+
+.ledger-intro__meta {
+  display: flex;
+  flex: none;
+  align-items: baseline;
+  gap: 5px;
+  padding-left: 16px;
+  border-left: 1px solid var(--nc-line-faint);
   color: var(--nc-muted);
+  font-family: var(--nc-font-mono);
   font-size: var(--nc-text-xs);
-  line-height: 1.6;
+  letter-spacing: 0.06em;
+}
+
+.ledger-intro__meta strong {
+  color: var(--nc-seal);
+  font-family: var(--nc-font-serif);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.ledger-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .aside-note {
-  align-self: center;
-  min-width: 0;
-  padding: 10px 12px;
+  margin: 0;
+  padding: 9px 12px;
   border-left: 2px solid var(--nc-amber);
   background-color: var(--nc-amber-soft);
   color: var(--nc-amber-dark);
   font-size: var(--nc-text-sm);
   line-height: 1.7;
-}
-
-.nc-number {
-  width: 100%;
-}
-
-.nc-number :deep(.el-input__wrapper) {
-  border-radius: var(--nc-radius-xs);
-  background-color: var(--nc-paper-soft);
-  box-shadow: 0 0 0 1px var(--nc-line) inset;
-}
-
-.nc-number :deep(.el-input__wrapper.is-focus) {
-  box-shadow: 0 0 0 1px var(--nc-seal) inset;
-}
-
-.nc-number :deep(.el-input__inner) {
-  color: var(--nc-ink);
-  font-family: var(--nc-font-mono);
-  font-size: 13px;
 }
 
 .summary-grid {
@@ -316,9 +271,16 @@ function setEconomy(key: EconomyInputKey, value: number | null | undefined): voi
 }
 
 @media (max-width: 767px) {
-  .field-grid {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 13px;
+  .ledger-intro {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 13px;
+  }
+
+  .ledger-intro__meta {
+    padding-left: 0;
+    border-left: 0;
   }
 
   .summary-grid {

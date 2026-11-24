@@ -116,7 +116,9 @@ builder.Services.AddSingleton<IApplicationStatusService, ApplicationStatusServic
 builder.Services.AddSingleton<IClassificationService, ClassificationService>();
 builder.Services.AddSingleton<IFamilyMemberService, FamilyMemberService>();
 builder.Services.AddSingleton<ISupporterService, SupporterService>();
+builder.Services.AddSingleton<ICaregiverService, CaregiverService>();
 builder.Services.AddSingleton<IHouseholdSurveyService, HouseholdSurveyService>();
+builder.Services.AddSingleton<IVisitRecordService, VisitRecordService>();
 builder.Services.AddSingleton<IEconomicDetailService, EconomicDetailService>();
 builder.Services.AddSingleton<IApplicationService, ApplicationService>();
 builder.Services.AddScoped<ApplicationFormService>();

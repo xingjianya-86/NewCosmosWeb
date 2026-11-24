@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { DocumentChecked, MagicStick } from '@element-plus/icons-vue'
 import NcCard from '@/components/NcCard.vue'
 import NcStat from '@/components/NcStat.vue'
+import CaregiverList from './CaregiverList.vue'
 import { formatDate, formatMoney } from '../format'
 import type { ApplicationFormModel } from './types'
 
@@ -20,6 +21,8 @@ const hasResult = computed(() => {
 
 <template>
   <div class="step-classification">
+    <CaregiverList :form="form" :busy="busy" />
+
     <NcCard
       title="分类认定"
       subtitle="分类与保障金由服务端 Core 判定，前端仅展示结果，不参与计算。"

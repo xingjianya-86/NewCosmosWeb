@@ -21,6 +21,7 @@ public static class ApplicationFormEndpoints
         app.MapPut("/api/applications/{id}/form", UpdateAsync);
         app.MapPost("/api/applications/{id}/classify", ClassifyAsync);
         app.MapPost("/api/applications/{id}/complete", CompleteAsync);
+        app.MapPost("/api/applications/{id}/visits", AddVisitAsync);
         app.MapDelete("/api/applications/{id}", DeleteAsync);
         return app;
     }
@@ -176,6 +177,43 @@ public static class ApplicationFormEndpoints
         }
 
         var result = await forms.CompleteAsync(applicationId, user.Id, OperatorName(user), ct);
+        return result.IsFailure
+            ? MapResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    private static async Task<IResult> AddVisitAsync(
+        string id,
+        ApplicationVisitCreateRequest? request,
+        HttpContext context,
+        ApplicationFormService forms,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.INCOME_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        if (ParseId(id) is not { } applicationId)
+        {
+            return InvalidId(context);
+        }
+
+        if (request is null)
+        {
+            return InvalidRequest(context, "请求体不能为空");
+        }
+
+        var result = await forms.AddVisitAsync(
+            applicationId, request, user.Id, OperatorName(user), ct);
         return result.IsFailure
             ? MapResult(context, result)
             : Results.Json(result.Value);

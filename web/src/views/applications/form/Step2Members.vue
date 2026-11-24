@@ -12,10 +12,16 @@ import {
 import {
   DISABILITY_LEVEL_OPTIONS,
   DISABILITY_TYPE_OPTIONS,
+  DISEASE_CATEGORY_OPTIONS,
+  EDUCATION_LEVEL_OPTIONS,
   EMPLOYMENT_STATUS_OPTIONS,
   GENDER_OPTIONS,
   HEALTH_STATUS_OPTIONS,
+  MARITAL_STATUS_OPTIONS,
+  PERSON_TYPE_OPTIONS,
+  POLITICAL_STATUS_OPTIONS,
   RELATION_OPTIONS,
+  SELF_CARE_ABILITY_OPTIONS,
   SUPPORT_RELATION_OPTIONS,
 } from './options'
 import type {
@@ -429,6 +435,83 @@ onMounted(() => {
             </label>
 
             <label class="field">
+              <span class="field__label">文化程度</span>
+              <el-select
+                v-model="member.educationLevel"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                placeholder="请选择或输入"
+              >
+                <el-option
+                  v-for="item in EDUCATION_LEVEL_OPTIONS"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </label>
+
+            <label class="field">
+              <span class="field__label">婚姻状况</span>
+              <el-select
+                v-model="member.maritalStatus"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                placeholder="请选择或输入"
+              >
+                <el-option
+                  v-for="item in MARITAL_STATUS_OPTIONS"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </label>
+
+            <label class="field">
+              <span class="field__label">政治面貌</span>
+              <el-select
+                v-model="member.politicalStatus"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                placeholder="请选择或输入"
+              >
+                <el-option
+                  v-for="item in POLITICAL_STATUS_OPTIONS"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </label>
+
+            <label class="field field--wide">
+              <span class="field__label">户籍地址</span>
+              <el-input
+                v-model="member.hukouAddress"
+                maxlength="120"
+                placeholder="户籍所在地址"
+                clearable
+              />
+            </label>
+
+            <label class="field field--wide">
+              <span class="field__label">现居住地址</span>
+              <el-input
+                v-model="member.homeAddress"
+                maxlength="120"
+                placeholder="现居住地址"
+                clearable
+              />
+            </label>
+
+            <label class="field">
               <span class="field__label">健康状态</span>
               <el-select v-model="member.healthStatus" filterable allow-create default-first-option>
                 <el-option
@@ -504,6 +587,16 @@ onMounted(() => {
             </label>
 
             <label class="field">
+              <span class="field__label">残疾证号</span>
+              <el-input
+                v-model="member.disabilityCertificateNo"
+                maxlength="30"
+                placeholder="无残疾可留空"
+                clearable
+              />
+            </label>
+
+            <label class="field">
               <span class="field__label">重病病种</span>
               <el-input
                 v-model="member.diseaseName"
@@ -511,6 +604,37 @@ onMounted(() => {
                 placeholder="无重病可留空"
                 clearable
                 @input="handleDiseaseInput(member)"
+              />
+            </label>
+
+            <label class="field">
+              <span class="field__label">疾病分类</span>
+              <el-select
+                v-model="member.diseaseCategory"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                placeholder="请选择或输入"
+              >
+                <el-option
+                  v-for="item in DISEASE_CATEGORY_OPTIONS"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </label>
+
+            <label class="field">
+              <span class="field__label">前 12 个月医疗自付（元）</span>
+              <el-input-number
+                :model-value="member.medicalSelfPaid12m"
+                :min="0"
+                :precision="2"
+                :controls="false"
+                placeholder="0.00"
+                @update:model-value="member.medicalSelfPaid12m = $event ?? null"
               />
             </label>
 
@@ -523,6 +647,54 @@ onMounted(() => {
                 :controls="false"
                 placeholder="0.00"
                 @update:model-value="member.monthlyIncomeCapacity = $event ?? null"
+              />
+            </label>
+
+            <label class="field">
+              <span class="field__label">人员类型</span>
+              <el-select
+                v-model="member.personType"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                placeholder="请选择或输入"
+              >
+                <el-option
+                  v-for="item in PERSON_TYPE_OPTIONS"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </label>
+
+            <label class="field">
+              <span class="field__label">自理能力</span>
+              <el-select
+                v-model="member.selfCareAbility"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                placeholder="请选择或输入"
+              >
+                <el-option
+                  v-for="item in SELF_CARE_ABILITY_OPTIONS"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </label>
+
+            <label class="field field--switch">
+              <span class="field__label">单人保</span>
+              <el-switch
+                v-model="member.isSingleRescue"
+                active-text="是"
+                inactive-text="否"
+                inline-prompt
               />
             </label>
           </div>
@@ -795,6 +967,10 @@ onMounted(() => {
   min-width: 0;
 }
 
+.field--wide {
+  grid-column: span 2;
+}
+
 .field__label {
   color: var(--nc-ink-2);
   font-size: var(--nc-text-sm);
@@ -851,6 +1027,10 @@ onMounted(() => {
   .member-grid,
   .supporter-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .field--wide {
+    grid-column: span 1;
   }
 
   .member-card__head {

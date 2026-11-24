@@ -4,9 +4,15 @@ import type { FormInstance, FormRules } from 'element-plus'
 import NcCard from '@/components/NcCard.vue'
 import {
   APPLICATION_REASON_OPTIONS,
+  DISABILITY_LEVEL_OPTIONS,
+  DISABILITY_TYPE_OPTIONS,
+  EDUCATION_LEVEL_OPTIONS,
   ETHNICITY_OPTIONS,
   GENDER_OPTIONS,
+  HEALTH_STATUS_OPTIONS,
   HUKOU_TYPE_OPTIONS,
+  MARITAL_STATUS_OPTIONS,
+  POLITICAL_STATUS_OPTIONS,
 } from './options'
 import type { ApplicationFormModel } from './types'
 import { getIdCardError, isBasicValid, parseIdCard } from './validation'
@@ -65,7 +71,10 @@ defineExpose({ validate })
 
 <template>
   <div class="step-basic">
-    <NcCard title="申请人信息" subtitle="带 * 为必填项；身份证自动计算性别与年龄。">
+    <NcCard
+      title="申请人信息"
+      subtitle="带 * 为必填项；身份证自动计算性别与年龄；姓名与身份证可在第 2 步同步为户主。"
+    >
       <el-form
         ref="formRef"
         :model="basic"
@@ -149,6 +158,134 @@ defineExpose({ validate })
               maxlength="30"
               placeholder="无残疾可留空"
               clearable
+            />
+          </el-form-item>
+
+          <el-form-item label="文化程度" prop="educationLevel">
+            <el-select
+              v-model="basic.educationLevel"
+              filterable
+              allow-create
+              default-first-option
+              clearable
+              placeholder="请选择或输入"
+            >
+              <el-option
+                v-for="item in EDUCATION_LEVEL_OPTIONS"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="婚姻状况" prop="maritalStatus">
+            <el-select
+              v-model="basic.maritalStatus"
+              filterable
+              allow-create
+              default-first-option
+              clearable
+              placeholder="请选择或输入"
+            >
+              <el-option
+                v-for="item in MARITAL_STATUS_OPTIONS"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="政治面貌" prop="politicalStatus">
+            <el-select
+              v-model="basic.politicalStatus"
+              filterable
+              allow-create
+              default-first-option
+              clearable
+              placeholder="请选择或输入"
+            >
+              <el-option
+                v-for="item in POLITICAL_STATUS_OPTIONS"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="健康状态" prop="healthStatus">
+            <el-select
+              v-model="basic.healthStatus"
+              filterable
+              allow-create
+              default-first-option
+              clearable
+              placeholder="请选择或输入"
+            >
+              <el-option
+                v-for="item in HEALTH_STATUS_OPTIONS"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="疾病名称" prop="diseaseName">
+            <el-input
+              v-model="basic.diseaseName"
+              maxlength="60"
+              placeholder="无疾病可留空"
+              clearable
+            />
+          </el-form-item>
+
+          <el-form-item label="残疾类型" prop="disabilityType">
+            <el-select
+              v-model="basic.disabilityType"
+              filterable
+              allow-create
+              default-first-option
+              clearable
+              placeholder="无残疾可留空"
+            >
+              <el-option
+                v-for="item in DISABILITY_TYPE_OPTIONS"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="残疾等级" prop="disabilityLevel">
+            <el-select
+              v-model="basic.disabilityLevel"
+              filterable
+              allow-create
+              default-first-option
+              clearable
+              placeholder="选择等级"
+            >
+              <el-option
+                v-for="item in DISABILITY_LEVEL_OPTIONS"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </el-form-item>
+
+          <el-form-item label="前 12 个月医疗自付（元）" prop="medicalSelfPaid12m">
+            <el-input-number
+              :model-value="basic.medicalSelfPaid12m"
+              :min="0"
+              :precision="2"
+              :controls="false"
+              placeholder="0.00"
+              @update:model-value="basic.medicalSelfPaid12m = $event ?? null"
             />
           </el-form-item>
         </div>
@@ -283,6 +420,11 @@ defineExpose({ validate })
 
 .basic-form :deep(.el-form-item) {
   margin-bottom: 0;
+}
+
+.basic-form :deep(.el-select),
+.basic-form :deep(.el-input-number) {
+  width: 100%;
 }
 
 .field-grid {
