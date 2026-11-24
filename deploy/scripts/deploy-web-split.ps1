@@ -1,11 +1,11 @@
-﻿<#
+<#
 .SYNOPSIS
     将 Web 构建产物拆分发布到 .1（index.html）与 .2（assets）。
 
 .DESCRIPTION
     拓扑：
-      10.110.0.1  /srv/newcosmos/web/index.html     只发入口，绝不发资源
-      10.110.0.2  /srv/newcosmos/web/assets/**      hash 静态资源，只新增不删除
+      10.110.0.1  /www/wwwroot/cosmos.sua17.cn/index.html     只发入口，绝不发资源
+      10.110.0.2  /www/wwwroot/cosmos-static.sua17.cn/assets/**      hash 静态资源，只新增不删除
 
     行为：
       1. 可选构建 web（-Build），默认使用现有 web\dist；
@@ -39,10 +39,10 @@ param(
     [string]$WebDir = "",
 
     [string]$EdgeHost = "10.110.0.1",
-    [string]$EdgeRoot = "/srv/newcosmos/web",
+    [string]$EdgeRoot = "/www/wwwroot/cosmos.sua17.cn",
 
     [string]$AppHost = "10.110.0.2",
-    [string]$AppWebRoot = "/srv/newcosmos/web",
+    [string]$AppWebRoot = "/www/wwwroot/cosmos-static.sua17.cn",
 
     [string]$RemoteUser = "root",
     [string]$WebUser = "www-data",

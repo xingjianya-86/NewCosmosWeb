@@ -1,4 +1,14 @@
-# NewCosmos Web 部署说明（.1 边缘 + .2 应用）
+# NewCosmos Web 部署说明
+
+> 当前生产实际路径（2026-11-24 已切换）：
+> - `.1` index：`/www/wwwroot/cosmos.sua17.cn/index.html`
+> - `.1` nginx：`/www/server/panel/vhost/nginx/cosmos.sua17.cn.conf`
+> - `.1` 证书：`/www/server/panel/vhost/cert/sua17.cn/`
+> - `.2` assets：`/www/wwwroot/cosmos-static.sua17.cn/assets/`
+> - `.2` nginx：`/www/server/panel/vhost/nginx/cosmos-static.sua17.cn.conf`
+> - `.2` 证书：`/www/server/panel/vhost/cert/mynas.sua17.cn/`
+> - `.2` API：`/srv/newcosmos/server/`（Docker）
+> 下文 `/srv/newcosmos/web` 仅作通用示例；以本节实际路径为准。（.1 边缘 + .2 应用）
 
 > 适用范围：`deploy/edge-1`、`deploy/app-2`、`deploy/scripts`、`deploy/database`。
 > `deploy/lottery` 不在本说明内，后续单独维护。
