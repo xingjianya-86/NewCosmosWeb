@@ -72,6 +72,16 @@
 - `.2` nginx：恢复 `cosmos-static.sua17.cn.conf.bak_20261124_2026` 后 `nginx -t && nginx -s reload`。
 - `.1` nginx/index：恢复 `cosmos.sua17.cn.conf.bak_20261124_2026` 与 `index.html.bak_20261124_2026` 后 reload。
 
+## 画风与启动动画（2026-11-24 21:0x）
+
+- Web 设计令牌改为旧 NewCosmos 纸墨档案风：暖纸、暖墨、朱砂、松绿、赭金、1–3px 圆角；Element Plus 默认蓝/大圆角已覆盖。
+- P0 三页重绘：登录（档案封面/印章）、首页（纸墨信息卡/快捷入口）、打印机绑定（纸墨表格/手机卡片/设备选择）。
+- 启动动画 `Resources/Splash` 已复制到 `web/public/splash`，浏览器 bridge 改为 `postMessage`；`splash-intent` 立即返回 `full`，动画完整播放。
+- `SplashOverlay`：每会话一次、`?nosplash=1` 跳过、60 秒硬兜底、iframe 跨域 message 校验、音频受浏览器自动播放策略限制。
+- `.2` nginx 新增 `/splash/`：`frame-ancestors https://cosmos.sua17.cn`，不再使用 `X-Frame-Options: DENY`。
+- 已上传 `splash/**` 与新 assets 到 `.2`，`.1` index 已替换；`/splash/splash.html` 200，assets 200 + CORS + immutable，登录接口 401 正常。
+- 当前生产页面已带新画风与启动动画；业务页面仍为 P0。
+
 ## 待办
 
 - P1 起：社会救助、档案/文书、报表/导入、其他业务域、管理与系统页面。

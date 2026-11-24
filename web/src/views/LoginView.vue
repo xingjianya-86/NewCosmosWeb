@@ -79,7 +79,7 @@ async function submit(): Promise<void> {
   <div class="login-page">
     <section class="login-hero">
       <div class="hero-inner">
-        <div class="hero-badge">NewCosmos · Web</div>
+        <p class="hero-kicker">NewCosmos · Archive</p>
         <h1 class="hero-title">新宇宙<br />民政服务平台</h1>
         <p class="hero-desc">社会救助业务一体化协同，数据在政务网络内安全流转。</p>
 
@@ -94,6 +94,11 @@ async function submit(): Promise<void> {
           <span>v{{ APP_VERSION }} · 政务内网专用</span>
         </div>
       </div>
+
+      <div class="hero-stamp" aria-hidden="true">
+        <span>档案</span>
+        <span>专用</span>
+      </div>
     </section>
 
     <section class="login-panel">
@@ -107,6 +112,7 @@ async function submit(): Promise<void> {
 
       <div class="login-card">
         <header class="login-head">
+          <p class="login-kicker">Account · Sign in</p>
           <h2>账号登录</h2>
           <p>请使用政务账号登录系统</p>
         </header>
@@ -173,44 +179,48 @@ async function submit(): Promise<void> {
   display: grid;
   grid-template-columns: minmax(420px, 1.05fr) minmax(420px, 0.95fr);
   min-height: 100vh;
-  background: #fff;
+  background-color: var(--nc-paper);
 }
 
+/* ── 左侧：档案封面 ───────────────────────────────────────────── */
 .login-hero {
   position: relative;
   display: flex;
   align-items: center;
   overflow: hidden;
-  padding: 64px clamp(40px, 6vw, 88px);
+  padding: 64px clamp(36px, 5vw, 80px) 64px clamp(56px, 6vw, 96px);
   background:
-    radial-gradient(900px 480px at 12% 8%, rgba(84, 154, 214, 0.4), transparent 60%),
-    radial-gradient(700px 500px at 88% 92%, rgba(24, 92, 145, 0.55), transparent 62%),
-    linear-gradient(155deg, #10395d 0%, #175487 52%, #1c5f9e 100%);
-  color: #fff;
+    repeating-linear-gradient(
+      0deg,
+      transparent 0 34px,
+      rgba(23, 19, 16, 0.045) 34px 35px
+    ),
+    var(--nc-paper-3);
+  border-right: 1px solid var(--nc-line-strong);
 }
 
 .login-hero::before {
   content: '';
   position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
-  background-size: 56px 56px;
-  mask-image: linear-gradient(120deg, rgba(0, 0, 0, 0.7), transparent 72%);
+  top: 0;
+  bottom: 0;
+  left: clamp(30px, 3.6vw, 58px);
+  width: 1px;
+  background-color: rgba(171, 50, 39, 0.25);
   pointer-events: none;
 }
 
 .login-hero::after {
-  content: '';
+  content: '档';
   position: absolute;
-  right: -120px;
-  bottom: -160px;
-  width: 420px;
-  height: 420px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 50%;
-  box-shadow: 0 0 0 60px rgba(255, 255, 255, 0.03), 0 0 0 120px rgba(255, 255, 255, 0.02);
+  top: -18px;
+  right: clamp(12px, 4vw, 48px);
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: clamp(160px, 18vw, 240px);
+  font-weight: 700;
+  line-height: 1;
+  opacity: 0.035;
   pointer-events: none;
 }
 
@@ -218,58 +228,74 @@ async function submit(): Promise<void> {
   position: relative;
   z-index: 1;
   max-width: 480px;
+  padding-left: clamp(20px, 2vw, 30px);
+  border-left: 1px solid rgba(171, 50, 39, 0.32);
 }
 
-.hero-badge {
+.hero-kicker {
   display: inline-flex;
   align-items: center;
-  height: 28px;
-  padding: 0 12px;
-  border: 1px solid rgba(255, 255, 255, 0.28);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  font-size: 12px;
-  letter-spacing: 1.2px;
+  gap: 10px;
+  color: var(--nc-muted-2);
+  font-family: var(--nc-font-mono);
+  font-size: var(--nc-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.hero-kicker::before {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--nc-radius-xs);
+  background-color: var(--nc-seal);
 }
 
 .hero-title {
-  margin-top: 26px;
-  font-size: clamp(32px, 3.2vw, 46px);
+  margin-top: 22px;
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: clamp(34px, 3.4vw, 48px);
   font-weight: 700;
-  line-height: 1.24;
-  letter-spacing: 1px;
+  line-height: 1.28;
+  letter-spacing: 0.07em;
 }
 
 .hero-desc {
-  margin-top: 16px;
+  margin-top: 18px;
   max-width: 380px;
-  color: rgba(255, 255, 255, 0.78);
-  font-size: 14px;
-  line-height: 1.8;
+  color: var(--nc-ink-2);
+  font-size: var(--nc-text-base);
+  line-height: 1.9;
 }
 
 .hero-points {
+  display: grid;
+  gap: 13px;
   margin: 34px 0 0;
   padding: 0;
   list-style: none;
-  display: grid;
-  gap: 13px;
 }
 
 .hero-points li {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  color: rgba(255, 255, 255, 0.86);
+  align-items: flex-start;
+  gap: 11px;
+  color: var(--nc-ink-2);
   font-size: 13px;
+  line-height: 1.7;
 }
 
 .point-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #8ec5f0;
-  box-shadow: 0 0 0 4px rgba(142, 197, 240, 0.16);
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: 8px;
+  border-radius: var(--nc-radius-xs);
+  background-color: var(--nc-seal);
+  opacity: 0.85;
 }
 
 .hero-foot {
@@ -277,24 +303,57 @@ async function submit(): Promise<void> {
   align-items: center;
   gap: 12px;
   margin-top: 52px;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 11px;
-  letter-spacing: 0.6px;
+  padding-top: 16px;
+  border-top: 1px solid var(--nc-line);
+  color: var(--nc-muted);
+  font-family: var(--nc-font-mono);
+  font-size: var(--nc-text-xs);
+  letter-spacing: 0.08em;
 }
 
 .hero-line {
-  width: 32px;
+  width: 30px;
   height: 1px;
-  background: rgba(255, 255, 255, 0.35);
+  background-color: var(--nc-seal);
+  opacity: 0.6;
 }
 
+.hero-stamp {
+  position: absolute;
+  right: clamp(30px, 5vw, 70px);
+  bottom: clamp(40px, 7vh, 82px);
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: 88px;
+  height: 88px;
+  padding: 6px;
+  border: 2px solid var(--nc-seal);
+  border-radius: var(--nc-radius-sm);
+  box-shadow: inset 0 0 0 2px rgba(171, 50, 39, 0.12);
+  color: var(--nc-seal);
+  font-family: var(--nc-font-serif);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: 0.16em;
+  text-align: center;
+  opacity: 0.82;
+  transform: rotate(-5deg);
+  pointer-events: none;
+}
+
+/* ── 右侧：登录卡 ─────────────────────────────────────────────── */
 .login-panel {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 48px 24px 28px;
-  background: #fff;
+  padding: 48px 28px 28px;
+  background-color: var(--nc-paper);
 }
 
 .mobile-brand {
@@ -303,18 +362,36 @@ async function submit(): Promise<void> {
 
 .login-card {
   width: 100%;
-  max-width: 380px;
+  max-width: 388px;
+  padding: 30px 30px 28px;
+  border: 1px solid var(--nc-line);
+  border-top: 3px solid var(--nc-seal);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-2);
+  box-shadow: var(--nc-shadow-sm);
+}
+
+.login-kicker {
+  color: var(--nc-muted);
+  font-family: var(--nc-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
 }
 
 .login-head h2 {
+  margin-top: 6px;
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
   font-size: 26px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
 }
 
 .login-head p {
   margin-top: 8px;
-  color: var(--nc-text-secondary);
+  color: var(--nc-muted-2);
   font-size: 13px;
 }
 
@@ -332,13 +409,13 @@ async function submit(): Promise<void> {
 
 .login-card :deep(.el-form-item__label) {
   padding-bottom: 6px;
+  color: var(--nc-ink-2);
   font-size: 13px;
-  color: var(--nc-text-secondary);
 }
 
 .login-card :deep(.el-input__wrapper) {
   padding: 2px 14px;
-  border-radius: 8px;
+  border-radius: var(--nc-radius-sm);
 }
 
 .login-options {
@@ -350,34 +427,39 @@ async function submit(): Promise<void> {
 }
 
 .login-hint {
-  color: var(--nc-text-muted);
-  font-size: 12px;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
 }
 
 .login-submit {
   width: 100%;
-  height: 44px;
+  height: 46px;
   font-size: 15px;
-  letter-spacing: 3px;
+  letter-spacing: 0.32em;
 }
 
 .login-tip {
   margin-top: 22px;
-  color: var(--nc-text-muted);
-  font-size: 11px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--nc-line);
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
   line-height: 1.7;
 }
 
 .login-footer {
-  margin-top: 48px;
-  color: var(--nc-text-muted);
-  font-size: 11px;
+  margin-top: 44px;
+  color: var(--nc-muted);
+  font-family: var(--nc-font-mono);
+  font-size: var(--nc-text-xs);
+  letter-spacing: 0.04em;
 }
 
+/* ── 手机 ─────────────────────────────────────────────────────── */
 @media (max-width: 900px) {
   .login-page {
     grid-template-columns: 1fr;
-    background: var(--nc-bg);
+    background-color: var(--nc-paper);
   }
 
   .login-hero {
@@ -387,57 +469,69 @@ async function submit(): Promise<void> {
   .login-panel {
     justify-content: flex-start;
     min-height: 100vh;
-    padding: 40px 20px calc(28px + env(safe-area-inset-bottom));
-    background: var(--nc-bg);
+    padding: 36px 18px calc(28px + env(safe-area-inset-bottom));
+    background:
+      repeating-linear-gradient(
+        0deg,
+        transparent 0 34px,
+        rgba(23, 19, 16, 0.03) 34px 35px
+      ),
+      var(--nc-paper);
   }
 
   .mobile-brand {
     display: flex;
     align-items: center;
-    gap: 11px;
+    gap: 12px;
     width: 100%;
-    max-width: 380px;
-    margin-bottom: 26px;
+    max-width: 388px;
+    margin-bottom: 24px;
+    padding-left: 13px;
+    border-left: 3px solid var(--nc-seal);
   }
 
   .mobile-mark {
     display: grid;
+    flex: none;
     place-items: center;
-    width: 40px;
-    height: 40px;
-    border-radius: 10px;
-    background: linear-gradient(150deg, #2a76ba, #164c7e);
-    color: #fff;
-    font-size: 18px;
+    width: 42px;
+    height: 42px;
+    border: 1px solid rgba(242, 236, 225, 0.34);
+    border-radius: var(--nc-radius-sm);
+    background-color: var(--nc-seal);
+    box-shadow: inset 0 0 0 2px rgba(23, 19, 16, 0.16);
+    color: var(--nc-paper-2);
+    font-family: var(--nc-font-serif);
+    font-size: 20px;
     font-weight: 700;
   }
 
   .mobile-brand div {
     display: flex;
     flex-direction: column;
-    line-height: 1.35;
+    line-height: 1.4;
   }
 
   .mobile-brand strong {
-    font-size: 15px;
+    color: var(--nc-ink);
+    font-family: var(--nc-font-serif);
+    font-size: 16px;
+    letter-spacing: 0.08em;
   }
 
   .mobile-brand span:last-child {
-    font-size: 11px;
-    letter-spacing: 1.4px;
-    color: var(--nc-text-muted);
+    color: var(--nc-muted);
+    font-size: 10px;
+    letter-spacing: 0.2em;
   }
 
   .login-card {
+    max-width: 388px;
     padding: 22px 18px 20px;
-    background: #fff;
-    border: 1px solid var(--nc-border);
-    border-radius: 14px;
-    box-shadow: var(--nc-shadow);
   }
 
   .login-head h2 {
-    font-size: 21px;
+    font-size: 22px;
   }
 
   .login-card :deep(.el-form) {
@@ -445,7 +539,7 @@ async function submit(): Promise<void> {
   }
 
   .login-footer {
-    margin-top: 32px;
+    margin-top: 30px;
   }
 }
 </style>

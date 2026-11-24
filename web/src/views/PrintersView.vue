@@ -4,6 +4,10 @@ import type { FormInstance, FormRules } from 'element-plus'
 import { Delete, InfoFilled, Plus, Printer as PrinterIcon, Refresh, Star } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
 import { bindPrinter, listDevices, listPrinters, setDefaultPrinter, unbindPrinter } from '@/api/printers'
+import NcCard from '@/components/NcCard.vue'
+import NcPageHeader from '@/components/NcPageHeader.vue'
+import NcStat from '@/components/NcStat.vue'
+import NcStatusDot from '@/components/NcStatusDot.vue'
 import { useMediaQuery } from '@/composables/useMediaQuery'
 import type { PrinterBinding, PrinterDevice } from '@/types/api'
 
@@ -175,30 +179,28 @@ onMounted(() => {
 
 <template>
   <div class="nc-page printers-page">
-    <header class="nc-page-header">
-      <div>
-        <h1 class="nc-page-title">打印机绑定</h1>
-        <p class="nc-page-desc">管理当前账号可用的打印设备。手机端仅入队，实际打印由绑定的 Windows 电脑执行。</p>
-      </div>
-      <div class="header-actions">
-        <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
-        <el-button type="primary" :icon="Plus" @click="openBindDialog">绑定打印机</el-button>
-      </div>
-    </header>
+    <NcPageHeader
+      title="打印机绑定"
+      description="管理当前账号可用的打印设备。手机端仅入队，实际打印由绑定的 Windows 电脑执行。"
+    >
+      <template #actions>
+        <div class="header-actions">
+          <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
+          <el-button type="primary" :icon="Plus" @click="openBindDialog">绑定打印机</el-button>
+        </div>
+      </template>
+    </NcPageHeader>
 
     <div class="summary">
-      <div class="summary-item">
-        <span>已绑定</span>
-        <strong>{{ items.length }}</strong>
-      </div>
-      <div class="summary-item">
-        <span>在线设备</span>
-        <strong>{{ onlineCount }}</strong>
-      </div>
-      <div class="summary-item summary-item--wide">
-        <span>默认打印机</span>
-        <strong :title="defaultPrinter">{{ defaultPrinter }}</strong>
-      </div>
+      <NcStat label="已绑定" :value="items.length" tone="ink" />
+      <NcStat label="在线设备" :value="onlineCount" tone="pine" />
+      <NcStat
+        class="summary-default"
+        label="默认打印机"
+        :value="defaultPrinter"
+        tone="seal"
+        compact
+      />
     </div>
 
     <div class="hint-bar">
@@ -217,125 +219,133 @@ onMounted(() => {
       <el-button link type="primary" @click="load()">重新加载</el-button>
     </el-alert>
 
-    <div v-loading="loading && items.length > 0" class="list-area">
-      <el-skeleton v-if="loading && items.length === 0" :rows="4" animated class="list-skeleton" />
+    <NcCard padding="none" class="list-card">
+      <div
+        v-loading="loading && items.length > 0"
+        class="list-area"
+        :class="{ 'list-area--cards': isNarrow }"
+      >
+        <el-skeleton v-if="loading && items.length === 0" :rows="4" animated class="list-skeleton" />
 
-      <template v-else-if="items.length > 0">
-        <el-table v-if="!isNarrow" :data="items" class="printer-table" row-key="id">
-          <el-table-column label="绑定设备" min-width="180">
-            <template #default="{ row }">
-              <div class="device-cell">
-                <strong>{{ row.deviceName }}</strong>
-                <span>设备 #{{ row.deviceId }}</span>
+        <template v-else-if="items.length > 0">
+          <el-table v-if="!isNarrow" :data="items" class="printer-table" row-key="id">
+            <el-table-column label="绑定设备" min-width="180">
+              <template #default="{ row }">
+                <div class="device-cell">
+                  <strong>{{ row.deviceName }}</strong>
+                  <span>设备 #{{ row.deviceId }}</span>
+                </div>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="打印机名称" min-width="200">
+              <template #default="{ row }">
+                <div class="printer-cell">
+                  <el-icon><PrinterIcon /></el-icon>
+                  <span>{{ row.printerName }}</span>
+                </div>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="默认" width="90" align="center">
+              <template #default="{ row }">
+                <NcStatusDot v-if="row.isDefault" status="default" label="默认" />
+                <span v-else class="nc-muted">—</span>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="状态" width="100" align="center">
+              <template #default="{ row }">
+                <NcStatusDot
+                  :status="row.online ? 'online' : 'offline'"
+                  :label="row.online ? '在线' : '离线'"
+                />
+              </template>
+            </el-table-column>
+
+            <el-table-column label="最近在线" width="150">
+              <template #default="{ row }">{{ formatTime(row.lastSeenAt) }}</template>
+            </el-table-column>
+
+            <el-table-column label="操作" width="190" align="right">
+              <template #default="{ row }">
+                <el-button
+                  link
+                  type="primary"
+                  :icon="Star"
+                  :disabled="row.isDefault"
+                  :loading="actionId === row.id"
+                  @click="handleSetDefault(row as PrinterBinding)"
+                >
+                  设为默认
+                </el-button>
+                <el-button
+                  link
+                  type="danger"
+                  :icon="Delete"
+                  :loading="actionId === row.id"
+                  @click="handleUnbind(row as PrinterBinding)"
+                >
+                  解绑
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div v-else class="printer-cards">
+            <article v-for="row in items" :key="row.id" class="printer-card">
+              <div class="card-head">
+                <div class="device-cell">
+                  <strong>{{ row.deviceName }}</strong>
+                  <span>设备 #{{ row.deviceId }}</span>
+                </div>
+                <NcStatusDot
+                  :status="row.online ? 'online' : 'offline'"
+                  :label="row.online ? '在线' : '离线'"
+                />
               </div>
-            </template>
-          </el-table-column>
 
-          <el-table-column label="打印机名称" min-width="200">
-            <template #default="{ row }">
-              <div class="printer-cell">
+              <div class="card-printer">
                 <el-icon><PrinterIcon /></el-icon>
                 <span>{{ row.printerName }}</span>
+                <NcStatusDot v-if="row.isDefault" status="default" label="默认" />
               </div>
-            </template>
-          </el-table-column>
 
-          <el-table-column label="默认" width="90" align="center">
-            <template #default="{ row }">
-              <el-tag v-if="row.isDefault" type="primary" effect="light" size="small">默认</el-tag>
-              <span v-else class="nc-muted">—</span>
-            </template>
-          </el-table-column>
+              <p class="card-meta">最近在线：{{ formatTime(row.lastSeenAt) }}</p>
 
-          <el-table-column label="状态" width="100" align="center">
-            <template #default="{ row }">
-              <span class="status-text">
-                <i class="status-dot" :class="row.online ? 'is-online' : 'is-offline'" />
-                {{ row.online ? '在线' : '离线' }}
-              </span>
-            </template>
-          </el-table-column>
-
-          <el-table-column label="最近在线" width="150">
-            <template #default="{ row }">{{ formatTime(row.lastSeenAt) }}</template>
-          </el-table-column>
-
-          <el-table-column label="操作" width="190" align="right">
-            <template #default="{ row }">
-              <el-button
-                link
-                type="primary"
-                :icon="Star"
-                :disabled="row.isDefault"
-                :loading="actionId === row.id"
-                @click="handleSetDefault(row as PrinterBinding)"
-              >
-                设为默认
-              </el-button>
-              <el-button
-                link
-                type="danger"
-                :icon="Delete"
-                :loading="actionId === row.id"
-                @click="handleUnbind(row as PrinterBinding)"
-              >
-                解绑
-              </el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-
-        <div v-else class="printer-cards">
-          <article v-for="row in items" :key="row.id" class="printer-card">
-            <div class="card-head">
-              <div class="device-cell">
-                <strong>{{ row.deviceName }}</strong>
-                <span>设备 #{{ row.deviceId }}</span>
+              <div class="card-actions">
+                <el-button
+                  size="small"
+                  :icon="Star"
+                  :disabled="row.isDefault"
+                  :loading="actionId === row.id"
+                  @click="handleSetDefault(row)"
+                >
+                  设为默认
+                </el-button>
+                <el-button
+                  size="small"
+                  type="danger"
+                  plain
+                  :icon="Delete"
+                  :loading="actionId === row.id"
+                  @click="handleUnbind(row)"
+                >
+                  解绑
+                </el-button>
               </div>
-              <span class="status-text">
-                <i class="status-dot" :class="row.online ? 'is-online' : 'is-offline'" />
-                {{ row.online ? '在线' : '离线' }}
-              </span>
-            </div>
+            </article>
+          </div>
+        </template>
 
-            <div class="card-printer">
-              <el-icon><PrinterIcon /></el-icon>
-              <span>{{ row.printerName }}</span>
-              <el-tag v-if="row.isDefault" type="primary" effect="light" size="small">默认</el-tag>
-            </div>
-
-            <p class="card-meta">最近在线：{{ formatTime(row.lastSeenAt) }}</p>
-
-            <div class="card-actions">
-              <el-button
-                size="small"
-                :icon="Star"
-                :disabled="row.isDefault"
-                :loading="actionId === row.id"
-                @click="handleSetDefault(row)"
-              >
-                设为默认
-              </el-button>
-              <el-button
-                size="small"
-                type="danger"
-                plain
-                :icon="Delete"
-                :loading="actionId === row.id"
-                @click="handleUnbind(row)"
-              >
-                解绑
-              </el-button>
-            </div>
-          </article>
+        <div v-else-if="!loading && !loadError" class="empty-wrap">
+          <el-empty description="尚未绑定打印机">
+            <el-button type="primary" :icon="Plus" @click="openBindDialog">绑定第一台打印机</el-button>
+            <p class="empty-tip">请先在 Windows 电脑启动 Agent，再选择该电脑上报的打印机完成绑定。</p>
+          </el-empty>
         </div>
-      </template>
-
-      <el-empty v-else-if="!loading && !loadError" description="尚未绑定打印机">
-        <el-button type="primary" :icon="Plus" @click="openBindDialog">绑定第一台打印机</el-button>
-        <p class="empty-tip">请先在 Windows 电脑启动 Agent，再选择该电脑上报的打印机完成绑定。</p>
-      </el-empty>
-    </div>
+      </div>
+    </NcCard>
 
     <el-dialog
       v-model="dialogVisible"
@@ -411,7 +421,7 @@ onMounted(() => {
 .printers-page {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 15px;
 }
 
 .header-actions {
@@ -420,85 +430,61 @@ onMounted(() => {
   gap: 8px;
 }
 
+/* ── 概要统计 ─────────────────────────────────────────────────── */
 .summary {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
-.summary-item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 120px;
-  padding: 10px 16px;
-  border: 1px solid var(--nc-border);
-  border-radius: 9px;
-  background: #fff;
+.summary-default {
+  min-width: 0;
 }
 
-.summary-item span {
-  color: var(--nc-text-muted);
-  font-size: 12px;
-}
-
-.summary-item strong {
-  overflow: hidden;
-  max-width: 240px;
-  font-size: 16px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.summary-item--wide {
-  flex: 1;
-  min-width: 220px;
-}
-
-.summary-item--wide strong {
-  font-size: 14px;
-}
-
+/* ── 提示条 ───────────────────────────────────────────────────── */
 .hint-bar {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 9px;
   padding: 11px 14px;
-  border: 1px solid #dce9f5;
-  border-radius: 9px;
-  background: #f5f9fe;
-  color: #40607c;
-  font-size: 12px;
-  line-height: 1.6;
+  border: 1px solid rgba(150, 104, 28, 0.28);
+  border-left: 3px solid var(--nc-amber);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-amber-soft);
+  color: var(--nc-amber-dark);
+  font-size: var(--nc-text-sm);
+  line-height: 1.65;
 }
 
 .hint-bar .el-icon {
   flex: none;
   margin-top: 2px;
-  color: var(--nc-primary);
+  color: var(--nc-amber);
 }
 
 .load-error {
-  margin-bottom: 2px;
+  margin-bottom: 0;
+}
+
+/* ── 列表 ─────────────────────────────────────────────────────── */
+.list-card {
+  overflow: hidden;
 }
 
 .list-area {
   min-height: 220px;
 }
 
+.list-area--cards {
+  padding: 12px;
+}
+
 .list-skeleton {
   padding: 22px;
-  border: 1px solid var(--nc-border);
-  border-radius: var(--nc-radius);
-  background: #fff;
 }
 
 .printer-table {
   width: 100%;
-  border: 1px solid var(--nc-border);
-  border-radius: var(--nc-radius);
-  overflow: hidden;
 }
 
 .device-cell {
@@ -508,63 +494,38 @@ onMounted(() => {
 }
 
 .device-cell strong {
+  color: var(--nc-ink);
   font-size: 13px;
   font-weight: 600;
 }
 
 .device-cell span {
-  color: var(--nc-text-muted);
-  font-size: 11px;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
 }
 
 .printer-cell {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: var(--nc-text);
+  color: var(--nc-ink);
 }
 
 .printer-cell .el-icon {
-  color: var(--nc-primary);
+  color: var(--nc-seal);
 }
 
-.status-text {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--nc-text-secondary);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.status-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-}
-
-.status-dot.is-online {
-  background: #42b883;
-  box-shadow: 0 0 0 3px rgba(66, 184, 131, 0.15);
-}
-
-.status-dot.is-offline {
-  background: #b6c0cc;
-  box-shadow: 0 0 0 3px rgba(182, 192, 204, 0.16);
-}
-
+/* ── 手机卡片 ─────────────────────────────────────────────────── */
 .printer-cards {
   display: grid;
   gap: 10px;
 }
 
 .printer-card {
-  padding: 15px 16px;
-  border: 1px solid var(--nc-border);
-  border-radius: var(--nc-radius);
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(16, 42, 67, 0.04);
+  padding: 14px 15px;
+  border: 1px solid var(--nc-line);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-soft);
 }
 
 .card-head {
@@ -580,20 +541,22 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 7px;
   margin-top: 12px;
-  padding: 9px 11px;
-  border-radius: 8px;
-  background: #f6f9fd;
+  padding: 8px 10px;
+  border: 1px solid var(--nc-line-faint);
+  border-radius: var(--nc-radius-xs);
+  background-color: var(--nc-paper-3);
+  color: var(--nc-ink);
   font-size: 13px;
 }
 
 .card-printer .el-icon {
-  color: var(--nc-primary);
+  color: var(--nc-seal);
 }
 
 .card-meta {
   margin-top: 9px;
-  color: var(--nc-text-muted);
-  font-size: 11px;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
 }
 
 .card-actions {
@@ -602,28 +565,44 @@ onMounted(() => {
   gap: 8px;
   margin-top: 12px;
   padding-top: 11px;
-  border-top: 1px solid #f0f3f8;
+  border-top: 1px solid var(--nc-line-faint);
+}
+
+.card-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.empty-wrap {
+  padding: 10px 8px;
 }
 
 .empty-tip {
   margin-top: 10px;
-  color: var(--nc-text-muted);
-  font-size: 12px;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-sm);
 }
 
+/* ── 弹窗 ─────────────────────────────────────────────────────── */
 .dialog-tip {
   margin-bottom: 18px;
+}
+
+.form-tip {
+  margin-top: 6px;
+  font-size: var(--nc-text-xs);
+  line-height: 1.6;
 }
 
 .switch-row {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  color: var(--nc-text-muted);
-  font-size: 12px;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-sm);
   line-height: 1.6;
 }
 
+/* ── 手机 ─────────────────────────────────────────────────────── */
 @media (max-width: 767px) {
   .header-actions {
     width: 100%;
@@ -634,27 +613,25 @@ onMounted(() => {
   }
 
   .summary {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
   }
 
-  .summary-item {
-    min-width: 0;
-    padding: 9px 12px;
-  }
-
-  .summary-item--wide {
+  .summary-default {
     grid-column: 1 / -1;
-    min-width: 0;
-  }
-
-  .summary-item--wide strong {
-    max-width: none;
   }
 
   .hint-bar {
-    font-size: 11px;
+    padding: 10px 12px;
+    font-size: var(--nc-text-xs);
+  }
+
+  .list-area--cards {
+    padding: 10px;
+  }
+
+  .printer-card {
+    padding: 13px 14px;
   }
 }
 </style>

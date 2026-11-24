@@ -14,14 +14,19 @@ import {
   User,
 } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
+import NcCard from '@/components/NcCard.vue'
+import NcStatusDot from '@/components/NcStatusDot.vue'
 import { APP_NAME } from '@/config/app'
 import { useAuthStore } from '@/stores/auth'
+
+type Tone = 'ink' | 'seal' | 'pine' | 'amber'
 
 interface InfoItem {
   label: string
   value: string
   extra?: string
   icon: Component
+  tone?: Tone
 }
 
 interface QuickItem {
@@ -29,6 +34,7 @@ interface QuickItem {
   description: string
   icon: Component
   path?: string
+  tone?: Tone
 }
 
 const auth = useAuthStore()
@@ -80,24 +86,28 @@ const infoItems = computed<InfoItem[]>(() => [
     value: auth.user?.fullName || auth.user?.username || '—',
     extra: auth.user?.username ? `登录名 ${auth.user.username}` : undefined,
     icon: User,
+    tone: 'seal',
   },
   {
     label: '所属组织',
     value: organization.value,
     extra: auth.user?.organizationId ? `组织编号 ${auth.user.organizationId}` : undefined,
     icon: OfficeBuilding,
+    tone: 'pine',
   },
   {
     label: '会话有效期至',
     value: expiresText.value,
     extra: remainingText.value,
     icon: Clock,
+    tone: 'amber',
   },
   {
     label: '当前设备',
     value: deviceIdText.value,
     extra: deviceKindText.value,
     icon: Monitor,
+    tone: 'ink',
   },
 ])
 
@@ -106,16 +116,19 @@ const quickItems: QuickItem[] = [
     title: '打印中心',
     description: '发起打印任务并在绑定设备执行',
     icon: Tickets,
+    tone: 'seal',
   },
   {
     title: '文档中心',
     description: '救助档案与业务附件统一管理',
     icon: FolderOpened,
+    tone: 'pine',
   },
   {
     title: '系统设置',
     description: '通知、偏好与安全选项',
     icon: Setting,
+    tone: 'amber',
   },
 ]
 
@@ -152,9 +165,7 @@ async function refreshSession(): Promise<void> {
         <p class="welcome-sub">{{ organization }} · 欢迎使用{{ APP_NAME }}</p>
       </div>
       <div class="welcome-side">
-        <el-tag class="session-tag" effect="light" round>
-          <span class="tag-dot" />会话正常
-        </el-tag>
+        <NcStatusDot status="online" label="会话正常" />
         <el-button :icon="Refresh" :loading="refreshing" plain size="small" @click="refreshSession">
           刷新会话
         </el-button>
@@ -162,7 +173,12 @@ async function refreshSession(): Promise<void> {
     </section>
 
     <section class="info-grid" aria-label="会话信息">
-      <article v-for="item in infoItems" :key="item.label" class="info-card">
+      <article
+        v-for="item in infoItems"
+        :key="item.label"
+        class="info-card"
+        :class="`tone-${item.tone ?? 'ink'}`"
+      >
         <span class="info-icon">
           <el-icon :size="18"><component :is="item.icon" /></el-icon>
         </span>
@@ -181,7 +197,7 @@ async function refreshSession(): Promise<void> {
       </div>
 
       <div class="quick-grid">
-        <RouterLink to="/printers" class="quick-card">
+        <RouterLink to="/printers" class="quick-card tone-seal">
           <span class="quick-icon"><el-icon :size="22"><Printer /></el-icon></span>
           <span class="quick-text">
             <strong>打印机绑定</strong>
@@ -190,7 +206,13 @@ async function refreshSession(): Promise<void> {
           <el-icon class="quick-arrow"><ArrowRight /></el-icon>
         </RouterLink>
 
-        <div v-for="item in quickItems" :key="item.title" class="quick-card is-disabled" aria-disabled="true">
+        <div
+          v-for="item in quickItems"
+          :key="item.title"
+          class="quick-card is-disabled"
+          :class="`tone-${item.tone ?? 'ink'}`"
+          aria-disabled="true"
+        >
           <span class="quick-icon"><el-icon :size="22"><component :is="item.icon" /></el-icon></span>
           <span class="quick-text">
             <strong>{{ item.title }}</strong>
@@ -201,14 +223,13 @@ async function refreshSession(): Promise<void> {
       </div>
     </section>
 
-    <section class="tips-card nc-card">
-      <h2 class="nc-section-title">打印使用提示</h2>
+    <NcCard title="打印使用提示" class="tips-card">
       <ol class="tips-list">
         <li><span>1</span>在需要执行打印的 Windows 电脑上安装并启动 NewCosmos Agent。</li>
-        <li><span>2</span>进入「打印机绑定」，填写 Agent 的设备密钥与已上报的打印机名称。</li>
+        <li><span>2</span>进入「打印机绑定」，选择已注册的 Agent 设备与该设备上报的打印机。</li>
         <li><span>3</span>手机端发起打印后，任务将在绑定的电脑上由默认打印机执行。</li>
       </ol>
-    </section>
+    </NcCard>
   </div>
 </template>
 
@@ -216,9 +237,10 @@ async function refreshSession(): Promise<void> {
 .home-page {
   display: flex;
   flex-direction: column;
-  gap: 22px;
+  gap: 20px;
 }
 
+/* ── 欢迎区（档案首页题头） ───────────────────────────────────── */
 .welcome {
   position: relative;
   display: flex;
@@ -226,98 +248,141 @@ async function refreshSession(): Promise<void> {
   justify-content: space-between;
   gap: 20px;
   overflow: hidden;
-  padding: 26px 28px;
-  border: 1px solid #dbe7f3;
-  border-radius: var(--nc-radius);
+  padding: 24px 26px 24px 24px;
+  border: 1px solid var(--nc-line);
+  border-left: 3px solid var(--nc-seal);
+  border-radius: var(--nc-radius-sm);
   background:
-    radial-gradient(420px 220px at 92% 0%, rgba(42, 118, 186, 0.12), transparent 70%),
-    linear-gradient(115deg, #eff6fd 0%, #f8fbff 62%, #ffffff 100%);
+    linear-gradient(90deg, rgba(171, 50, 39, 0.045), transparent 34%),
+    var(--nc-paper-2);
+  box-shadow: var(--nc-shadow-xs);
 }
 
 .welcome::after {
-  content: '';
+  content: '档';
   position: absolute;
-  right: -70px;
-  bottom: -110px;
-  width: 240px;
-  height: 240px;
-  border: 1px solid rgba(28, 95, 158, 0.12);
-  border-radius: 50%;
-  box-shadow: 0 0 0 40px rgba(28, 95, 158, 0.04);
+  right: 24px;
+  bottom: -34px;
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: 128px;
+  font-weight: 700;
+  line-height: 1;
+  opacity: 0.04;
   pointer-events: none;
 }
 
-.welcome-main {
+.welcome-main,
+.welcome-side {
   position: relative;
   z-index: 1;
 }
 
+.welcome-main {
+  min-width: 0;
+}
+
 .welcome-date {
-  color: var(--nc-text-muted);
-  font-size: 12px;
-  letter-spacing: 0.4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--nc-muted);
+  font-family: var(--nc-font-mono);
+  font-size: var(--nc-text-xs);
+  letter-spacing: 0.1em;
+}
+
+.welcome-date::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--nc-radius-xs);
+  background-color: var(--nc-seal);
 }
 
 .welcome-title {
-  margin-top: 8px;
-  font-size: 25px;
-  font-weight: 600;
-  letter-spacing: 0.4px;
-  color: #173a5b;
+  margin-top: 9px;
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: 0.04em;
 }
 
 .welcome-sub {
-  margin-top: 8px;
-  color: var(--nc-text-secondary);
+  margin-top: 7px;
+  color: var(--nc-muted-2);
   font-size: 13px;
 }
 
 .welcome-side {
-  position: relative;
-  z-index: 1;
   display: flex;
+  flex: none;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
-.session-tag :deep(.el-tag__content) {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.tag-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #42b883;
-}
-
+/* ── 会话信息卡 ───────────────────────────────────────────────── */
 .info-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(236px, 1fr));
+  gap: 12px;
 }
 
 .info-card {
+  --tone: var(--nc-ink-2);
+  --tone-soft: var(--nc-paper-3);
+
   display: flex;
   gap: 13px;
-  padding: 16px 17px;
-  border: 1px solid var(--nc-border);
-  border-radius: var(--nc-radius);
-  background: #fff;
-  box-shadow: 0 1px 2px rgba(16, 42, 67, 0.04);
+  min-width: 0;
+  padding: 15px 16px;
+  border: 1px solid var(--nc-line);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-2);
+  box-shadow: var(--nc-shadow-xs);
+  transition:
+    border-color var(--nc-transition),
+    box-shadow var(--nc-transition);
+}
+
+.info-card:hover {
+  border-color: var(--nc-line-strong);
+  box-shadow: var(--nc-shadow-sm);
+}
+
+.tone-seal {
+  --tone: var(--nc-seal);
+  --tone-soft: var(--nc-seal-wash);
+}
+
+.tone-pine {
+  --tone: var(--nc-pine);
+  --tone-soft: var(--nc-pine-soft);
+}
+
+.tone-amber {
+  --tone: var(--nc-amber);
+  --tone-soft: var(--nc-amber-soft);
+}
+
+.tone-ink {
+  --tone: var(--nc-ink-2);
+  --tone-soft: var(--nc-paper-3);
 }
 
 .info-icon {
   display: grid;
-  place-items: center;
   flex: none;
+  place-items: center;
   width: 36px;
   height: 36px;
-  border-radius: 9px;
-  background: var(--nc-primary-soft);
-  color: var(--nc-primary);
+  border: 1px solid var(--nc-line-faint);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--tone-soft);
+  color: var(--tone);
 }
 
 .info-main {
@@ -328,16 +393,18 @@ async function refreshSession(): Promise<void> {
 }
 
 .info-label {
-  color: var(--nc-text-muted);
-  font-size: 11px;
-  letter-spacing: 0.5px;
+  color: var(--nc-muted);
+  font-family: var(--nc-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
 }
 
 .info-value {
-  margin-top: 3px;
+  margin-top: 4px;
   overflow: hidden;
-  color: var(--nc-text);
-  font-size: 14px;
+  color: var(--nc-ink);
+  font-size: var(--nc-text-base);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -346,56 +413,67 @@ async function refreshSession(): Promise<void> {
 .info-extra {
   margin-top: 2px;
   overflow: hidden;
-  color: var(--nc-text-muted);
-  font-size: 11px;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* ── 快捷入口 ─────────────────────────────────────────────────── */
 .section-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   margin-bottom: 12px;
 }
 
 .section-note {
-  color: var(--nc-text-muted);
-  font-size: 12px;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-sm);
 }
 
 .quick-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 12px;
 }
 
 .quick-card {
+  --tone: var(--nc-ink-2);
+  --tone-soft: var(--nc-paper-3);
+
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 17px 18px;
-  border: 1px solid var(--nc-border);
-  border-radius: var(--nc-radius);
-  background: #fff;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  min-width: 0;
+  padding: 16px 17px;
+  border: 1px solid var(--nc-line);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-2);
+  box-shadow: var(--nc-shadow-xs);
+  transition:
+    border-color var(--nc-transition),
+    box-shadow var(--nc-transition),
+    transform var(--nc-transition);
 }
 
 .quick-card:not(.is-disabled):hover {
-  border-color: #b7cfe6;
-  box-shadow: 0 8px 20px rgba(28, 95, 158, 0.08);
+  border-color: var(--nc-seal);
+  box-shadow: var(--nc-shadow-sm);
   transform: translateY(-1px);
 }
 
 .quick-icon {
   display: grid;
-  place-items: center;
   flex: none;
+  place-items: center;
   width: 42px;
   height: 42px;
-  border-radius: 10px;
-  background: var(--nc-primary-soft);
-  color: var(--nc-primary);
+  border: 1px solid var(--nc-line-faint);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--tone-soft);
+  color: var(--tone);
 }
 
 .quick-text {
@@ -406,74 +484,87 @@ async function refreshSession(): Promise<void> {
 }
 
 .quick-text strong {
-  font-size: 14px;
-  font-weight: 600;
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-md);
+  font-weight: 700;
+  letter-spacing: 0.03em;
 }
 
 .quick-text small {
   overflow: hidden;
-  color: var(--nc-text-muted);
-  font-size: 12px;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .quick-arrow {
   margin-left: auto;
-  color: var(--nc-primary);
+  color: var(--nc-seal);
 }
 
 .quick-badge {
+  flex: none;
   margin-left: auto;
-  padding: 1px 7px;
-  border-radius: 4px;
-  background: #f2f4f8;
-  color: var(--nc-text-muted);
+  padding: 1px 6px;
+  border: 1px solid var(--nc-line);
+  border-radius: var(--nc-radius-xs);
+  color: var(--nc-muted);
+  font-family: var(--nc-font-mono);
   font-size: 10px;
+  letter-spacing: 0.06em;
   white-space: nowrap;
 }
 
 .quick-card.is-disabled {
-  background: #fbfcfe;
+  background-color: var(--nc-paper);
+  box-shadow: none;
+  opacity: 0.66;
 }
 
 .quick-card.is-disabled .quick-icon {
-  background: #f2f4f8;
-  color: #97a4b3;
+  color: var(--nc-muted);
 }
 
-.tips-card {
-  padding: 20px 22px 22px;
-}
-
+/* ── 打印提示 ─────────────────────────────────────────────────── */
 .tips-list {
-  margin: 14px 0 0;
+  display: grid;
+  gap: 11px;
+  margin: 0;
   padding: 0;
   list-style: none;
-  display: grid;
-  gap: 10px;
 }
 
 .tips-list li {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  color: var(--nc-text-secondary);
+  gap: 11px;
+  color: var(--nc-ink-2);
   font-size: 13px;
+  line-height: 1.75;
 }
 
 .tips-list span {
   display: grid;
-  place-items: center;
   flex: none;
-  width: 18px;
-  height: 18px;
-  margin-top: 2px;
-  border-radius: 50%;
-  background: var(--nc-primary-soft);
-  color: var(--nc-primary);
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border: 1px solid rgba(171, 50, 39, 0.45);
+  border-radius: var(--nc-radius-xs);
+  color: var(--nc-seal-dark);
+  font-family: var(--nc-font-mono);
   font-size: 11px;
   font-weight: 600;
+}
+
+/* ── 手机 ─────────────────────────────────────────────────────── */
+@media (min-width: 768px) and (max-width: 1023px) {
+  .info-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 767px) {
@@ -484,7 +575,14 @@ async function refreshSession(): Promise<void> {
   .welcome {
     flex-direction: column;
     align-items: flex-start;
-    padding: 20px 18px;
+    gap: 16px;
+    padding: 18px 16px;
+  }
+
+  .welcome::after {
+    right: 8px;
+    bottom: -28px;
+    font-size: 104px;
   }
 
   .welcome-title {
@@ -501,16 +599,20 @@ async function refreshSession(): Promise<void> {
     gap: 10px;
   }
 
+  .info-card {
+    padding: 13px 14px;
+  }
+
   .quick-grid {
     grid-template-columns: 1fr;
   }
 
   .quick-card {
-    padding: 15px 16px;
+    padding: 14px 15px;
   }
 
-  .tips-card {
-    padding: 18px 16px;
+  .section-note {
+    font-size: var(--nc-text-xs);
   }
 }
 </style>

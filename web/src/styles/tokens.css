@@ -1,0 +1,120 @@
+/* ═══════════════════════════════════════════════════════════════════
+   纸墨档案风 · 设计令牌
+   与 legacy/NewCosmos.Desktop/Resources/Styles/Colors.xaml 同源。
+   底色暖纸 / 文字暖墨 / 强调朱砂 / 状态松绿·赭金 / 近直角 + 发丝线。
+   仅使用系统字体栈，不加载字体文件。
+   ═══════════════════════════════════════════════════════════════════ */
+
+:root {
+  color-scheme: light;
+
+  /* ── 纸底三层 ─────────────────────────────────────────────────── */
+  --nc-paper: #f2ece1;
+  --nc-paper-2: #f8f3e9;
+  --nc-paper-3: #e9e1d1;
+  --nc-paper-4: #dfd5c2;
+  --nc-paper-soft: #faf7f1;
+
+  /* ── 暖墨三级 ─────────────────────────────────────────────────── */
+  --nc-ink: #171310;
+  --nc-ink-2: #4c4237;
+  --nc-muted: #8b7f6c;
+  --nc-muted-2: #6d6354;
+  --nc-disabled: #a89a85;
+
+  /* ── 朱砂（主色 / 印章） ──────────────────────────────────────── */
+  --nc-seal: #ab3227;
+  --nc-seal-dark: #7f231b;
+  --nc-seal-light: #c9483c;
+  --nc-seal-hover: #8f2a20;
+  --nc-seal-soft: #f2dcd9;
+  --nc-seal-wash: rgba(171, 50, 39, 0.08);
+
+  /* ── 松绿（成功 / 在线） ──────────────────────────────────────── */
+  --nc-pine: #2e4738;
+  --nc-pine-light: #4a6b56;
+  --nc-pine-dark: #22352a;
+  --nc-pine-soft: #e3e9e4;
+
+  /* ── 赭金（警示 / 提示） ──────────────────────────────────────── */
+  --nc-amber: #96681c;
+  --nc-amber-light: #b98a3c;
+  --nc-amber-dark: #7a5315;
+  --nc-amber-soft: #f3e6cf;
+
+  /* ── 辅助（信息 / 归档） ──────────────────────────────────────── */
+  --nc-violet: #5a4a72;
+  --nc-violet-soft: #e6e1ed;
+
+  /* ── 发丝线（半透明墨，随底色走） ─────────────────────────────── */
+  --nc-line: rgba(23, 19, 16, 0.16);
+  --nc-line-strong: rgba(23, 19, 16, 0.32);
+  --nc-line-faint: rgba(23, 19, 16, 0.07);
+  --nc-line-paper: rgba(242, 236, 225, 0.16);
+  --nc-line-paper-strong: rgba(242, 236, 225, 0.3);
+
+  /* ── 圆角（纸墨风：近直角） ───────────────────────────────────── */
+  --nc-radius-xs: 1px;
+  --nc-radius-sm: 2px;
+  --nc-radius-md: 3px;
+  --nc-radius-pill: 2px;
+
+  /* ── 阴影（轻，不压过纸张） ───────────────────────────────────── */
+  --nc-shadow-xs: 0 1px 0 rgba(23, 19, 16, 0.03);
+  --nc-shadow-sm: 0 1px 2px rgba(23, 19, 16, 0.05);
+  --nc-shadow: 0 2px 8px rgba(23, 19, 16, 0.07);
+  --nc-shadow-lg: 0 14px 32px rgba(23, 19, 16, 0.14);
+
+  /* ── 字体栈（标题宋 / 正文黑 / 数字等宽） ─────────────────────── */
+  --nc-font-serif:
+    'Noto Serif SC', 'Source Han Serif SC', 'Source Han Serif CN', 'Songti SC', STSong, SimSun,
+    Georgia, 'Times New Roman', serif;
+  --nc-font-sans:
+    'Noto Sans SC', 'Source Han Sans SC', 'Source Han Sans CN', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Segoe UI', Arial, sans-serif;
+  --nc-font-mono:
+    'DM Mono', 'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New', monospace;
+
+  /* ── 字号 ─────────────────────────────────────────────────────── */
+  --nc-text-xs: 11px;
+  --nc-text-sm: 12px;
+  --nc-text-base: 14px;
+  --nc-text-md: 15px;
+  --nc-text-lg: 17px;
+  --nc-text-xl: 20px;
+  --nc-text-2xl: 24px;
+  --nc-text-3xl: 30px;
+  --nc-text-display: clamp(32px, 3.8vw, 46px);
+
+  /* ── 间距 ─────────────────────────────────────────────────────── */
+  --nc-space-1: 4px;
+  --nc-space-2: 8px;
+  --nc-space-3: 12px;
+  --nc-space-4: 16px;
+  --nc-space-5: 20px;
+  --nc-space-6: 24px;
+  --nc-space-7: 32px;
+  --nc-space-8: 40px;
+
+  /* ── 布局 ─────────────────────────────────────────────────────── */
+  --nc-topbar-height: 60px;
+  --nc-sidebar-width: 236px;
+  --nc-content-max: 1180px;
+  --nc-touch: 44px;
+
+  /* ── 动效 ─────────────────────────────────────────────────────── */
+  --nc-ease: cubic-bezier(0.2, 0, 0.2, 1);
+  --nc-transition: 0.16s var(--nc-ease);
+
+  /* ── 兼容旧变量名（历史页面仍在引用） ─────────────────────────── */
+  --nc-primary: var(--nc-seal);
+  --nc-primary-dark: var(--nc-seal-dark);
+  --nc-primary-soft: var(--nc-seal-soft);
+  --nc-bg: var(--nc-paper);
+  --nc-surface: var(--nc-paper-2);
+  --nc-text: var(--nc-ink);
+  --nc-text-secondary: var(--nc-ink-2);
+  --nc-text-muted: var(--nc-muted);
+  --nc-border: var(--nc-line);
+  --nc-radius: var(--nc-radius-sm);
+}

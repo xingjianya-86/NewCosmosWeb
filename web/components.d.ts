@@ -30,8 +30,13 @@ declare module 'vue' {
     ElTable: typeof import('element-plus/es/components/table/index')['ElTable']
     ElTableColumn: typeof import('element-plus/es/components/table/index')['ElTableColumn']
     ElTag: typeof import('element-plus/es/components/tag/index')['ElTag']
+    NcCard: typeof import('./src/components/NcCard.vue')['default']
+    NcPageHeader: typeof import('./src/components/NcPageHeader.vue')['default']
+    NcStat: typeof import('./src/components/NcStat.vue')['default']
+    NcStatusDot: typeof import('./src/components/NcStatusDot.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
+    SplashOverlay: typeof import('./src/components/SplashOverlay.vue')['default']
   }
   export interface GlobalDirectives {
     vLoading: typeof import('element-plus/es/components/loading/index')['ElLoadingDirective']
