@@ -23,36 +23,20 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { buildSplashUrl, markSplashSeen } from '@/utils/splash'
 
-/* 启动动画外壳：iframe 加载 public/splash/splash.html，
+/* 启动动画外壳：由 App.vue 根据登录态决定是否渲染。
    动画自己派发 dsh-startup:done（由 splash/bridge.js 转成 postMessage），
-   本组件收到后揭幕；失败 / 跳过 / 60 秒兜底都会结束，绝不让用户卡在动画里。 */
+   本组件收到后 emit done；失败 / 跳过 / 60 秒兜底都会结束。 */
+
+const emit = defineEmits<{ done: [reason: string] }>()
 
 const SOURCE = 'newcosmos-splash'
-const SEEN_KEY = 'nc.splash.seen'
 const FALLBACK_MS = 60_000
 const END_TYPES = new Set(['done', 'error', 'skip'])
 
-/** 解析 iframe 地址；返回 null 表示本次会话不播（URL ?nosplash=1 或已播过）。 */
-function resolveSplashUrl(): string | null {
-  if (typeof window === 'undefined') return null
-
-  const params = new URLSearchParams(window.location.search)
-  if (params.get('nosplash') === '1') return null
-
-  try {
-    if (window.sessionStorage.getItem(SEEN_KEY) === '1') return null
-  } catch {
-    /* 隐私模式 / 存储被禁用：按"没播过"处理，不阻断启动 */
-  }
-
-  const base = String(import.meta.env.VITE_ASSET_BASE || '/').trim() || '/'
-  const dir = base.endsWith('/') ? base : `${base}/`
-  return `${dir}splash/splash.html?origin=${encodeURIComponent(window.location.origin)}`
-}
-
-const src = resolveSplashUrl()
-const visible = ref(src !== null)
+const src = buildSplashUrl()
+const visible = ref(true)
 const frameReady = ref(false)
 
 let expectedOrigin = ''
@@ -75,11 +59,8 @@ function finish(reason: string): void {
   clearFallback()
   window.removeEventListener('message', handleMessage)
   document.documentElement.style.overflow = previousOverflow
-  try {
-    window.sessionStorage.setItem(SEEN_KEY, '1')
-  } catch {
-    /* 存不进去也不影响本次揭幕 */
-  }
+  markSplashSeen()
+  emit('done', reason)
 }
 
 function isSplashMessage(data: unknown): data is { source: string; type: string; message?: string } {
@@ -104,11 +85,7 @@ onMounted(() => {
   if (!visible.value || !src) return
 
   /* 本次会话只播一次：一进来就落标记，刷新页面不会再从头播 */
-  try {
-    window.sessionStorage.setItem(SEEN_KEY, '1')
-  } catch {
-    /* 忽略 */
-  }
+  markSplashSeen()
 
   try {
     expectedOrigin = new URL(src, window.location.href).origin

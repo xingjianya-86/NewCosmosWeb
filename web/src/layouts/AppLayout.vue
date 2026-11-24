@@ -125,10 +125,10 @@ onBeforeUnmount(() => {
   <div class="layout">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">新</div>
+        <div class="brand-mark">帝</div>
         <div class="brand-text">
           <strong>{{ APP_SHORT_NAME }}</strong>
-          <span>政务服务平台</span>
+          <span>社会救助管理系统</span>
         </div>
       </div>
 

@@ -3,8 +3,11 @@ import { APP_NAME } from '@/config/app'
 import { useAuthStore } from '@/stores/auth'
 import { pinia } from '@/stores'
 
+// 页面入口固定在 .1 根路径；VITE_ASSET_BASE 只用于打包资源，不能当 Router base。
+const routerBase = (import.meta.env.VITE_ROUTER_BASE || '/').trim() || '/'
+
 const router = createRouter({
-  history: createWebHistory(import.meta.env.BASE_URL),
+  history: createWebHistory(routerBase),
   routes: [
     {
       path: '/login',

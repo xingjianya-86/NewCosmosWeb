@@ -23,7 +23,7 @@ dotnet run --project src\NewCosmos.Shell\NewCosmos.Shell.csproj
 ```json
 {
   "startUrl": "https://cosmos.sua17.cn/",
-  "title": "NewCosmos 社会救助系统",
+  "title": "帝皇权杖δ-me13 社会救助管理系统",
   "enableDevTools": false,
   "allowedHosts": ["cosmos.sua17.cn", "cosmos-static.sua17.cn"]
 }

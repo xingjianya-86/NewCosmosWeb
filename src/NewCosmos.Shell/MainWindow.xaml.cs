@@ -159,7 +159,7 @@ public partial class MainWindow : Window
 public sealed class ShellOptions
 {
     public string StartUrl { get; init; } = "https://cosmos.sua17.cn/";
-    public string Title { get; init; } = "NewCosmos 社会救助系统";
+    public string Title { get; init; } = "帝皇权杖δ-me13 社会救助管理系统";
     public bool EnableDevTools { get; init; }
     public string[] AllowedHosts { get; init; } = ["cosmos.sua17.cn", "cosmos-static.sua17.cn"];
 

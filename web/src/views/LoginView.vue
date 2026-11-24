@@ -80,7 +80,7 @@ async function submit(): Promise<void> {
     <section class="login-hero">
       <div class="hero-inner">
         <p class="hero-kicker">NewCosmos · Archive</p>
-        <h1 class="hero-title">新宇宙<br />民政服务平台</h1>
+        <h1 class="hero-title">帝皇权杖<br />δ-me13</h1>
         <p class="hero-desc">社会救助业务一体化协同，数据在政务网络内安全流转。</p>
 
         <ul class="hero-points">
@@ -103,10 +103,10 @@ async function submit(): Promise<void> {
 
     <section class="login-panel">
       <div class="mobile-brand">
-        <span class="mobile-mark">新</span>
+        <span class="mobile-mark">帝</span>
         <div>
-          <strong>新宇宙民政</strong>
-          <span>政务服务平台</span>
+          <strong>帝皇权杖δ-me13</strong>
+          <span>社会救助管理系统</span>
         </div>
       </div>
 

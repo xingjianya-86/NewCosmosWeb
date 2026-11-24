@@ -81,6 +81,9 @@
 - `.2` nginx 新增 `/splash/`：`frame-ancestors https://cosmos.sua17.cn`，不再使用 `X-Frame-Options: DENY`。
 - 已上传 `splash/**` 与新 assets 到 `.2`，`.1` index 已替换；`/splash/splash.html` 200，assets 200 + CORS + immutable，登录接口 401 正常。
 - 当前生产页面已带新画风与启动动画；业务页面仍为 P0。
+- 修复 URL 拼接：Vue Router 改用 `VITE_ROUTER_BASE=/`，不再把 `VITE_ASSET_BASE`（`.2` 绝对地址）当 Router base；`/login`、`/printers` 直接刷新 200。
+- 启动闸门：已登录不播动画，直接进应用；未登录才播动画，结束后挂载登录页。`?nosplash=1` 或本会话已播则跳过。
+- 对外名称恢复为 `帝皇权杖δ-me13 社会救助管理系统`；`APP_NAME`、页面标题、登录/侧栏品牌、Shell 标题同步。
 
 ## 待办
 
