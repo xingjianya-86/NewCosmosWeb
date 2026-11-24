@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 import { defineConfig, loadEnv } from 'vite'
 import type { ComponentResolver } from 'unplugin-vue-components'
@@ -9,6 +10,11 @@ import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 // 本地联调后端：NewCosmos.Server 默认监听 8787。
 // /api 与 /api/auth 在开发模式下统一走 Vite 代理，避免浏览器跨域限制。
 const devProxyTarget = process.env.NC_DEV_PROXY ?? 'http://127.0.0.1:8787'
+
+// 版本单一来源：package.json；构建时注入 __APP_VERSION__，登录页/状态栏/心跳同源。
+const packageJson = JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf-8'),
+) as { version: string }
 
 const EP_COMPONENTS = 'element-plus/es/components'
 
@@ -130,6 +136,9 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   return {
   // 生产页面在 .1，静态资源在 .2；必须用绝对 base，否则 .1 会 404 /assets。
+  define: {
+    __APP_VERSION__: JSON.stringify(packageJson.version),
+  },
   base: (env.VITE_ASSET_BASE || '/').trim() || '/',
   plugins: [
     vue(),

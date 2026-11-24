@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 using NewCosmos.Models.Options;
 
 namespace NewCosmos.Server.Configuration;
@@ -59,7 +60,11 @@ public sealed class ServerEnvironmentOptions
         var app = new AppOptions
         {
             Version = GetString("NC_APP_VERSION",
-                typeof(ServerEnvironmentOptions).Assembly.GetName().Version?.ToString(3) ?? "2.0.0"),
+                typeof(ServerEnvironmentOptions).Assembly
+                    .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?
+                    .InformationalVersion
+                ?? typeof(ServerEnvironmentOptions).Assembly.GetName().Version?.ToString(3)
+                ?? "2.0.20261124"),
             ApplicationName = GetString("NC_APP_NAME", "NewCosmos"),
             WindowTitle = "NewCosmos Server"
         };

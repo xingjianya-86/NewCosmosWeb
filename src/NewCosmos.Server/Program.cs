@@ -9,7 +9,14 @@ using NewCosmos.Server.Infrastructure;
 using NewCosmos.Server.Services;
 using NewCosmos.Services.Core;
 using NewCosmos.Services.Database;
+using NewCosmos.Services.Domain.AssetVerification;
+using NewCosmos.Services.Domain.ElderlyBenefits;
+using NewCosmos.Services.Domain.Reporting;
+using NewCosmos.Services.Domain.SocialAssistance;
 using NewCosmos.Services.Domain.UserManagement;
+using NewCosmos.Services.System;
+using NewCosmos.Services.UserManagement;
+using NewCosmos.Services.Utilities;
 
 var serverOptions = ServerEnvironmentOptions.Load();
 
@@ -83,10 +90,27 @@ builder.Services.AddSingleton<IDatabaseService>(
 builder.Services.AddSingleton<IUserSessionService, UserSessionService>();
 builder.Services.AddScoped<IUserService, UserService>();
 
+// 权限与数据范围：服务端强制校验，不信任前端。
+builder.Services.AddSingleton<INewPermissionService, NewPermissionService>();
+builder.Services.AddSingleton<IDataScopeService, DataScopeService>();
+
+// 业务统计/查询服务：全部复用 Core，禁止在 Server 重抄口径。
+builder.Services.AddSingleton<ISeedMergeService, SeedMergeService>();
+builder.Services.AddSingleton<IStandardConfigService, StandardConfigService>();
+builder.Services.AddSingleton<ElderlyCategoryService>();
+builder.Services.AddSingleton<IHolidayService, HolidayService>();
+builder.Services.AddSingleton<IBusinessTimelineService, BusinessTimelineService>();
+builder.Services.AddSingleton<IStatisticsService, StatisticsService>();
+builder.Services.AddSingleton<IGracePeriodService, GracePeriodService>();
+builder.Services.AddSingleton<IElderlyApplicationService, ElderlyApplicationService>();
+builder.Services.AddSingleton<ICollegeStudentService, CollegeStudentService>();
+builder.Services.AddSingleton<IAssetVerificationService, AssetVerificationService>();
+
 // Server 侧聚合服务。
 builder.Services.AddScoped<PrinterBindingService>();
 builder.Services.AddScoped<AgentDeviceService>();
 builder.Services.AddScoped<ApplicationQueryService>();
+builder.Services.AddScoped<DataScopeFilterBuilder>();
 builder.Services.AddSingleton<DatabaseMigrator>();
 
 var app = builder.Build();
@@ -111,6 +135,10 @@ app.MapAuthEndpoints();
 app.MapPrinterEndpoints();
 app.MapAgentEndpoints();
 app.MapApplicationEndpoints();
+app.MapDashboardEndpoints();
+app.MapSocialAssistanceEndpoints();
+app.MapElderlyEndpoints();
+app.MapAssetVerificationEndpoints();
 app.MapSystemEndpoints();
 
 if (serverOptions.AutoMigrate)

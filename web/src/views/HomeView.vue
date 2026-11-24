@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { useRouter } from 'vue-router'
 import {
@@ -13,6 +13,7 @@ import {
   Link,
   Money,
   Printer,
+  Refresh,
   Search,
   SwitchButton,
   Trophy,
@@ -20,11 +21,14 @@ import {
   UserFilled,
   Warning,
 } from '@element-plus/icons-vue'
+import { getDashboardSummary } from '@/api/dashboard'
+import { getErrorMessage } from '@/api/http'
+import type { DashboardSummary } from '@/types/dashboard'
 
 interface StatCard {
   label: string
   caption: string
-  value: number
+  value: number | null
   icon: Component
   gradient: 'blue' | 'green' | 'orange' | 'purple'
 }
@@ -57,74 +61,85 @@ const router = useRouter()
 const mascotUrl = `${import.meta.env.BASE_URL}images/newcosmos_character.png`
 
 /* ═══════════════════════════════════════════════════════════════════
-   警告横幅区（旧版 MainPage.row1）
-   Schema / 渐退期 / 普惠高龄 / 大学生毕业 / 死亡申报联动。
-   暂无数据接口 → 默认全部隐藏；接口接入后仅需回填下面的 show 标记与计数。
+   首页概览：GET /api/dashboard/summary（登录即可）
+   各数据块失败返回 null，页面显示「—」+ 重试，不用假 0。
    ═══════════════════════════════════════════════════════════════════ */
-const showSchemaWarning = ref(false)
-const schemaWarningMessage = ref('')
-const showGracePeriodWarning = ref(false)
-const gracePeriodExpiringCount = ref(0)
-const showElderlyReminder = ref(false)
-const elderlyPendingNewCount = ref(0)
-const elderlyPendingTransferCount = ref(0)
-const showCollegeStudentReminder = ref(false)
-const collegeStudentGraduatingCount = ref(0)
-const showDeathLinkageReminder = ref(false)
-const deathLinkagePendingCount = ref(0)
-const deathLinkageCanHandle = ref(true)
+const summary = ref<DashboardSummary | null>(null)
+const loading = ref(false)
+const loadError = ref('')
+let loadTicket = 0
 
+async function loadDashboard(): Promise<void> {
+  const ticket = ++loadTicket
+  loading.value = true
+  loadError.value = ''
+
+  try {
+    const response = await getDashboardSummary()
+    if (ticket !== loadTicket) return
+    summary.value = response
+    const allBlocksFailed =
+      !response.dashboard &&
+      !response.socialAssistance &&
+      !response.elderly &&
+      !response.assetVerification &&
+      !response.reminders
+    if (allBlocksFailed) {
+      loadError.value = '数据加载失败'
+    }
+  } catch (error) {
+    if (ticket !== loadTicket) return
+    summary.value = null
+    loadError.value = getErrorMessage(error, '数据加载失败')
+  } finally {
+    if (ticket === loadTicket) loading.value = false
+  }
+}
+
+onMounted(() => {
+  void loadDashboard()
+})
+
+/* ═══════════════════════════════════════════════════════════════════
+   警告横幅区（旧版 MainPage.row1）
+   渐退期 / 普惠高龄 / 大学生毕业接真实计数；死亡申报联动域未迁入 Core，保持隐藏。
+   ═══════════════════════════════════════════════════════════════════ */
 const warnings = computed<WarningBanner[]>(() => {
   const items: WarningBanner[] = []
+  const reminders = summary.value?.reminders
 
-  if (showSchemaWarning.value && schemaWarningMessage.value) {
-    items.push({
-      key: 'schema',
-      text: schemaWarningMessage.value,
-      icon: Warning,
-      to: '/coming-soon/database',
-    })
-  }
-
-  if (showGracePeriodWarning.value && gracePeriodExpiringCount.value > 0) {
+  const graceExpiring = reminders?.gracePeriodExpiring ?? 0
+  if (graceExpiring > 0) {
     items.push({
       key: 'grace-period',
-      text: `有 ${gracePeriodExpiringCount.value} 户渐退期将在 30 天内到期或已到期，请及时前往「低收入人口救助帮扶」处理`,
+      text: `有 ${graceExpiring} 户渐退期将在 30 天内到期或已到期，请及时前往「低收入人口救助帮扶」处理`,
       icon: Calendar,
-      to: '/applications',
+      to: '/social-assistance/grace-period',
     })
   }
 
-  if (showElderlyReminder.value) {
-    const total = elderlyPendingNewCount.value + elderlyPendingTransferCount.value
+  const elderlyPendingNew = reminders?.elderlyPendingNew ?? 0
+  const elderlyPendingTransfer = reminders?.elderlyPendingTransfer ?? 0
+  const elderlyTotal = elderlyPendingNew + elderlyPendingTransfer
+  if (elderlyTotal > 0) {
     items.push({
       key: 'elderly',
       text:
-        `有 ${total} 位老人的高龄津贴需于下月办理变更` +
-        `（${elderlyPendingNewCount.value} 人待新增 / ${elderlyPendingTransferCount.value} 人需先停发后新增），` +
+        `有 ${elderlyTotal} 位老人的高龄津贴需于下月办理变更` +
+        `（${elderlyPendingNew} 人待新增 / ${elderlyPendingTransfer} 人需先停发后新增），` +
         '请及时前往「高龄津贴发放」处理',
       icon: Calendar,
-      to: '/coming-soon/elderly',
+      to: '/elderly',
     })
   }
 
-  if (showCollegeStudentReminder.value && collegeStudentGraduatingCount.value > 0) {
+  const collegeGraduating = reminders?.collegeStudentGraduating ?? 0
+  if (collegeGraduating > 0) {
     items.push({
       key: 'college-student',
-      text: `有 ${collegeStudentGraduatingCount.value} 位大学生今年6月毕业，毕业后最长择业期半年，请及时前往「低收入人口救助帮扶」更新毕业状态并核查是否需退出最低生活保障`,
+      text: `有 ${collegeGraduating} 位大学生今年6月毕业，毕业后最长择业期半年，请及时前往「低收入人口救助帮扶」更新毕业状态并核查是否需退出最低生活保障`,
       icon: UserFilled,
-      to: '/applications',
-    })
-  }
-
-  if (showDeathLinkageReminder.value && deathLinkagePendingCount.value > 0) {
-    items.push({
-      key: 'death-linkage',
-      text: deathLinkageCanHandle.value
-        ? `有 ${deathLinkagePendingCount.value} 项死亡申报关联手续待办（高龄停发 / 档案变更等），请前往「死亡情况说明」办理`
-        : `已收到 ${deathLinkagePendingCount.value} 项死亡申报关联手续（高龄停发 / 档案变更等），本级无办理权限，待镇级经办处理`,
-      icon: Warning,
-      to: '/coming-soon/death-statement',
+      to: '/social-assistance',
     })
   }
 
@@ -132,38 +147,48 @@ const warnings = computed<WarningBanner[]>(() => {
 })
 
 /* ═══════════════════════════════════════════════════════════════════
-   数据概览（旧版四张 StatCard，统计接口未接入时统一显示 0）
+   数据概览（旧版四张 StatCard，绑定真实统计；失败/加载中显示「—」）
    ═══════════════════════════════════════════════════════════════════ */
-const stats: StatCard[] = [
-  {
-    label: '本月总新增',
-    caption: '统计周期内 新入保（户）',
-    value: 0,
-    icon: Check,
-    gradient: 'blue',
-  },
-  {
-    label: '本月总退出',
-    caption: '统计周期内 停保退出（户）',
-    value: 0,
-    icon: SwitchButton,
-    gradient: 'green',
-  },
-  {
-    label: '新申请经济核对',
-    caption: '统计周期内 已申未出报告（件）',
-    value: 0,
-    icon: Search,
-    gradient: 'orange',
-  },
-  {
-    label: '本月新增高龄老人',
-    caption: '自然月受理登记（人）',
-    value: 0,
-    icon: UserFilled,
-    gradient: 'purple',
-  },
-]
+const stats = computed<StatCard[]>(() => {
+  const dashboard = summary.value?.dashboard
+  return [
+    {
+      label: '本月总新增',
+      caption: '统计周期内 新入保（户）',
+      value: dashboard?.monthlyNewAdditions ?? null,
+      icon: Check,
+      gradient: 'blue',
+    },
+    {
+      label: '本月总退出',
+      caption: '统计周期内 停保退出（户）',
+      value: dashboard?.monthlyExits ?? null,
+      icon: SwitchButton,
+      gradient: 'green',
+    },
+    {
+      label: '新申请经济核对',
+      caption: '统计周期内 已申未出报告（件）',
+      value: dashboard?.newAssetChecks ?? null,
+      icon: Search,
+      gradient: 'orange',
+    },
+    {
+      label: '本月新增高龄老人',
+      caption: '自然月受理登记（人）',
+      value: dashboard?.monthlyNewElderly ?? null,
+      icon: UserFilled,
+      gradient: 'purple',
+    },
+  ]
+})
+
+const statsLoading = computed(() => loading.value && summary.value === null)
+
+function statText(value: number | null): string {
+  if (value === null) return '—'
+  return value.toLocaleString('zh-CN')
+}
 
 /* ═══════════════════════════════════════════════════════════════════
    模块直达区：目录、文案、图标底色取 legacy MainViewModel.RebuildDashboard
@@ -180,7 +205,7 @@ const moduleGroups: ModuleGroup[] = [
         iconBg: '#EBF5FF',
         iconColor: '#ab3227',
         buttonText: '进入模块',
-        to: '/applications',
+        to: '/social-assistance',
       },
       {
         title: '高龄津贴发放',
@@ -190,7 +215,7 @@ const moduleGroups: ModuleGroup[] = [
         iconBg: '#F5F3FF',
         iconColor: '#5a4a72',
         buttonText: '进入模块',
-        to: '/coming-soon/elderly',
+        to: '/elderly',
       },
       {
         title: '家庭经济状况核对',
@@ -200,7 +225,7 @@ const moduleGroups: ModuleGroup[] = [
         iconBg: '#FFFBEB',
         iconColor: '#96681c',
         buttonText: '进入模块',
-        to: '/coming-soon/asset-verification',
+        to: '/asset-verification',
       },
       {
         title: '救助档案管理',
@@ -349,7 +374,7 @@ function openWarning(banner: WarningBanner): void {
 <template>
   <div class="home">
     <div class="home-main">
-      <!-- 警告横幅区（默认隐藏，接口接入后回填 show 标记与计数） -->
+      <!-- 警告横幅区（渐退期 / 高龄待办 / 大学生毕业，计数为 0 时不显示） -->
       <div v-if="warnings.length" class="warnings">
         <button
           v-for="banner in warnings"
@@ -367,7 +392,24 @@ function openWarning(banner: WarningBanner): void {
       <div class="home-inner">
         <!-- 数据概览 -->
         <section class="stats-section" aria-label="数据概览">
-          <h2 class="section-title"><span class="seal-dash" aria-hidden="true" />数据概览</h2>
+          <div class="section-heading">
+            <h2 class="section-title"><span class="seal-dash" aria-hidden="true" />数据概览</h2>
+            <el-button
+              class="stats-refresh"
+              size="small"
+              :icon="Refresh"
+              :loading="loading"
+              @click="loadDashboard"
+            >
+              刷新数据
+            </el-button>
+          </div>
+
+          <div v-if="loadError" class="stats-error" role="alert">
+            <span>数据加载失败：{{ loadError }}</span>
+            <el-button link type="primary" @click="loadDashboard">重试</el-button>
+          </div>
+
           <div class="stats-grid">
             <article
               v-for="stat in stats"
@@ -379,7 +421,10 @@ function openWarning(banner: WarningBanner): void {
                 <el-icon :size="18"><component :is="stat.icon" /></el-icon>
                 <span>{{ stat.label }}</span>
               </div>
-              <strong class="stat-value">{{ stat.value }}</strong>
+              <strong
+                class="stat-value"
+                :class="{ 'is-placeholder': stat.value === null, 'is-loading': statsLoading }"
+              >{{ statText(stat.value) }}</strong>
               <p class="stat-caption">{{ stat.caption }}</p>
             </article>
           </div>
@@ -524,6 +569,56 @@ function openWarning(banner: WarningBanner): void {
 .stats-section > .section-title {
   /* 旧版外层 VerticalStackLayout Spacing=20 + 标题 Margin 0,0,0,8 */
   margin-bottom: 28px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+
+.section-heading .section-title {
+  margin-bottom: 0;
+}
+
+.stats-refresh {
+  flex: none;
+}
+
+.stats-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: -16px 0 12px;
+  padding: 8px 12px;
+  border: 1px solid rgba(171, 50, 39, 0.35);
+  border-left: 3px solid var(--nc-seal);
+  background-color: var(--nc-seal-wash);
+  color: var(--nc-seal-dark);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.stat-value.is-placeholder {
+  opacity: 0.55;
+}
+
+.stat-value.is-loading {
+  animation: stat-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes stat-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+
+  50% {
+    opacity: 0.75;
+  }
 }
 
 .stat-card {

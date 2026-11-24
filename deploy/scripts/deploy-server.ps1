@@ -142,7 +142,7 @@ function Expand-RemoteTemplate {
     )
     $result = $Template
     foreach ($key in $Tokens.Keys) {
-        $result = $result.Replace("__$key__", [string]$Tokens[$key])
+        $result = $result.Replace("__${key}__", [string]$Tokens[$key])
     }
     return $result
 }

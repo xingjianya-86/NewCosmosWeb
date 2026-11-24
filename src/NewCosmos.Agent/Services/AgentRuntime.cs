@@ -13,7 +13,7 @@ public static class AgentRuntime
         typeof(AgentRuntime).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
             .InformationalVersion?.Split('+')[0]
-        ?? "0.1.0";
+        ?? "2.0.20261124";
 
     /// <summary>日志/临时文件统一落 %APPDATA%\NewCosmos 与 %TEMP%\NewCosmos。</summary>
     public static StorageOptions CreateStorageOptions() => new()

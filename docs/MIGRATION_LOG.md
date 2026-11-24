@@ -97,3 +97,25 @@
 - 打印任务认领协议：Web 按 `target_device_id/target_printer` 定向认领；补 `PrintRelay` 常量或过滤。
 - 土地字典标准/别名归一（禁止批量改历史值）。
 - `.2` 证书 SAN、CORS、nginx `nginx -t`、真实部署与端到端冒烟。
+
+## P2 模块查询、权限与数据范围（2026-11-24/25）
+
+- 全栈版本统一为 `2.0.20261124`：`Directory.Build.props` 为 .NET 单一源，`web/package.json` 为 Web 单一源（Vite 注入 `__APP_VERSION__`）；Server `/info`、Agent 心跳、登录页与状态栏同源。新增 `deploy/check_versions.ps1`。
+- 首页 `/api/dashboard/summary` 接入真实统计：本月新增/退出、新申请经济核对、本月新增高龄；渐退期、高龄待办、大学生毕业提醒按真实计数显示；单块失败返回 null，前端显示「—」，不再假 0。
+- 新增低收入模块首页 `/social-assistance` 与渐退期列表 `/social-assistance/grace-period`；申请列表 `/api/applications` 保留，补 `INCOME_VIEW` 权限码与数据范围。
+- 新增高龄模块：`/elderly`、`/elderly/applications`、`/elderly/applications/:id`、`/elderly/pending`、`/elderly/reviews`；接口 `/api/elderly/*` 全部 `ELDERLY_VIEW` 权限。
+- 新增经济核对模块：`/asset-verification`、`/asset-verification/tasks`、`/asset-verification/monthly`；接口 `/api/asset-verification/*` 全部 `ASSET_VIEW` 权限。
+- 数据范围：新增 `DataScopeFilterBuilder`，按当前用户角色 `data_scope` + 机构 `town_id/village_id` 映射到业务表：
+  - 低收入申请：乡镇名/村名/ID 兜底（历史数据 town_id/village_id 为空）；
+  - 高龄档案：`hukou_town_id/hukou_village_id` 精确过滤；
+  - 经济核对：村区域代码 `community` 过滤；
+  - SELF 范围按 `created_by`；经济核对无 created_by，按拒绝处理。
+- 待办列表在 Server 侧按数据范围二次过滤，避免跨村姓名/身份证泄露；概览统计仍使用 Core 全局口径（跨机构统计下一批改 Core 服务）。
+- 权限：`EndpointSecurity.RequirePermissionAsync` 统一 401/403；P1 `/api/applications` 同步收口。
+- 生产验证（2026-11-24 23:5x）：
+  - `dotnet build NewCosmosWeb.slnx` 0 错误；Core 588 测试全过；
+  - `npm run build` 通过；
+  - `/api/dashboard/summary`、`/api/social-assistance/*`、`/api/elderly/*`、`/api/asset-verification/*` 登录态冒烟 200；
+  - 村经办人（role=VILLAGE_CLERK，org village_id=910470）数据范围实测：申请 4、 高龄 6、核对 27，与库内该村数量一致；
+  - 三个模块首页与列表已截图走查。
+- 部署：`.2` 服务器镜像 `newcosmos-server:20261124235325`，`/info` 返回 `2.0.20261124`；Web 新 assets 与 `.1` index 已更新（`index-Xyi0EXhz.js`）。

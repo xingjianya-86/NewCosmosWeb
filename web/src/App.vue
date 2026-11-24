@@ -1,16 +1,19 @@
 <template>
-  <RouterView v-if="ready" />
-  <LoginSequenceOverlay
-    v-if="showLoginSequence"
-    @done="onSequenceDone"
-    @fallback="onSequenceFallback"
-  />
-  <SplashOverlay v-if="showSplash" @done="onSplashDone" @error="onSplashError" />
+  <el-config-provider :locale="zhCn">
+    <RouterView v-if="ready" />
+    <LoginSequenceOverlay
+      v-if="showLoginSequence"
+      @done="onSequenceDone"
+      @fallback="onSequenceFallback"
+    />
+    <SplashOverlay v-if="showSplash" @done="onSplashDone" @error="onSplashError" />
+  </el-config-provider>
 </template>
 
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import LoginSequenceOverlay from '@/components/LoginSequenceOverlay.vue'
 import SplashOverlay from '@/components/SplashOverlay.vue'
 import { useAuthStore } from '@/stores/auth'

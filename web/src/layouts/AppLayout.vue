@@ -52,9 +52,9 @@ const navGroups: NavGroup[] = [
   {
     title: '救助业务',
     items: [
-      { label: '低收入人口救助帮扶', icon: Coin, path: '/applications' },
-      { label: '高龄津贴发放', icon: UserFilled, path: '/coming-soon/elderly' },
-      { label: '家庭经济状况核对', icon: Search, path: '/coming-soon/asset-verification' },
+      { label: '低收入人口救助帮扶', icon: Coin, path: '/social-assistance' },
+      { label: '高龄津贴发放', icon: UserFilled, path: '/elderly' },
+      { label: '家庭经济状况核对', icon: Search, path: '/asset-verification' },
       { label: '救助档案管理', icon: FolderOpened, path: '/coming-soon/archive' },
       { label: '后补追缴', icon: Money, path: '/coming-soon/recovery' },
     ],
@@ -105,7 +105,17 @@ const mascotIcon = `${import.meta.env.BASE_URL}images/mascot_icon.png`
 const activePath = computed(() => {
   if (route.name === 'coming-soon') return `/coming-soon/${String(route.params.module ?? '')}`
   if (route.path === '/applications' || route.path.startsWith('/applications/')) {
-    return '/applications'
+    return '/social-assistance'
+  }
+  if (route.path === '/social-assistance' || route.path.startsWith('/social-assistance/')) {
+    return '/social-assistance'
+  }
+  if (route.path === '/elderly' || route.path.startsWith('/elderly/')) return '/elderly'
+  if (
+    route.path === '/asset-verification' ||
+    route.path.startsWith('/asset-verification/')
+  ) {
+    return '/asset-verification'
   }
   if (route.path === '/printers' || route.path.startsWith('/printers/')) return '/printers'
   return route.path

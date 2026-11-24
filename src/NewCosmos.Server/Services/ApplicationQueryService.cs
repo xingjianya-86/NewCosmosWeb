@@ -22,14 +22,14 @@ public sealed class ApplicationQueryService(IDatabaseService database)
 
     /// <summary>详情只取详情页真正消费的列（submit_at 需保持可空，故不套用 Full 实体映射）。</summary>
     private const string DetailSql =
-        @"SELECT id, application_no, status, current_step, applicant_name, applicant_id_card,
-                 applicant_phone, hukou_type, gender, ethnicity, hukou_address, town_id, village_id,
-                 town, community AS village, address, family_size, classification_result, total_annual_income,
-                 per_capita_annual_income, total_family_income, per_capita_income,
-                 household_monthly_guarantee_amount, application_reason, application_reason_detail,
-                 submit_at, created_at, updated_at
-          FROM nc_biz_applications
-          WHERE id = $1 AND deleted_at IS NULL";
+        @"SELECT a.id, a.application_no, a.status, a.current_step, a.applicant_name, a.applicant_id_card,
+                 a.applicant_phone, a.hukou_type, a.gender, a.ethnicity, a.hukou_address, a.town_id, a.village_id,
+                 a.town, a.community AS village, a.address, a.family_size, a.classification_result, a.total_annual_income,
+                 a.per_capita_annual_income, a.total_family_income, a.per_capita_income,
+                 a.household_monthly_guarantee_amount, a.application_reason, a.application_reason_detail,
+                 a.submit_at, a.created_at, a.updated_at
+          FROM nc_biz_applications a
+          WHERE a.id = $1 AND a.deleted_at IS NULL";
 
     private const string MemberSql =
         @"SELECT id, name, id_card, relationship_to_head, gender, birth_date,
@@ -38,17 +38,31 @@ public sealed class ApplicationQueryService(IDatabaseService database)
           WHERE application_id = $1 AND deleted_at IS NULL
           ORDER BY id ASC";
 
-    public async Task<Result<ApplicationListResponse>> ListAsync(
+    /// <summary>不套数据范围的旧重载，保留给内部/测试调用。</summary>
+    public Task<Result<ApplicationListResponse>> ListAsync(
         int page,
         int pageSize,
         string? keyword,
         string? status,
         CancellationToken ct = default)
+        => ListAsync(page, pageSize, keyword, status, null, ct);
+
+    /// <summary>
+    /// 带数据范围的列表查询。scope.Sql 的占位符编号必须与
+    /// <see cref="CountFilterParameters"/> 推算出的起始序号一致（由端点构造）。
+    /// </summary>
+    public async Task<Result<ApplicationListResponse>> ListAsync(
+        int page,
+        int pageSize,
+        string? keyword,
+        string? status,
+        DataScopeClause? scope,
+        CancellationToken ct = default)
     {
         var pageIndex = Math.Max(page, 1);
         var effectivePageSize = Math.Clamp(
             pageSize <= 0 ? DefaultPageSize : pageSize, 1, MaxPageSize);
-        var filter = BuildFilter(Normalize(status), Normalize(keyword));
+        var filter = BuildFilter(Normalize(status), Normalize(keyword), scope);
 
         var countResult = await database.ExecuteScalarAsync<long?>(
             "SELECT COUNT(*) FROM nc_biz_applications a" + filter.Where,
@@ -116,11 +130,27 @@ public sealed class ApplicationQueryService(IDatabaseService database)
             items, pageIndex, effectivePageSize, totalCount, totalPages));
     }
 
-    public async Task<Result<ApplicationDetailDto>> GetDetailAsync(
+    public Task<Result<ApplicationDetailDto>> GetDetailAsync(
         long id,
         CancellationToken ct = default)
+        => GetDetailAsync(id, null, ct);
+
+    /// <summary>带数据范围的详情查询；scope 占位符从 $2 开始（id 固定 $1）。</summary>
+    public async Task<Result<ApplicationDetailDto>> GetDetailAsync(
+        long id,
+        DataScopeClause? scope,
+        CancellationToken ct = default)
     {
-        var detailResult = await database.QuerySingleAsync<ApplicationDetailRow>(DetailSql, ct, id);
+        var detailSql = DetailSql;
+        var detailParameters = new List<object?> { id };
+        if (scope is { IsEmpty: false })
+        {
+            detailSql += " AND " + scope.Sql;
+            detailParameters.AddRange(scope.Parameters);
+        }
+
+        var detailResult = await database.QuerySingleAsync<ApplicationDetailRow>(
+            detailSql, ct, detailParameters.ToArray());
         if (detailResult.IsFailure)
         {
             return Result.Failure<ApplicationDetailDto>(
@@ -216,6 +246,13 @@ public sealed class ApplicationQueryService(IDatabaseService database)
     private static string? Normalize(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    /// <summary>
+    /// 基础筛选（status + keyword）占用的参数个数。端点据此把数据范围占位符
+    /// 起始序号算成 <c>CountFilterParameters(...) + 1</c>，避免与关键字参数错位。
+    /// </summary>
+    public static int CountFilterParameters(string? status, string? keyword)
+        => (Normalize(status) is null ? 0 : 1) + (Normalize(keyword) is null ? 0 : 1);
+
     private static string? NullIfEmpty(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value;
 
@@ -249,7 +286,8 @@ public sealed class ApplicationQueryService(IDatabaseService database)
 
     private static (string Where, List<object?> Parameters) BuildFilter(
         string? status,
-        string? keyword)
+        string? keyword,
+        DataScopeClause? scope)
     {
         var conditions = new List<string> { "a.deleted_at IS NULL" };
         var parameters = new List<object?>();
@@ -269,6 +307,12 @@ public sealed class ApplicationQueryService(IDatabaseService database)
                 "OR EXISTS (SELECT 1 FROM nc_biz_family_members m " +
                 "WHERE m.application_id = a.id AND m.deleted_at IS NULL " +
                 $"AND (m.name ILIKE ${index} OR m.id_card ILIKE ${index})))");
+        }
+
+        if (scope is { IsEmpty: false })
+        {
+            conditions.Add(scope.Sql);
+            parameters.AddRange(scope.Parameters);
         }
 
         return (" WHERE " + string.Join(" AND ", conditions), parameters);
