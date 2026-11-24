@@ -27,3 +27,10 @@ export function buildSplashUrl(): string {
   const dir = base.endsWith('/') ? base : `${base}/`
   return `${dir}splash/splash.html?origin=${encodeURIComponent(window.location.origin)}`
 }
+
+/** 序列登录页（login.html）与启动动画同源：第 2 步嵌真实账号密码表单。 */
+export function buildLoginUrl(): string {
+  const base = String(import.meta.env.VITE_ASSET_BASE || '/').trim() || '/'
+  const dir = base.endsWith('/') ? base : `${base}/`
+  return `${dir}splash/login.html?origin=${encodeURIComponent(window.location.origin)}`
+}

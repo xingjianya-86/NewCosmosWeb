@@ -81,6 +81,10 @@
 - `.2` nginx 新增 `/splash/`：`frame-ancestors https://cosmos.sua17.cn`，不再使用 `X-Frame-Options: DENY`。
 - 已上传 `splash/**` 与新 assets 到 `.2`，`.1` index 已替换；`/splash/splash.html` 200，assets 200 + CORS + immutable，登录接口 401 正常。
 - 当前生产页面已带新画风与启动动画；业务页面仍为 P0。
+- 未登录启动改为 `login.html` 序列登录：动画第 2 步输入账号密码，成功继续 3–5 步/终幕后进首页；失败留在第 2 步；动画自带“切换经典登录”才回落 Vue 登录页。已移除自定义右上角跳过按钮。
+- 首页按 `Pages/Main/MainPage.xaml` 1:1 重构：76px 顶栏 + 6px 朱砂条、200px 墨黑侧栏、数据概览 4 卡、救助业务 7 卡/管理工具 4 卡/娱乐 1 卡/链接 2 卡、看板娘立绘栏、44px 状态栏；未实现模块走 `/coming-soon/:module`。
+- 首页素材已上传 `.2:/www/wwwroot/cosmos-static.sua17.cn/images/`；`.2` nginx 增加 `/images/` 静态 location。
+- 已部署新 assets/index/splash，`/`、`/login`、`/applications`、`/coming-soon/*` 均 200。
 - 修复 URL 拼接：Vue Router 改用 `VITE_ROUTER_BASE=/`，不再把 `VITE_ASSET_BASE`（`.2` 绝对地址）当 Router base；`/login`、`/printers` 直接刷新 200。
 - 启动闸门：已登录不播动画，直接进应用；未登录才播动画，结束后挂载登录页。`?nosplash=1` 或本会话已播则跳过。
 - 对外名称恢复为 `帝皇权杖δ-me13 社会救助管理系统`；`APP_NAME`、页面标题、登录/侧栏品牌、Shell 标题同步。

@@ -15,8 +15,6 @@
         <span class="nc-splash__mark" aria-hidden="true">帝皇权杖δ-me13</span>
         <span class="nc-splash__hint">正在进入…</span>
       </div>
-
-      <button class="nc-splash__skip" type="button" @click="finish('skip')">跳过</button>
     </div>
   </Teleport>
 </template>
@@ -27,13 +25,14 @@ import { buildSplashUrl, markSplashSeen } from '@/utils/splash'
 
 /* 启动动画外壳：由 App.vue 根据登录态决定是否渲染。
    动画自己派发 dsh-startup:done（由 splash/bridge.js 转成 postMessage），
-   本组件收到后 emit done；失败 / 跳过 / 60 秒兜底都会结束。 */
+   动画内的 SKIP 也走这条 done；本组件不再提供额外跳过按钮。
+   失败 / 60 秒兜底同样结束。 */
 
-const emit = defineEmits<{ done: [reason: string] }>()
+const emit = defineEmits<{ done: [reason: string]; error: [message: string] }>()
 
 const SOURCE = 'newcosmos-splash'
 const FALLBACK_MS = 60_000
-const END_TYPES = new Set(['done', 'error', 'skip'])
+const END_TYPES = new Set(['done', 'error'])
 
 const src = buildSplashUrl()
 const visible = ref(true)
@@ -50,17 +49,15 @@ function clearFallback(): void {
   }
 }
 
-function finish(reason: string): void {
+function finish(reason: string, message?: string): void {
   if (!visible.value) return
-  if (reason === 'error' || reason === 'timeout') {
-    console.warn(`[splash] 启动动画提前结束：${reason}`)
-  }
   visible.value = false
   clearFallback()
   window.removeEventListener('message', handleMessage)
   document.documentElement.style.overflow = previousOverflow
   markSplashSeen()
-  emit('done', reason)
+  if (reason === 'error') emit('error', message || 'script-error')
+  else emit('done', reason)
 }
 
 function isSplashMessage(data: unknown): data is { source: string; type: string; message?: string } {
@@ -76,7 +73,10 @@ function handleMessage(event: MessageEvent): void {
   if (!END_TYPES.has(type)) return
 
   if (type === 'error') {
-    console.warn('[splash] 动画上报异常：', event.data.message || 'script-error')
+    const message = String(event.data.message || 'script-error')
+    console.warn('[splash] 动画上报异常：', message)
+    finish('error', message)
+    return
   }
   finish(type)
 }
@@ -182,36 +182,6 @@ onBeforeUnmount(() => {
   animation: nc-splash-pulse 1.6s ease-in-out infinite;
 }
 
-.nc-splash__skip {
-  position: absolute;
-  top: 18px;
-  right: 20px;
-  z-index: 2;
-  padding: 7px 18px;
-  border: 1px solid rgba(171, 50, 39, 0.5);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.72);
-  color: #ab3227;
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
-  font-size: 12px;
-  letter-spacing: 0.22em;
-  line-height: 1.4;
-  cursor: pointer;
-  backdrop-filter: blur(6px);
-  transition:
-    background-color 160ms ease,
-    color 160ms ease,
-    border-color 160ms ease;
-}
-
-.nc-splash__skip:hover,
-.nc-splash__skip:focus-visible {
-  background: #ab3227;
-  border-color: #ab3227;
-  color: #fff;
-  outline: none;
-}
-
 @keyframes nc-splash-pulse {
   0%,
   100% {
@@ -230,16 +200,6 @@ onBeforeUnmount(() => {
   to {
     opacity: 1;
     transform: none;
-  }
-}
-
-@media (max-width: 640px) {
-  .nc-splash__skip {
-    top: 12px;
-    right: 12px;
-    padding: 6px 14px;
-    font-size: 11px;
-    letter-spacing: 0.14em;
   }
 }
 

@@ -1,621 +1,772 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { Component } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   ArrowRight,
-  Clock,
-  Document,
+  Calendar,
+  Camera,
+  Check,
+  Coin,
+  DataBoard,
   FolderOpened,
-  Monitor,
-  OfficeBuilding,
+  Link,
+  Money,
   Printer,
-  Refresh,
-  Setting,
+  Search,
+  SwitchButton,
+  Trophy,
   User,
+  UserFilled,
+  Warning,
 } from '@element-plus/icons-vue'
-import { getErrorMessage } from '@/api/http'
-import NcCard from '@/components/NcCard.vue'
-import NcStatusDot from '@/components/NcStatusDot.vue'
-import { APP_NAME } from '@/config/app'
-import { useAuthStore } from '@/stores/auth'
 
-type Tone = 'ink' | 'seal' | 'pine' | 'amber'
-
-interface InfoItem {
+interface StatCard {
   label: string
-  value: string
-  extra?: string
+  caption: string
+  value: number
   icon: Component
-  tone?: Tone
+  gradient: 'blue' | 'green' | 'orange' | 'purple'
 }
 
-interface QuickItem {
+interface ModuleCard {
   title: string
+  subtitle: string
   description: string
   icon: Component
-  path?: string
-  tone?: Tone
+  iconBg: string
+  iconColor: string
+  buttonText: string
+  to?: string
+  href?: string
 }
 
-const auth = useAuthStore()
-const refreshing = ref(false)
+interface ModuleGroup {
+  title: string
+  cards: ModuleCard[]
+}
 
-const dateText = new Intl.DateTimeFormat('zh-CN', {
-  year: 'numeric',
-  month: 'long',
-  day: 'numeric',
-  weekday: 'long',
-}).format(new Date())
+interface WarningBanner {
+  key: string
+  text: string
+  icon: Component
+  to: string
+}
 
-const greeting = computed(() => {
-  const hour = new Date().getHours()
-  if (hour < 6) return '夜深了'
-  if (hour < 9) return '早上好'
-  if (hour < 12) return '上午好'
-  if (hour < 14) return '中午好'
-  if (hour < 18) return '下午好'
-  return '晚上好'
+const router = useRouter()
+const mascotUrl = `${import.meta.env.BASE_URL}images/newcosmos_character.png`
+
+/* ═══════════════════════════════════════════════════════════════════
+   警告横幅区（旧版 MainPage.row1）
+   Schema / 渐退期 / 普惠高龄 / 大学生毕业 / 死亡申报联动。
+   暂无数据接口 → 默认全部隐藏；接口接入后仅需回填下面的 show 标记与计数。
+   ═══════════════════════════════════════════════════════════════════ */
+const showSchemaWarning = ref(false)
+const schemaWarningMessage = ref('')
+const showGracePeriodWarning = ref(false)
+const gracePeriodExpiringCount = ref(0)
+const showElderlyReminder = ref(false)
+const elderlyPendingNewCount = ref(0)
+const elderlyPendingTransferCount = ref(0)
+const showCollegeStudentReminder = ref(false)
+const collegeStudentGraduatingCount = ref(0)
+const showDeathLinkageReminder = ref(false)
+const deathLinkagePendingCount = ref(0)
+const deathLinkageCanHandle = ref(true)
+
+const warnings = computed<WarningBanner[]>(() => {
+  const items: WarningBanner[] = []
+
+  if (showSchemaWarning.value && schemaWarningMessage.value) {
+    items.push({
+      key: 'schema',
+      text: schemaWarningMessage.value,
+      icon: Warning,
+      to: '/coming-soon/database',
+    })
+  }
+
+  if (showGracePeriodWarning.value && gracePeriodExpiringCount.value > 0) {
+    items.push({
+      key: 'grace-period',
+      text: `有 ${gracePeriodExpiringCount.value} 户渐退期将在 30 天内到期或已到期，请及时前往「低收入人口救助帮扶」处理`,
+      icon: Calendar,
+      to: '/applications',
+    })
+  }
+
+  if (showElderlyReminder.value) {
+    const total = elderlyPendingNewCount.value + elderlyPendingTransferCount.value
+    items.push({
+      key: 'elderly',
+      text:
+        `有 ${total} 位老人的高龄津贴需于下月办理变更` +
+        `（${elderlyPendingNewCount.value} 人待新增 / ${elderlyPendingTransferCount.value} 人需先停发后新增），` +
+        '请及时前往「高龄津贴发放」处理',
+      icon: Calendar,
+      to: '/coming-soon/elderly',
+    })
+  }
+
+  if (showCollegeStudentReminder.value && collegeStudentGraduatingCount.value > 0) {
+    items.push({
+      key: 'college-student',
+      text: `有 ${collegeStudentGraduatingCount.value} 位大学生今年6月毕业，毕业后最长择业期半年，请及时前往「低收入人口救助帮扶」更新毕业状态并核查是否需退出最低生活保障`,
+      icon: UserFilled,
+      to: '/applications',
+    })
+  }
+
+  if (showDeathLinkageReminder.value && deathLinkagePendingCount.value > 0) {
+    items.push({
+      key: 'death-linkage',
+      text: deathLinkageCanHandle.value
+        ? `有 ${deathLinkagePendingCount.value} 项死亡申报关联手续待办（高龄停发 / 档案变更等），请前往「死亡情况说明」办理`
+        : `已收到 ${deathLinkagePendingCount.value} 项死亡申报关联手续（高龄停发 / 档案变更等），本级无办理权限，待镇级经办处理`,
+      icon: Warning,
+      to: '/coming-soon/death-statement',
+    })
+  }
+
+  return items
 })
 
-const organization = computed(() => auth.user?.organizationName || '未设置组织')
-
-const deviceKindText = computed(() => (auth.deviceKind === 'mobile-web' ? '手机浏览器' : '桌面浏览器'))
-
-const expiresText = computed(() => formatDateTime(auth.expiresAt))
-
-const remainingText = computed(() => {
-  const expires = Date.parse(auth.expiresAt)
-  if (!Number.isFinite(expires)) return '有效期未知'
-  const diff = expires - Date.now()
-  if (diff <= 0) return '会话已过期'
-  const hours = Math.floor(diff / 3_600_000)
-  const minutes = Math.floor((diff % 3_600_000) / 60_000)
-  if (hours >= 24) return `剩余约 ${Math.floor(hours / 24)} 天 ${hours % 24} 小时`
-  if (hours >= 1) return `剩余约 ${hours} 小时 ${minutes} 分钟`
-  return `剩余约 ${minutes} 分钟`
-})
-
-const deviceIdText = computed(() => {
-  const id = auth.deviceId
-  return id.length > 20 ? `${id.slice(0, 12)}…${id.slice(-6)}` : id
-})
-
-const infoItems = computed<InfoItem[]>(() => [
+/* ═══════════════════════════════════════════════════════════════════
+   数据概览（旧版四张 StatCard，统计接口未接入时统一显示 0）
+   ═══════════════════════════════════════════════════════════════════ */
+const stats: StatCard[] = [
   {
-    label: '当前账号',
-    value: auth.user?.fullName || auth.user?.username || '—',
-    extra: auth.user?.username ? `登录名 ${auth.user.username}` : undefined,
-    icon: User,
-    tone: 'seal',
+    label: '本月总新增',
+    caption: '统计周期内 新入保（户）',
+    value: 0,
+    icon: Check,
+    gradient: 'blue',
   },
   {
-    label: '所属组织',
-    value: organization.value,
-    extra: auth.user?.organizationId ? `组织编号 ${auth.user.organizationId}` : undefined,
-    icon: OfficeBuilding,
-    tone: 'pine',
+    label: '本月总退出',
+    caption: '统计周期内 停保退出（户）',
+    value: 0,
+    icon: SwitchButton,
+    gradient: 'green',
   },
   {
-    label: '会话有效期至',
-    value: expiresText.value,
-    extra: remainingText.value,
-    icon: Clock,
-    tone: 'amber',
+    label: '新申请经济核对',
+    caption: '统计周期内 已申未出报告（件）',
+    value: 0,
+    icon: Search,
+    gradient: 'orange',
   },
   {
-    label: '当前设备',
-    value: deviceIdText.value,
-    extra: deviceKindText.value,
-    icon: Monitor,
-    tone: 'ink',
-  },
-])
-
-const quickItems: QuickItem[] = [
-  {
-    title: '文档中心',
-    description: '救助档案与业务附件统一管理',
-    icon: FolderOpened,
-    tone: 'pine',
-  },
-  {
-    title: '系统设置',
-    description: '通知、偏好与安全选项',
-    icon: Setting,
-    tone: 'amber',
+    label: '本月新增高龄老人',
+    caption: '自然月受理登记（人）',
+    value: 0,
+    icon: UserFilled,
+    gradient: 'purple',
   },
 ]
 
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) return '—'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return new Intl.DateTimeFormat('zh-CN', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(date)
+/* ═══════════════════════════════════════════════════════════════════
+   模块直达区：目录、文案、图标底色取 legacy MainViewModel.RebuildDashboard
+   ═══════════════════════════════════════════════════════════════════ */
+const moduleGroups: ModuleGroup[] = [
+  {
+    title: '救助业务',
+    cards: [
+      {
+        title: '低收入人口救助帮扶',
+        subtitle: '认定审核确认 · 动态管理',
+        description: '覆盖救助申请、保障对象动态管理、临时救助、月报表与渐退期管理',
+        icon: Coin,
+        iconBg: '#EBF5FF',
+        iconColor: '#ab3227',
+        buttonText: '进入模块',
+        to: '/applications',
+      },
+      {
+        title: '高龄津贴发放',
+        subtitle: '申请登记 · 停发管理 · 类别复核',
+        description: '覆盖高龄津贴申请登记、停发办理、类别复核与月度报表',
+        icon: UserFilled,
+        iconBg: '#F5F3FF',
+        iconColor: '#5a4a72',
+        buttonText: '进入模块',
+        to: '/coming-soon/elderly',
+      },
+      {
+        title: '家庭经济状况核对',
+        subtitle: '经济核对 · 报告审核',
+        description: '覆盖快速核对、报告上传月度审核与核对月报表',
+        icon: Search,
+        iconBg: '#FFFBEB',
+        iconColor: '#96681c',
+        buttonText: '进入模块',
+        to: '/coming-soon/asset-verification',
+      },
+      {
+        title: '救助档案管理',
+        subtitle: '历史档案检索查阅',
+        description: '现存低收入人口历史档案查询',
+        icon: FolderOpened,
+        iconBg: '#ECFDF5',
+        iconColor: '#2e4738',
+        buttonText: '进入模块',
+        to: '/coming-soon/archive',
+      },
+      {
+        title: '死亡情况说明',
+        subtitle: '死亡申报 · 身份聚合 · 文书出具',
+        description: '覆盖村内死亡申报、在库身份聚合、数据提醒与情况说明出具',
+        icon: Warning,
+        iconBg: '#F1F0FB',
+        iconColor: '#6D28D9',
+        buttonText: '进入模块',
+        to: '/coming-soon/death-statement',
+      },
+      {
+        title: '后补追缴',
+        subtitle: '停止人员追缴 · 手工录入',
+        description: '覆盖低保、刚性支出、临时救助与高龄停止人员的追缴办理与台账',
+        icon: Money,
+        iconBg: '#FFF3E0',
+        iconColor: '#7a5315',
+        buttonText: '进入模块',
+        to: '/coming-soon/recovery',
+      },
+      {
+        title: '照片补传',
+        subtitle: '按人检索 · 连续采集 · 推送打印',
+        description:
+          '跨低收入/高龄/临时救助检索人员已传照片数，勾选后连续采集证件照并可推送打印',
+        icon: Camera,
+        iconBg: '#ECFDF5',
+        iconColor: '#2e4738',
+        buttonText: '进入模块',
+        to: '/coming-soon/photo-backfill',
+      },
+    ],
+  },
+  {
+    title: '管理工具',
+    cards: [
+      {
+        title: '数据中心',
+        subtitle: '备份恢复 · 数据导入导出',
+        description: '数据库管理、数据字典、标准配置、数据导入与区域数据维护',
+        icon: DataBoard,
+        iconBg: '#F8FAFC',
+        iconColor: '#6d6354',
+        buttonText: '进入模块',
+        to: '/coming-soon/database',
+      },
+      {
+        title: '用户与权限管理',
+        subtitle: '账户 · 角色 · 权限配置',
+        description: '系统用户、角色权限与经办机构信息维护（经办机构亦可从左侧菜单进入）',
+        icon: User,
+        iconBg: '#FDF2F8',
+        iconColor: '#7f231b',
+        buttonText: '进入模块',
+        to: '/coming-soon/users',
+      },
+      {
+        title: '值班管理',
+        subtitle: '月度值班表 · 班务调整',
+        description: '值班表轮转生成、请假/串班/代班调整、节假日维护与政务值班表导出',
+        icon: Calendar,
+        iconBg: '#ECFDF5',
+        iconColor: '#2e4738',
+        buttonText: '进入模块',
+        to: '/coming-soon/duty',
+      },
+      {
+        title: '历史补打中心',
+        subtitle: '按人检索 · 批量补打',
+        description:
+          '跨域按人检索低保/临时救助/普惠高龄/资产核查/动态管理档案，支持留痕原样补打与按月批量打印',
+        icon: Printer,
+        iconBg: '#F0F9FF',
+        iconColor: '#6d6354',
+        buttonText: '进入模块',
+        to: '/coming-soon/reprint',
+      },
+    ],
+  },
+  {
+    title: '娱乐天地',
+    cards: [
+      {
+        title: '彩票助手',
+        subtitle: '机选 · 智能预测',
+        description: '双色球/大乐透历史数据、号码统计分析与智能预测',
+        icon: Trophy,
+        iconBg: '#FFF7ED',
+        iconColor: '#EA580C',
+        buttonText: '进入模块',
+        to: '/coming-soon/lottery',
+      },
+    ],
+  },
+  {
+    title: '快捷链接',
+    cards: [
+      {
+        title: '作者官网',
+        subtitle: '软件更新 · 通告',
+        description: '用于软件更新以及通告',
+        icon: Link,
+        iconBg: '#EBF5FF',
+        iconColor: '#ab3227',
+        buttonText: '访问网站',
+        href: 'https://sua17.cn',
+      },
+      {
+        title: '黑龙江民政官网',
+        subtitle: '黑龙江省民政厅',
+        description: '访问黑龙江省民政厅网上办事大厅',
+        icon: Link,
+        iconBg: '#ECFDF5',
+        iconColor: '#2e4738',
+        buttonText: '访问网站',
+        href: 'https://zwfw.mzt.hlj.gov.cn/casserver/login',
+      },
+    ],
+  },
+]
+
+function openCard(card: ModuleCard): void {
+  if (card.href) {
+    window.open(card.href, '_blank', 'noopener')
+    return
+  }
+  if (card.to) void router.push(card.to)
 }
 
-async function refreshSession(): Promise<void> {
-  if (refreshing.value) return
-  refreshing.value = true
-  try {
-    await auth.heartbeat()
-    ElMessage.success('会话状态已刷新')
-  } catch (error) {
-    ElMessage.error(getErrorMessage(error, '刷新会话失败'))
-  } finally {
-    refreshing.value = false
-  }
+function openWarning(banner: WarningBanner): void {
+  void router.push(banner.to)
 }
 </script>
 
 <template>
-  <div class="nc-page home-page">
-    <section class="welcome">
-      <div class="welcome-main">
-        <p class="welcome-date">{{ dateText }}</p>
-        <h1 class="welcome-title">{{ greeting }}，{{ auth.displayName }}</h1>
-        <p class="welcome-sub">{{ organization }} · 欢迎使用{{ APP_NAME }}</p>
-      </div>
-      <div class="welcome-side">
-        <NcStatusDot status="online" label="会话正常" />
-        <el-button :icon="Refresh" :loading="refreshing" plain size="small" @click="refreshSession">
-          刷新会话
-        </el-button>
-      </div>
-    </section>
-
-    <section class="info-grid" aria-label="会话信息">
-      <article
-        v-for="item in infoItems"
-        :key="item.label"
-        class="info-card"
-        :class="`tone-${item.tone ?? 'ink'}`"
-      >
-        <span class="info-icon">
-          <el-icon :size="18"><component :is="item.icon" /></el-icon>
-        </span>
-        <div class="info-main">
-          <span class="info-label">{{ item.label }}</span>
-          <strong class="info-value" :title="item.value">{{ item.value }}</strong>
-          <span v-if="item.extra" class="info-extra">{{ item.extra }}</span>
-        </div>
-      </article>
-    </section>
-
-    <section class="section">
-      <div class="section-head">
-        <h2 class="nc-section-title">快捷入口</h2>
-        <span class="section-note">更多业务模块建设中</span>
-      </div>
-
-      <div class="quick-grid">
-        <RouterLink to="/printers" class="quick-card tone-seal">
-          <span class="quick-icon"><el-icon :size="22"><Printer /></el-icon></span>
-          <span class="quick-text">
-            <strong>打印机绑定</strong>
-            <small>管理本账号的设备与打印机</small>
-          </span>
-          <el-icon class="quick-arrow"><ArrowRight /></el-icon>
-        </RouterLink>
-
-        <RouterLink to="/applications" class="quick-card tone-pine">
-          <span class="quick-icon"><el-icon :size="22"><Document /></el-icon></span>
-          <span class="quick-text">
-            <strong>申请管理</strong>
-            <small>查看社会救助申请与家庭成员</small>
-          </span>
-          <el-icon class="quick-arrow"><ArrowRight /></el-icon>
-        </RouterLink>
-
-        <div
-          v-for="item in quickItems"
-          :key="item.title"
-          class="quick-card is-disabled"
-          :class="`tone-${item.tone ?? 'ink'}`"
-          aria-disabled="true"
+  <div class="home">
+    <div class="home-main">
+      <!-- 警告横幅区（默认隐藏，接口接入后回填 show 标记与计数） -->
+      <div v-if="warnings.length" class="warnings">
+        <button
+          v-for="banner in warnings"
+          :key="banner.key"
+          class="warning-banner"
+          type="button"
+          @click="openWarning(banner)"
         >
-          <span class="quick-icon"><el-icon :size="22"><component :is="item.icon" /></el-icon></span>
-          <span class="quick-text">
-            <strong>{{ item.title }}</strong>
-            <small>{{ item.description }}</small>
-          </span>
-          <span class="quick-badge">即将上线</span>
+          <el-icon :size="18" class="warning-icon"><component :is="banner.icon" /></el-icon>
+          <span class="warning-text">{{ banner.text }}</span>
+          <el-icon :size="16" class="warning-arrow"><ArrowRight /></el-icon>
+        </button>
+      </div>
+
+      <div class="home-inner">
+        <!-- 数据概览 -->
+        <section class="stats-section" aria-label="数据概览">
+          <h2 class="section-title"><span class="seal-dash" aria-hidden="true" />数据概览</h2>
+          <div class="stats-grid">
+            <article
+              v-for="stat in stats"
+              :key="stat.label"
+              class="stat-card"
+              :class="`stat-card--${stat.gradient}`"
+            >
+              <div class="stat-head">
+                <el-icon :size="18"><component :is="stat.icon" /></el-icon>
+                <span>{{ stat.label }}</span>
+              </div>
+              <strong class="stat-value">{{ stat.value }}</strong>
+              <p class="stat-caption">{{ stat.caption }}</p>
+            </article>
+          </div>
+        </section>
+
+        <!-- 模块直达区（一域一卡） -->
+        <div class="module-groups">
+          <section
+            v-for="group in moduleGroups"
+            :key="group.title"
+            class="module-group"
+            :aria-label="group.title"
+          >
+            <h2 class="section-title section-title--group">
+              <span class="seal-dash" aria-hidden="true" />{{ group.title }}
+            </h2>
+            <div class="card-grid">
+              <article v-for="card in group.cards" :key="card.title" class="module-card">
+                <header class="module-head">
+                  <span
+                    class="module-icon"
+                    :style="{ backgroundColor: card.iconBg, color: card.iconColor }"
+                  >
+                    <el-icon :size="24"><component :is="card.icon" /></el-icon>
+                  </span>
+                  <span class="module-heading">
+                    <strong class="module-title">{{ card.title }}</strong>
+                    <small class="module-subtitle">{{ card.subtitle }}</small>
+                  </span>
+                </header>
+                <p class="module-desc">{{ card.description }}</p>
+                <button class="module-button" type="button" @click="openCard(card)">
+                  {{ card.buttonText }}
+                </button>
+              </article>
+            </div>
+          </section>
         </div>
       </div>
-    </section>
+    </div>
 
-    <NcCard title="打印使用提示" class="tips-card">
-      <ol class="tips-list">
-        <li><span>1</span>在需要执行打印的 Windows 电脑上安装并启动 NewCosmos Agent。</li>
-        <li><span>2</span>进入「打印机绑定」，选择已注册的 Agent 设备与该设备上报的打印机。</li>
-        <li><span>3</span>手机端发起打印后，任务将在绑定的电脑上由默认打印机执行。</li>
-      </ol>
-    </NcCard>
+    <!-- 看板娘立绘栏（桌面显示，底部对齐白卡） -->
+    <aside class="mascot-col" aria-hidden="true">
+      <div class="mascot-card">
+        <img :src="mascotUrl" alt="" />
+      </div>
+    </aside>
   </div>
 </template>
 
 <style scoped>
-.home-page {
+.home {
   display: flex;
-  flex-direction: column;
-  gap: 20px;
+  align-items: flex-start;
+  min-height: 100%;
 }
 
-/* ── 欢迎区（档案首页题头） ───────────────────────────────────── */
-.welcome {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  overflow: hidden;
-  padding: 24px 26px 24px 24px;
-  border: 1px solid var(--nc-line);
-  border-left: 3px solid var(--nc-seal);
-  border-radius: var(--nc-radius-sm);
-  background:
-    linear-gradient(90deg, rgba(171, 50, 39, 0.045), transparent 34%),
-    var(--nc-paper-2);
-  box-shadow: var(--nc-shadow-xs);
-}
-
-.welcome::after {
-  content: '档';
-  position: absolute;
-  right: 24px;
-  bottom: -34px;
-  color: var(--nc-ink);
-  font-family: var(--nc-font-serif);
-  font-size: 128px;
-  font-weight: 700;
-  line-height: 1;
-  opacity: 0.04;
-  pointer-events: none;
-}
-
-.welcome-main,
-.welcome-side {
-  position: relative;
-  z-index: 1;
-}
-
-.welcome-main {
+.home-main {
+  flex: 1;
   min-width: 0;
 }
 
-.welcome-date {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-xs);
-  letter-spacing: 0.1em;
+/* ── 警告横幅 ─────────────────────────────────────────────────── */
+.warnings {
+  display: flex;
+  flex-direction: column;
 }
 
-.welcome-date::before {
-  content: '';
+.warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: calc(100% - 20px);
+  margin: 5px 10px;
+  padding: 10px 16px;
+  border: 0;
+  background-color: #f3e6cf;
+  color: #7a5315;
+  font-size: 18px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+
+.warning-banner:hover {
+  background-color: #efdfc1;
+}
+
+.warning-icon {
   flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: var(--nc-radius-xs);
+}
+
+.warning-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.warning-arrow {
+  flex: none;
+  opacity: 0.6;
+}
+
+/* ── 内容骨架 ─────────────────────────────────────────────────── */
+.home-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 20px;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 8px;
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+}
+
+.section-title--group {
+  margin: 12px 0 8px;
+}
+
+.seal-dash {
+  flex: none;
+  width: 14px;
+  height: 2px;
   background-color: var(--nc-seal);
 }
 
-.welcome-title {
-  margin-top: 9px;
-  color: var(--nc-ink);
-  font-family: var(--nc-font-serif);
-  font-size: 26px;
-  font-weight: 700;
-  line-height: 1.35;
-  letter-spacing: 0.04em;
-}
-
-.welcome-sub {
-  margin-top: 7px;
-  color: var(--nc-muted-2);
-  font-size: 13px;
-}
-
-.welcome-side {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 12px;
-}
-
-/* ── 会话信息卡 ───────────────────────────────────────────────── */
-.info-grid {
+/* ── 数据概览卡 ───────────────────────────────────────────────── */
+.stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(236px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
 }
 
-.info-card {
-  --tone: var(--nc-ink-2);
-  --tone-soft: var(--nc-paper-3);
-
-  display: flex;
-  gap: 13px;
-  min-width: 0;
-  padding: 15px 16px;
-  border: 1px solid var(--nc-line);
-  border-radius: var(--nc-radius-sm);
-  background-color: var(--nc-paper-2);
-  box-shadow: var(--nc-shadow-xs);
-  transition:
-    border-color var(--nc-transition),
-    box-shadow var(--nc-transition);
+.stats-section > .section-title {
+  /* 旧版外层 VerticalStackLayout Spacing=20 + 标题 Margin 0,0,0,8 */
+  margin-bottom: 28px;
 }
 
-.info-card:hover {
-  border-color: var(--nc-line-strong);
-  box-shadow: var(--nc-shadow-sm);
-}
-
-.tone-seal {
-  --tone: var(--nc-seal);
-  --tone-soft: var(--nc-seal-wash);
-}
-
-.tone-pine {
-  --tone: var(--nc-pine);
-  --tone-soft: var(--nc-pine-soft);
-}
-
-.tone-amber {
-  --tone: var(--nc-amber);
-  --tone-soft: var(--nc-amber-soft);
-}
-
-.tone-ink {
-  --tone: var(--nc-ink-2);
-  --tone-soft: var(--nc-paper-3);
-}
-
-.info-icon {
-  display: grid;
-  flex: none;
-  place-items: center;
-  width: 36px;
-  height: 36px;
-  border: 1px solid var(--nc-line-faint);
-  border-radius: var(--nc-radius-sm);
-  background-color: var(--tone-soft);
-  color: var(--tone);
-}
-
-.info-main {
+.stat-card {
   display: flex;
   flex-direction: column;
+  gap: 8px;
   min-width: 0;
-  line-height: 1.45;
+  padding: 20px;
+  border-radius: 2px;
+  color: #ffffff;
 }
 
-.info-label {
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.12em;
+.stat-card--blue {
+  background: linear-gradient(135deg, #ab3227 0%, #7f231b 100%);
 }
 
-.info-value {
-  margin-top: 4px;
-  overflow: hidden;
-  color: var(--nc-ink);
-  font-size: var(--nc-text-base);
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.stat-card--green {
+  background: linear-gradient(135deg, #2e4738 0%, #22352a 100%);
 }
 
-.info-extra {
-  margin-top: 2px;
-  overflow: hidden;
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.stat-card--orange {
+  background: linear-gradient(135deg, #96681c 0%, #7a5315 100%);
 }
 
-/* ── 快捷入口 ─────────────────────────────────────────────────── */
-.section-head {
+.stat-card--purple {
+  background: linear-gradient(135deg, #4c4237 0%, #322b24 100%);
+}
+
+.stat-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: 8px;
+  min-width: 0;
+  font-size: 18px;
+  line-height: 1.4;
+  opacity: 0.9;
 }
 
-.section-note {
-  color: var(--nc-muted);
-  font-size: var(--nc-text-sm);
+.stat-head span {
+  min-width: 0;
+  line-height: 1.35;
 }
 
-.quick-grid {
+.stat-value {
+  font-size: 38px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: 0.01em;
+}
+
+.stat-caption {
+  font-size: 16px;
+  line-height: 1.5;
+  opacity: 0.8;
+}
+
+/* ── 模块卡片 ─────────────────────────────────────────────────── */
+.module-groups {
+  display: flex;
+  flex-direction: column;
+}
+
+.card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
 }
 
-.quick-card {
-  --tone: var(--nc-ink-2);
-  --tone-soft: var(--nc-paper-3);
-
+.module-card {
   display: flex;
-  align-items: center;
-  gap: 14px;
+  flex-direction: column;
+  gap: 10px;
   min-width: 0;
-  padding: 16px 17px;
+  padding: 20px;
   border: 1px solid var(--nc-line);
-  border-radius: var(--nc-radius-sm);
-  background-color: var(--nc-paper-2);
-  box-shadow: var(--nc-shadow-xs);
+  border-radius: 2px;
+  background-color: #f8f3e9;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
   transition:
     border-color var(--nc-transition),
     box-shadow var(--nc-transition),
     transform var(--nc-transition);
 }
 
-.quick-card:not(.is-disabled):hover {
-  border-color: var(--nc-seal);
-  box-shadow: var(--nc-shadow-sm);
+.module-card:hover {
+  border-color: var(--nc-line-strong);
+  box-shadow: 0 6px 16px rgba(23, 19, 16, 0.12);
   transform: translateY(-1px);
 }
 
-.quick-icon {
-  display: grid;
-  flex: none;
-  place-items: center;
-  width: 42px;
-  height: 42px;
-  border: 1px solid var(--nc-line-faint);
-  border-radius: var(--nc-radius-sm);
-  background-color: var(--tone-soft);
-  color: var(--tone);
-}
-
-.quick-text {
+.module-head {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
+  align-items: center;
+  gap: 12px;
   min-width: 0;
 }
 
-.quick-text strong {
-  color: var(--nc-ink);
-  font-family: var(--nc-font-serif);
-  font-size: var(--nc-text-md);
-  font-weight: 700;
-  letter-spacing: 0.03em;
+.module-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
 }
 
-.quick-text small {
+.module-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.module-title {
+  color: var(--nc-ink);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.module-subtitle {
   overflow: hidden;
   color: var(--nc-muted);
-  font-size: var(--nc-text-sm);
+  font-size: 14px;
+  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.quick-arrow {
-  margin-left: auto;
-  color: var(--nc-seal);
-}
-
-.quick-badge {
-  flex: none;
-  margin-left: auto;
-  padding: 1px 6px;
-  border: 1px solid var(--nc-line);
-  border-radius: var(--nc-radius-xs);
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  white-space: nowrap;
-}
-
-.quick-card.is-disabled {
-  background-color: var(--nc-paper);
-  box-shadow: none;
-  opacity: 0.66;
-}
-
-.quick-card.is-disabled .quick-icon {
-  color: var(--nc-muted);
-}
-
-/* ── 打印提示 ─────────────────────────────────────────────────── */
-.tips-list {
-  display: grid;
-  gap: 11px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.tips-list li {
-  display: flex;
-  align-items: flex-start;
-  gap: 11px;
+.module-desc {
+  display: -webkit-box;
+  height: 42px;
+  overflow: hidden;
   color: var(--nc-ink-2);
-  font-size: 13px;
-  line-height: 1.75;
+  font-size: 14px;
+  line-height: 21px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
-.tips-list span {
-  display: grid;
+.module-button {
+  height: 44px;
+  margin-top: auto;
+  border: 0;
+  border-radius: 2px;
+  background-color: var(--nc-seal);
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color var(--nc-transition);
+}
+
+.module-button:hover {
+  background-color: var(--nc-seal-hover);
+}
+
+/* ── 看板娘立绘栏 ─────────────────────────────────────────────── */
+.mascot-col {
+  position: sticky;
+  top: 0;
+  display: flex;
   flex: none;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  margin-top: 1px;
-  border: 1px solid rgba(171, 50, 39, 0.45);
-  border-radius: var(--nc-radius-xs);
-  color: var(--nc-seal-dark);
-  font-family: var(--nc-font-mono);
-  font-size: 11px;
-  font-weight: 600;
+  align-items: flex-end;
+  align-self: flex-start;
+  width: 200px;
+  height: calc(100vh - 120px);
+  padding: 0 16px 20px 0;
 }
 
-/* ── 手机 ─────────────────────────────────────────────────────── */
-@media (min-width: 768px) and (max-width: 1023px) {
-  .info-grid {
+.mascot-card {
+  width: 100%;
+  padding: 12px 10px 10px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #e7f0fe 100%);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.mascot-card img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* ── 窄桌面 / 平板 ───────────────────────────────────────────── */
+@media (max-width: 1199px) {
+  .stats-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
+@media (max-width: 1023px) {
+  .card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mascot-col {
+    display: none;
+  }
+
+  .warning-banner {
+    font-size: 16px;
+  }
+}
+
 @media (max-width: 767px) {
-  .home-page {
+  .home-inner {
     gap: 16px;
+    padding: 16px 14px;
   }
 
-  .welcome {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 16px;
-    padding: 18px 16px;
-  }
-
-  .welcome::after {
-    right: 8px;
-    bottom: -28px;
-    font-size: 104px;
-  }
-
-  .welcome-title {
-    font-size: 21px;
-  }
-
-  .welcome-side {
-    width: 100%;
-    justify-content: space-between;
-  }
-
-  .info-grid {
-    grid-template-columns: 1fr;
-    gap: 10px;
-  }
-
-  .info-card {
-    padding: 13px 14px;
-  }
-
-  .quick-grid {
+  .card-grid {
     grid-template-columns: 1fr;
   }
 
-  .quick-card {
-    padding: 14px 15px;
+  .stat-card {
+    padding: 16px;
   }
 
-  .section-note {
-    font-size: var(--nc-text-xs);
+  .stat-head {
+    font-size: 16px;
+  }
+
+  .stat-value {
+    font-size: 32px;
+  }
+
+  .stat-caption {
+    font-size: 14px;
+  }
+
+  .module-card {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 420px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
   }
 }
 </style>

@@ -3,36 +3,95 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { Component } from 'vue'
 import {
-  ArrowDown,
+  Calendar,
+  Coin,
+  DataBoard,
   Document,
+  FolderOpened,
   House,
+  Link,
   Menu as MenuIcon,
+  Money,
   MoreFilled,
+  OfficeBuilding,
   Printer,
+  Search,
+  Setting,
   SwitchButton,
+  Trophy,
+  User,
   UserFilled,
 } from '@element-plus/icons-vue'
-import { APP_NAME, APP_SHORT_NAME, APP_VERSION } from '@/config/app'
+import { APP_NAME, APP_VERSION } from '@/config/app'
 import { useAuthStore } from '@/stores/auth'
 
 interface NavItem {
-  name: string
-  path: string
-  title: string
-  shortTitle: string
+  label: string
   icon: Component
+  /** 站内路由；与 href 二选一 */
+  path?: string
+  /** 外链；新窗口打开 */
+  href?: string
 }
 
-const navItems: NavItem[] = [
-  { name: 'home', path: '/', title: '首页', shortTitle: '首页', icon: House },
+interface NavGroup {
+  title: string
+  items: NavItem[]
+}
+
+/*
+ * 侧栏目录 = legacy Pages/Main/MainPage.xaml（分组与文案逐项对齐）。
+ * 已实现页面：首页 /、低收入人口救助帮扶 /applications、打印机绑定 /printers；
+ * 其余模块统一走 /coming-soon/:module 占位页，保持旧文案不变。
+ */
+const navGroups: NavGroup[] = [
   {
-    name: 'applications',
-    path: '/applications',
-    title: '申请管理',
-    shortTitle: '申请',
-    icon: Document,
+    title: '工 作 台',
+    items: [{ label: '首页', icon: House, path: '/' }],
   },
-  { name: 'printers', path: '/printers', title: '打印机绑定', shortTitle: '打印机', icon: Printer },
+  {
+    title: '救助业务',
+    items: [
+      { label: '低收入人口救助帮扶', icon: Coin, path: '/applications' },
+      { label: '高龄津贴发放', icon: UserFilled, path: '/coming-soon/elderly' },
+      { label: '家庭经济状况核对', icon: Search, path: '/coming-soon/asset-verification' },
+      { label: '救助档案管理', icon: FolderOpened, path: '/coming-soon/archive' },
+      { label: '后补追缴', icon: Money, path: '/coming-soon/recovery' },
+    ],
+  },
+  {
+    title: '管理工具',
+    items: [
+      { label: '数据中心', icon: DataBoard, path: '/coming-soon/database' },
+      { label: '用户与权限管理', icon: User, path: '/coming-soon/users' },
+      { label: '经办机构管理', icon: OfficeBuilding, path: '/coming-soon/organizations' },
+      { label: '文书模板管理', icon: Document, path: '/coming-soon/templates' },
+      { label: '值班管理', icon: Calendar, path: '/coming-soon/duty' },
+      // Web 端既有能力：打印机绑定（旧版由桌面端承担，Web 保留入口）
+      { label: '打印机绑定', icon: Printer, path: '/printers' },
+    ],
+  },
+  {
+    title: '娱乐天地',
+    items: [{ label: '彩票助手', icon: Trophy, path: '/coming-soon/lottery' }],
+  },
+  {
+    title: '链接',
+    items: [
+      { label: '政策官网', icon: Link, href: 'https://sua17.cn' },
+      {
+        label: '民政官网',
+        icon: Link,
+        href: 'https://zwfw.mzt.hlj.gov.cn/casserver/login',
+      },
+    ],
+  },
+]
+
+const mobileTabs: NavItem[] = [
+  { label: '首页', icon: House, path: '/' },
+  { label: '申请', icon: Coin, path: '/applications' },
+  { label: '打印机', icon: Printer, path: '/printers' },
 ]
 
 const route = useRoute()
@@ -40,19 +99,37 @@ const router = useRouter()
 const auth = useAuthStore()
 
 const drawerVisible = ref(false)
-const pageTitle = computed(() => route.meta.title ?? '')
+const contentRef = ref<HTMLElement | null>(null)
+const mascotIcon = `${import.meta.env.BASE_URL}images/mascot_icon.png`
+
 const activePath = computed(() => {
-  const matched = navItems.find((item) =>
-    item.path === '/'
-      ? route.path === '/'
-      : route.path === item.path || route.path.startsWith(`${item.path}/`),
-  )
-  return matched?.path ?? route.path
+  if (route.name === 'coming-soon') return `/coming-soon/${String(route.params.module ?? '')}`
+  if (route.path === '/applications' || route.path.startsWith('/applications/')) {
+    return '/applications'
+  }
+  if (route.path === '/printers' || route.path.startsWith('/printers/')) return '/printers'
+  return route.path
 })
-const avatarText = computed(() => auth.displayName.slice(0, 1).toUpperCase())
-const organization = computed(() => auth.user?.organizationName || '未设置组织')
+
+const isMoreActive = computed(
+  () => !mobileTabs.some((item) => item.path === activePath.value),
+)
+
 const expiresText = computed(() => formatDateTime(auth.expiresAt))
-const isMoreActive = computed(() => !navItems.some((item) => item.path === activePath.value))
+
+/* ── 顶栏时钟：旧版格式 yyyy-MM-dd HH:mm，每分钟刷新 ───────────── */
+const now = ref(new Date())
+let clockTimer: number | undefined
+
+function pad(value: number): string {
+  return value < 10 ? `0${value}` : String(value)
+}
+
+function formatClock(date: Date): string {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+const dateText = computed(() => formatClock(now.value))
 
 const HEARTBEAT_INTERVAL = 60_000
 let heartbeatTimer: number | undefined
@@ -91,15 +168,23 @@ function handleVisibilityChange(): void {
   }
 }
 
+function isActive(item: NavItem): boolean {
+  return Boolean(item.path) && item.path === activePath.value
+}
+
 function navigate(path: string): void {
   drawerVisible.value = false
   if (route.path !== path) void router.push(path)
 }
 
+function goSettings(): void {
+  void router.push('/coming-soon/settings')
+}
+
 async function handleLogout(): Promise<void> {
   try {
-    await ElMessageBox.confirm('退出后需要重新登录，确定继续吗？', '退出登录', {
-      confirmButtonText: '退出',
+    await ElMessageBox.confirm('确定要退出登录吗', '确认', {
+      confirmButtonText: '确定',
       cancelButtonText: '取消',
       type: 'warning',
     })
@@ -113,24 +198,25 @@ async function handleLogout(): Promise<void> {
   await router.replace({ name: 'login' })
 }
 
-function handleUserCommand(command: string | number | object): void {
-  if (command === 'logout') void handleLogout()
-}
-
 watch(
   () => route.fullPath,
   () => {
     drawerVisible.value = false
+    contentRef.value?.scrollTo({ top: 0 })
   },
 )
 
 onMounted(() => {
+  clockTimer = window.setInterval(() => {
+    now.value = new Date()
+  }, 60_000)
   void runHeartbeat()
   heartbeatTimer = window.setInterval(() => void runHeartbeat(), HEARTBEAT_INTERVAL)
   document.addEventListener('visibilitychange', handleVisibilityChange)
 })
 
 onBeforeUnmount(() => {
+  if (clockTimer !== undefined) window.clearInterval(clockTimer)
   if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
@@ -138,125 +224,208 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="layout">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-mark">帝</div>
-        <div class="brand-text">
-          <strong>{{ APP_SHORT_NAME }}</strong>
-          <span>社会救助管理系统</span>
-        </div>
-      </div>
-
-      <div class="nav-section">业务导航</div>
-      <el-menu :default-active="activePath" class="nav-menu" router>
-        <el-menu-item v-for="item in navItems" :key="item.name" :index="item.path">
-          <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
-          <span>{{ item.title }}</span>
-        </el-menu-item>
-        <el-menu-item index="/print-center" disabled>
-          <el-icon class="nav-icon"><Printer /></el-icon>
-          <span>打印中心</span>
-          <span class="nav-soon">待上线</span>
-        </el-menu-item>
-      </el-menu>
-
-      <div class="side-foot">
-        <span class="status-dot" />
-        <span>会话在线 · v{{ APP_VERSION }}</span>
-      </div>
-    </aside>
-
-    <div class="layout-body">
-      <header class="topbar">
-        <button class="menu-toggle" type="button" aria-label="打开菜单" @click="drawerVisible = true">
-          <el-icon :size="20"><MenuIcon /></el-icon>
-        </button>
-
-        <div class="topbar-heading">
-          <span class="topbar-kicker">档案 · 事务</span>
-          <h1 class="topbar-title">{{ pageTitle }}</h1>
-        </div>
-        <el-tag class="topbar-org" effect="plain" round size="small">{{ organization }}</el-tag>
-
-        <div class="topbar-spacer" />
-
-        <el-dropdown trigger="click" @command="handleUserCommand">
-          <button class="user-trigger" type="button">
-            <span class="avatar">{{ avatarText }}</span>
-            <span class="user-meta">
-              <span class="user-name">{{ auth.displayName }}</span>
-              <span class="user-org">{{ organization }}</span>
-            </span>
-            <el-icon class="user-arrow"><ArrowDown /></el-icon>
+    <!-- ── 顶部报头：朱砂竖条 + 宋体标题 + DM Mono kicker + 底部双线 ── -->
+    <header class="topbar">
+      <div class="topbar-seal" aria-hidden="true" />
+      <div class="topbar-main">
+        <div class="topbar-bar">
+          <button
+            class="menu-toggle"
+            type="button"
+            aria-label="打开菜单"
+            @click="drawerVisible = true"
+          >
+            <el-icon :size="20"><MenuIcon /></el-icon>
           </button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item disabled>会话有效期至 {{ expiresText }}</el-dropdown-item>
-              <el-dropdown-item command="logout" divided>
-                <el-icon><SwitchButton /></el-icon>
-                退出登录
-              </el-dropdown-item>
-            </el-dropdown-menu>
+
+          <div class="brand">
+            <img class="brand-logo" :src="mascotIcon" alt="" width="34" height="34" />
+            <div class="brand-text">
+              <span class="brand-kicker">NEWCOSMOS</span>
+              <h1 class="brand-title" :title="APP_NAME">{{ APP_NAME }}</h1>
+            </div>
+          </div>
+
+          <div class="topbar-actions">
+            <div class="topbar-date">
+              <el-icon :size="16"><Calendar /></el-icon>
+              <span>{{ dateText }}</span>
+            </div>
+
+            <div class="user-badge" :title="auth.displayName">
+              <el-icon :size="20"><UserFilled /></el-icon>
+              <span class="user-badge-name">{{ auth.displayName }}</span>
+            </div>
+
+            <button class="icon-button" type="button" aria-label="系统设置" @click="goSettings">
+              <el-icon :size="18"><Setting /></el-icon>
+            </button>
+          </div>
+        </div>
+        <div class="topbar-ink" aria-hidden="true" />
+        <div class="topbar-gap" aria-hidden="true" />
+        <div class="topbar-hairline" aria-hidden="true" />
+      </div>
+    </header>
+
+    <div class="body">
+      <!-- ── 200px 墨黑侧栏 ── -->
+      <aside class="sidebar" aria-label="主导航">
+        <nav class="sidebar-inner">
+          <template v-for="group in navGroups" :key="group.title">
+            <p class="nav-group-title">{{ group.title }}</p>
+            <template v-for="item in group.items" :key="item.label">
+              <a
+                v-if="item.href"
+                class="nav-item"
+                :href="item.href"
+                target="_blank"
+                rel="noopener noreferrer"
+                @click="drawerVisible = false"
+              >
+                <el-icon :size="16"><component :is="item.icon" /></el-icon>
+                <span>{{ item.label }}</span>
+              </a>
+              <button
+                v-else
+                class="nav-item"
+                :class="{
+                  'is-active': isActive(item),
+                  'nav-item--home': item.path === '/',
+                }"
+                type="button"
+                @click="navigate(item.path ?? '/')"
+              >
+                <el-icon :size="16"><component :is="item.icon" /></el-icon>
+                <span>{{ item.label }}</span>
+              </button>
+            </template>
           </template>
-        </el-dropdown>
-      </header>
 
-      <main class="content">
-        <RouterView v-slot="{ Component: viewComponent }">
-          <Transition name="page-fade" mode="out-in">
-            <component :is="viewComponent" />
-          </Transition>
-        </RouterView>
-      </main>
+          <div class="nav-divider" aria-hidden="true" />
 
-      <nav class="tabbar" aria-label="底部导航">
-        <button
-          v-for="item in navItems"
-          :key="item.name"
-          class="tab-item"
-          :class="{ 'is-active': activePath === item.path }"
-          type="button"
-          @click="navigate(item.path)"
-        >
-          <el-icon :size="20"><component :is="item.icon" /></el-icon>
-          <span>{{ item.shortTitle }}</span>
-        </button>
-        <button class="tab-item" :class="{ 'is-active': drawerVisible || isMoreActive }" type="button" @click="drawerVisible = true">
-          <el-icon :size="20"><MoreFilled /></el-icon>
-          <span>更多</span>
-        </button>
-      </nav>
+          <button class="nav-item nav-item--logout" type="button" @click="handleLogout">
+            <el-icon :size="16"><SwitchButton /></el-icon>
+            <span>退出登录</span>
+          </button>
+        </nav>
+      </aside>
+
+      <div class="workspace">
+        <main ref="contentRef" class="content">
+          <RouterView v-slot="{ Component: viewComponent }">
+            <Transition name="page-fade" mode="out-in">
+              <component :is="viewComponent" />
+            </Transition>
+          </RouterView>
+        </main>
+      </div>
     </div>
 
-    <el-drawer v-model="drawerVisible" direction="ltr" size="78%" :with-header="false">
+    <!-- ── 底部状态栏（通栏，旧版 Grid.Row=3） ── -->
+    <footer class="statusbar">
+      <span class="statusbar-item">
+        <span class="statusbar-label">数据库:</span>
+        <strong class="statusbar-value">未检测</strong>
+      </span>
+      <span class="statusbar-divider" aria-hidden="true" />
+      <span class="statusbar-item">
+        <span class="statusbar-label">会话:</span>
+        <strong class="statusbar-value">在线</strong>
+      </span>
+      <span class="statusbar-divider" aria-hidden="true" />
+      <span class="statusbar-item statusbar-item--version">
+        <span class="statusbar-label">版本:</span>
+        <span class="statusbar-value">v{{ APP_VERSION }}</span>
+      </span>
+      <span class="statusbar-copy">© 2026 帝皇权杖δ-me13 社会救助管理系统</span>
+    </footer>
+
+    <!-- ── 手机 / 平板底部导航 ── -->
+    <nav class="tabbar" aria-label="底部导航">
+      <button
+        v-for="item in mobileTabs"
+        :key="item.label"
+        class="tab-item"
+        :class="{ 'is-active': activePath === item.path }"
+        type="button"
+        @click="navigate(item.path ?? '/')"
+      >
+        <el-icon :size="20"><component :is="item.icon" /></el-icon>
+        <span>{{ item.label }}</span>
+      </button>
+      <button
+        class="tab-item"
+        :class="{ 'is-active': drawerVisible || isMoreActive }"
+        type="button"
+        @click="drawerVisible = true"
+      >
+        <el-icon :size="20"><MoreFilled /></el-icon>
+        <span>更多</span>
+      </button>
+    </nav>
+
+    <!-- ── 手机 / 平板抽屉（复用旧版墨黑侧栏语言） ── -->
+    <el-drawer
+      v-model="drawerVisible"
+      class="drawer-shell"
+      direction="ltr"
+      size="78%"
+      :with-header="false"
+    >
       <div class="drawer">
         <div class="drawer-head">
-          <div class="avatar avatar--lg">{{ avatarText }}</div>
-          <div class="drawer-user">
-            <strong>{{ auth.displayName }}</strong>
-            <span>{{ organization }}</span>
+          <img class="drawer-logo" :src="mascotIcon" alt="" width="40" height="40" />
+          <div class="drawer-brand">
+            <span class="drawer-kicker">NEWCOSMOS</span>
+            <strong>{{ APP_NAME }}</strong>
           </div>
         </div>
 
-        <div class="drawer-session">
-          <el-icon><UserFilled /></el-icon>
-          <span>账号 {{ auth.user?.username || '—' }}</span>
+        <div class="drawer-user">
+          <el-icon :size="18"><UserFilled /></el-icon>
+          <span>{{ auth.displayName }}</span>
+          <small>有效期至 {{ expiresText }}</small>
         </div>
 
-        <el-menu :default-active="activePath" class="drawer-menu" router @select="drawerVisible = false">
-          <el-menu-item v-for="item in navItems" :key="item.name" :index="item.path">
-            <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
-            <span>{{ item.title }}</span>
-          </el-menu-item>
-        </el-menu>
+        <nav class="drawer-nav">
+          <template v-for="group in navGroups" :key="group.title">
+            <p class="nav-group-title">{{ group.title }}</p>
+            <template v-for="item in group.items" :key="item.label">
+              <a
+                v-if="item.href"
+                class="nav-item"
+                :href="item.href"
+                target="_blank"
+                rel="noopener noreferrer"
+                @click="drawerVisible = false"
+              >
+                <el-icon :size="16"><component :is="item.icon" /></el-icon>
+                <span>{{ item.label }}</span>
+              </a>
+              <button
+                v-else
+                class="nav-item"
+                :class="{
+                  'is-active': isActive(item),
+                  'nav-item--home': item.path === '/',
+                }"
+                type="button"
+                @click="navigate(item.path ?? '/')"
+              >
+                <el-icon :size="16"><component :is="item.icon" /></el-icon>
+                <span>{{ item.label }}</span>
+              </button>
+            </template>
+          </template>
 
-        <div class="drawer-foot">
-          <p class="nc-muted">会话有效期至 {{ expiresText }}</p>
-          <el-button type="danger" plain :icon="SwitchButton" class="drawer-logout" @click="handleLogout">
-            退出登录
-          </el-button>
-          <p class="drawer-version">{{ APP_NAME }} · v{{ APP_VERSION }}</p>
-        </div>
+          <div class="nav-divider" aria-hidden="true" />
+
+          <button class="nav-item nav-item--logout" type="button" @click="handleLogout">
+            <el-icon :size="16"><SwitchButton /></el-icon>
+            <span>退出登录</span>
+          </button>
+        </nav>
       </div>
     </el-drawer>
   </div>
@@ -264,456 +433,466 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .layout {
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
   background-color: var(--nc-paper);
 }
 
-/* ── 墨黑侧边栏 ───────────────────────────────────────────────── */
-.sidebar {
-  position: fixed;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 20;
+/* ── 顶栏 ─────────────────────────────────────────────────────── */
+.topbar {
+  display: grid;
+  flex: none;
+  grid-template-columns: 6px minmax(0, 1fr);
+  height: 76px;
+}
+
+.topbar-seal {
+  background-color: var(--nc-seal);
+}
+
+.topbar-main {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) 3px 4px 1px;
+  min-width: 0;
+  background-color: var(--nc-paper);
+}
+
+.topbar-bar {
   display: flex;
-  flex-direction: column;
-  width: var(--nc-sidebar-width);
-  overflow: hidden;
-  background:
-    linear-gradient(180deg, #1c1814 0%, var(--nc-ink) 58%, #13100d 100%),
-    var(--nc-ink);
-  border-right: 1px solid rgba(242, 236, 225, 0.1);
-}
-
-.sidebar::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background-image: repeating-linear-gradient(
-    0deg,
-    rgba(242, 236, 225, 0.022) 0 1px,
-    transparent 1px 4px
-  );
-  pointer-events: none;
-}
-
-.sidebar > * {
-  position: relative;
-  z-index: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-width: 0;
+  padding: 12px 20px;
+  background-color: #f8f3e9;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 22px 18px 18px;
-  border-bottom: 1px solid var(--nc-line-paper);
+  gap: 14px;
+  min-width: 0;
 }
 
-.brand-mark {
-  display: grid;
+.brand-logo {
+  display: block;
   flex: none;
-  place-items: center;
-  width: 40px;
-  height: 40px;
-  border: 1px solid rgba(242, 236, 225, 0.34);
-  border-radius: var(--nc-radius-sm);
-  background-color: var(--nc-seal);
-  box-shadow: inset 0 0 0 2px rgba(23, 19, 16, 0.16);
-  color: var(--nc-paper-2);
-  font-family: var(--nc-font-serif);
-  font-size: 21px;
-  font-weight: 700;
-  line-height: 1;
+  width: 34px;
+  height: 34px;
+  object-fit: cover;
 }
 
 .brand-text {
   display: flex;
   flex-direction: column;
-  line-height: 1.4;
-}
-
-.brand-text strong {
-  color: var(--nc-paper-2);
-  font-family: var(--nc-font-serif);
-  font-size: 16px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-}
-
-.brand-text span {
-  color: var(--nc-muted);
-  font-size: 10px;
-  letter-spacing: 0.22em;
-}
-
-.nav-section {
-  padding: 18px 22px 6px;
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.24em;
-}
-
-.nav-menu {
-  --el-menu-bg-color: transparent;
-  --el-menu-text-color: #a89a85;
-  --el-menu-active-color: var(--nc-paper-2);
-  --el-menu-hover-bg-color: #2b241e;
-  --el-menu-hover-text-color: var(--nc-paper-2);
-  --el-menu-border-color: transparent;
-
-  flex: 1;
-  padding: 0 12px;
-  border-right: none;
-  overflow-y: auto;
-}
-
-.nav-menu :deep(.el-menu-item) {
-  height: 44px;
-  margin: 2px 0;
-  border-radius: var(--nc-radius-sm);
-  color: #a89a85;
-  letter-spacing: 0.04em;
-}
-
-.nav-menu :deep(.el-menu-item:hover) {
-  color: var(--nc-paper-2);
-  background-color: #2b241e;
-}
-
-.nav-menu :deep(.el-menu-item.is-active) {
-  color: #fbf6ec;
-  background-color: var(--nc-seal);
-  box-shadow: inset 3px 0 0 var(--nc-seal-dark);
-  font-weight: 600;
-}
-
-.nav-menu :deep(.el-menu-item.is-disabled) {
-  color: var(--nc-muted);
-  opacity: 0.55;
-}
-
-.nav-icon {
-  margin-right: 4px;
-}
-
-.nav-soon {
-  margin-left: auto;
-  padding: 0 5px;
-  border: 1px solid var(--nc-line-paper);
-  border-radius: var(--nc-radius-xs);
-  color: #a89a85;
-  font-family: var(--nc-font-mono);
-  font-size: 10px;
-  line-height: 16px;
-  letter-spacing: 0.06em;
-}
-
-.side-foot {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 14px 22px 18px;
-  border-top: 1px solid var(--nc-line-paper);
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-  letter-spacing: 0.04em;
-}
-
-.status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background-color: var(--nc-pine-light);
-  box-shadow: 0 0 0 3px rgba(74, 107, 86, 0.22);
-}
-
-/* ── 纸色内容区与顶栏 ─────────────────────────────────────────── */
-.layout-body {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-  margin-left: var(--nc-sidebar-width);
-  background-color: var(--nc-paper);
-}
-
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 15;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  height: var(--nc-topbar-height);
-  padding: 0 24px;
-  background-color: rgba(248, 243, 233, 0.94);
-  border-bottom: 1px solid var(--nc-line);
-  backdrop-filter: blur(6px);
-}
-
-.topbar-heading {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
+  gap: 1px;
   min-width: 0;
-  line-height: 1.25;
 }
 
-.topbar-kicker {
-  color: var(--nc-muted);
+.brand-kicker {
+  color: var(--nc-seal);
   font-family: var(--nc-font-mono);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.24em;
+  font-size: 13px;
+  line-height: 1.2;
+  letter-spacing: 3.6px;
 }
 
-.topbar-title {
+.brand-title {
   overflow: hidden;
   color: var(--nc-ink);
   font-family: var(--nc-font-serif);
-  font-size: 17px;
+  font-size: 21px;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.topbar-org {
-  max-width: 220px;
-  overflow: hidden;
-  border-radius: var(--nc-radius-xs);
-  text-overflow: ellipsis;
+.topbar-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 20px;
 }
 
-.topbar-spacer {
-  flex: 1;
+.topbar-date {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--nc-ink-2);
+  font-size: 18px;
+  white-space: nowrap;
+}
+
+.user-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 260px;
+  padding: 5px 10px;
+  border: 1px solid var(--nc-line-strong);
+  background-color: #f2ece1;
+  color: var(--nc-ink);
+}
+
+.user-badge .el-icon {
+  flex: none;
+  color: var(--nc-seal);
+}
+
+.user-badge-name {
+  overflow: hidden;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon-button {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--nc-ink-2);
+  cursor: pointer;
+  transition: background-color var(--nc-transition);
+}
+
+.icon-button:hover {
+  background-color: #f2ece1;
+}
+
+.topbar-ink {
+  background-color: var(--nc-ink);
+}
+
+.topbar-hairline {
+  background-color: var(--nc-line-strong);
 }
 
 .menu-toggle {
   display: none;
-  align-items: center;
-  justify-content: center;
+  flex: none;
+  place-items: center;
   width: 40px;
   height: 40px;
   padding: 0;
-  border: 1px solid var(--nc-line-strong);
-  border-radius: var(--nc-radius-sm);
-  background-color: var(--nc-paper-2);
+  border: 1px solid var(--nc-line);
+  background-color: transparent;
   color: var(--nc-ink-2);
   cursor: pointer;
 }
 
-.menu-toggle:hover {
-  border-color: var(--nc-seal);
-  color: var(--nc-seal);
+/* ── 主体：侧栏 + 工作区 ─────────────────────────────────────── */
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
 }
 
-.user-trigger {
+.sidebar {
+  flex: none;
+  width: 200px;
+  overflow-y: auto;
+  background-color: var(--nc-ink);
+  scrollbar-width: thin;
+}
+
+.sidebar-inner {
   display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 8px;
+}
+
+.nav-group-title {
+  margin: 14px 0 4px 16px;
+  color: #8b7f6c;
+  font-family: var(--nc-font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 2px;
+}
+
+.nav-item {
+  display: flex;
+  flex: none;
   align-items: center;
-  gap: 10px;
-  padding: 4px 8px 4px 4px;
-  border: 1px solid transparent;
-  border-radius: var(--nc-radius-sm);
+  gap: 12px;
+  width: 100%;
+  height: 44px;
+  padding: 0 16px;
+  border: 0;
   background: transparent;
+  color: #a89a85;
+  font-size: 15px;
+  line-height: 1.4;
+  text-align: left;
   cursor: pointer;
   transition:
     background-color var(--nc-transition),
-    border-color var(--nc-transition);
+    color var(--nc-transition);
 }
 
-.user-trigger:hover {
-  border-color: var(--nc-line-faint);
-  background-color: var(--nc-paper-3);
+.nav-item .el-icon {
+  flex: none;
+  color: inherit;
 }
 
-.avatar {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid rgba(171, 50, 39, 0.28);
-  border-radius: var(--nc-radius-sm);
-  background-color: var(--nc-seal-soft);
+.nav-item:hover {
+  background-color: #2b241e;
+  color: var(--nc-paper-2);
+}
+
+.nav-item.is-active {
+  background-color: var(--nc-seal);
+  color: #ffffff;
+}
+
+.nav-item--home {
+  color: #ffffff;
+  font-size: 16px;
+}
+
+.nav-item--logout {
   color: var(--nc-seal-dark);
-  font-family: var(--nc-font-serif);
-  font-size: 14px;
-  font-weight: 700;
 }
 
-.avatar--lg {
-  width: 44px;
-  height: 44px;
-  font-size: 18px;
+.nav-item--logout:hover {
+  background-color: #2b241e;
+  color: var(--nc-seal-light);
 }
 
-.user-meta {
+.nav-divider {
+  flex: none;
+  height: 1px;
+  margin: 12px 8px;
+  background-color: #2b241e;
+}
+
+.workspace {
   display: flex;
+  flex: 1;
   flex-direction: column;
-  align-items: flex-start;
-  line-height: 1.3;
-}
-
-.user-name {
-  color: var(--nc-ink);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.user-org {
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-}
-
-.user-arrow {
-  color: var(--nc-muted);
+  min-width: 0;
+  background-color: #faf7f1;
 }
 
 .content {
   flex: 1;
-  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
 }
 
-.tabbar {
-  display: none;
+/* ── 状态栏 ───────────────────────────────────────────────────── */
+.statusbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 20px;
+  height: 44px;
+  padding: 8px 20px;
+  overflow: hidden;
+  background-color: #f2ece1;
+  color: var(--nc-ink-2);
+  font-size: 15px;
+  white-space: nowrap;
+}
+
+.statusbar-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.statusbar-label {
+  color: var(--nc-ink-2);
+}
+
+.statusbar-value {
+  color: var(--nc-ink);
+  font-weight: 700;
+}
+
+.statusbar-item--version .statusbar-label,
+.statusbar-item--version .statusbar-value {
+  color: var(--nc-muted);
+  font-weight: 400;
+}
+
+.statusbar-divider {
+  flex: none;
+  width: 1px;
+  height: 12px;
+  background-color: var(--nc-paper-4);
+}
+
+.statusbar-copy {
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--nc-muted);
+  text-overflow: ellipsis;
 }
 
 /* ── 手机抽屉 ─────────────────────────────────────────────────── */
-.drawer {
+.drawer-shell :deep(.el-drawer__body) {
   display: flex;
   flex-direction: column;
-  min-height: 100%;
+  padding: 0;
+  background-color: var(--nc-ink);
+}
+
+.drawer {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .drawer-head {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 12px;
-  padding: 8px 4px 18px;
-  border-bottom: 1px solid var(--nc-line);
+  padding: 18px 16px 14px;
+  border-bottom: 1px solid #2b241e;
+}
+
+.drawer-logo {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+}
+
+.drawer-brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.drawer-kicker {
+  color: var(--nc-seal-light);
+  font-family: var(--nc-font-mono);
+  font-size: 11px;
+  letter-spacing: 3px;
+}
+
+.drawer-brand strong {
+  overflow: hidden;
+  color: #f8f3e9;
+  font-family: var(--nc-font-serif);
+  font-size: 15px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .drawer-user {
   display: flex;
-  flex-direction: column;
-  line-height: 1.4;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #2b241e;
+  color: #f8f3e9;
+  font-size: 14px;
 }
 
-.drawer-user strong {
-  color: var(--nc-ink);
-  font-family: var(--nc-font-serif);
-  font-size: 16px;
+.drawer-user .el-icon {
+  color: var(--nc-seal-light);
 }
 
 .drawer-user span {
-  color: var(--nc-muted);
-  font-size: var(--nc-text-sm);
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.drawer-session {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 4px 4px;
-  color: var(--nc-ink-2);
-  font-size: var(--nc-text-sm);
+.drawer-user small {
+  margin-left: auto;
+  color: #8b7f6c;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
-.drawer-menu {
-  --el-menu-bg-color: transparent;
-  --el-menu-text-color: var(--nc-ink-2);
-  --el-menu-active-color: var(--nc-seal-dark);
-  --el-menu-hover-bg-color: var(--nc-paper-3);
-
-  border-right: none;
-  padding: 6px 0;
+.drawer-nav {
+  flex: 1;
+  min-height: 0;
+  padding: 8px;
+  overflow-y: auto;
 }
 
-.drawer-menu :deep(.el-menu-item) {
-  height: 46px;
-  margin: 2px 0;
-  border-radius: var(--nc-radius-sm);
-}
-
-.drawer-menu :deep(.el-menu-item.is-active) {
-  background-color: var(--nc-seal-soft);
-  color: var(--nc-seal-dark);
-  font-weight: 600;
-}
-
-.drawer-foot {
-  margin-top: auto;
-  padding-top: 20px;
-}
-
-.drawer-foot p {
-  font-size: var(--nc-text-xs);
-}
-
-.drawer-logout {
-  width: 100%;
-  height: 42px;
-  margin: 10px 0 14px;
-}
-
-.drawer-version {
-  color: var(--nc-muted);
-  text-align: center;
-}
-
-.page-fade-enter-active,
-.page-fade-leave-active {
-  transition:
-    opacity 0.16s ease,
-    transform 0.16s ease;
-}
-
-.page-fade-enter-from {
-  opacity: 0;
-  transform: translateY(6px);
-}
-
-.page-fade-leave-to {
-  opacity: 0;
+/* ── 平板 / 手机 ───────────────────────────────────────────────── */
+.tabbar {
+  display: none;
 }
 
 @media (max-width: 1023px) {
+  .topbar {
+    height: 64px;
+  }
+
+  .topbar-bar {
+    padding: 8px 12px;
+    gap: 10px;
+  }
+
+  .menu-toggle {
+    display: grid;
+  }
+
+  .brand {
+    gap: 10px;
+  }
+
+  .brand-logo {
+    width: 30px;
+    height: 30px;
+  }
+
+  .brand-kicker {
+    font-size: 10px;
+    letter-spacing: 2.4px;
+  }
+
+  .brand-title {
+    font-size: 16px;
+  }
+
+  .topbar-date {
+    display: none;
+  }
+
+  .topbar-actions {
+    gap: 8px;
+  }
+
+  .user-badge {
+    padding: 4px 8px;
+  }
+
+  .user-badge-name {
+    display: none;
+  }
+
   .sidebar {
     display: none;
   }
 
-  .layout-body {
-    margin-left: 0;
-  }
-
-  .menu-toggle {
-    display: inline-flex;
-  }
-
-  .topbar {
-    padding: 0 12px;
-    gap: 10px;
-  }
-
-  .topbar-kicker {
-    display: none;
-  }
-
-  .topbar-title {
-    font-size: 16px;
-  }
-
-  .topbar-org {
-    display: none;
-  }
-
-  .user-meta {
-    display: none;
-  }
-
-  .user-arrow {
+  .statusbar {
     display: none;
   }
 
@@ -755,5 +934,27 @@ onBeforeUnmount(() => {
     box-shadow: inset 0 2px 0 var(--nc-seal);
     font-weight: 600;
   }
+}
+
+@media (min-width: 900px) and (max-width: 1180px) {
+  .topbar-date {
+    display: none;
+  }
+}
+
+.page-fade-enter-active,
+.page-fade-leave-active {
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease;
+}
+
+.page-fade-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.page-fade-leave-to {
+  opacity: 0;
 }
 </style>

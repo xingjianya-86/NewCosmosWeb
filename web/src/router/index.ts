@@ -43,6 +43,12 @@ const router = createRouter({
           component: () => import('@/views/PrintersView.vue'),
           meta: { title: '打印机绑定' },
         },
+        {
+          path: 'coming-soon/:module',
+          name: 'coming-soon',
+          component: () => import('@/views/ComingSoonView.vue'),
+          meta: { title: '模块建设中' },
+        },
       ],
     },
     {

@@ -4,10 +4,16 @@
  * 动画运行时（splash.js）不感知宿主，本脚本只负责把状态汇报给父页面：
  *
  *   web → parent（window.parent.postMessage，结构化消息）：
- *     { source: 'newcosmos-splash', type: 'done'  }  动画演完 / 跳过
+ *     { source: 'newcosmos-splash', type: 'done'  }  动画演完（含动画内 SKIP）
  *     { source: 'newcosmos-splash', type: 'error', message }  脚本异常
- *     { source: 'newcosmos-splash', type: 'skip'  }  动画内 SKIP 按钮（附加）
+ *     { source: 'newcosmos-splash', type: 'login-ready' }  序列登录页就绪
+ *     { source: 'newcosmos-splash', type: 'login-submit', payload }  表单提交
+ *     { source: 'newcosmos-splash', type: 'login-skip' | 'login-fallback' }  回经典登录
  *     { source: 'newcosmos-splash', type: 'boot' | 'audio' }  诊断（可选）
+ *
+ *   parent → web（window.message，结构化消息）：
+ *     { source: 'newcosmos-parent', type: 'dispatch', kind, data } → dispatch(kind, data)
+ *     兼容直接 { type: 'auth-result' | 'prefill', payload | data }
  *
  *   不再使用 newcosmos-splash:// 自定义协议、不操作 window.location、
  *   不依赖 chrome.webview —— 这套桥在任何普通浏览器 / iframe 里都能用。
@@ -66,9 +72,11 @@
 
   /* ── web → host 上报 ─────────────────────────────────────────────────── */
   function report(kind, msg) {
-    var type = kind === 'done' ? 'done' : (kind === 'skip' ? 'skip' : 'error')
+    /* 保留上报类型：done / error / login-skip / login-fallback …
+       只有 error 与 login-fallback 附带 message，其余类型父页面按 type 分流。 */
+    var type = String(kind || 'error')
     var extra = {}
-    if (type !== 'done' && type !== 'skip') {
+    if (type === 'error' || type === 'login-fallback') {
       extra.message = String(msg || '').slice(0, 500)
     }
     post(type, extra)
@@ -96,6 +104,26 @@
       dispatch: dispatch
     }
   } catch (e) { /* noop */ }
+
+  /* ── parent → web：宿主用 postMessage 派发 dispatch(kind, data) ───────── */
+  window.addEventListener('message', function (event) {
+    /* 只收父页面这一路：origin 必须等于 URL 参数 origin（父页面 origin） */
+    if (targetOrigin !== '*' && event.origin !== targetOrigin) return
+    if (event.source && event.source !== window.parent) return
+
+    var data = event.data
+    if (!data || typeof data !== 'object') return
+
+    if (data.source === 'newcosmos-parent' && data.type === 'dispatch') {
+      if (typeof data.kind === 'string' && data.kind) dispatch(data.kind, data.data)
+      return
+    }
+
+    /* 兼容直接 { type: 'auth-result' | 'prefill', payload | data } */
+    if (data.type === 'auth-result' || data.type === 'prefill') {
+      dispatch(data.type, data.payload !== undefined ? data.payload : data.data)
+    }
+  })
 
   /* ── 生命周期信号 ────────────────────────────────────────────────────── */
   var doneSent = false
