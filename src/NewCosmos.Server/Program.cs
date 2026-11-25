@@ -13,6 +13,7 @@ using NewCosmos.Services.Domain.AssetVerification;
 using NewCosmos.Services.Domain.ElderlyBenefits;
 using NewCosmos.Services.Domain.Reporting;
 using NewCosmos.Services.Domain.SocialAssistance;
+using NewCosmos.Services.Domain.SpecialApproval;
 using NewCosmos.Services.Domain.UserManagement;
 using NewCosmos.Services.System;
 using NewCosmos.Services.UserManagement;
@@ -125,6 +126,7 @@ builder.Services.AddSingleton<IHouseholdSurveyService, HouseholdSurveyService>()
 builder.Services.AddSingleton<IVisitRecordService, VisitRecordService>();
 builder.Services.AddSingleton<IEconomicDetailService, EconomicDetailService>();
 builder.Services.AddSingleton<IApplicationService, ApplicationService>();
+builder.Services.AddSingleton<ISpecialApprovalService, SpecialApprovalService>();
 builder.Services.AddScoped<ApplicationFormService>();
 
 // Server 侧聚合服务。
@@ -165,6 +167,7 @@ app.MapDashboardEndpoints();
 app.MapSocialAssistanceEndpoints();
 app.MapApplicationWorkflowEndpoints();
 app.MapApplicationFormEndpoints();
+app.MapSpecialApprovalEndpoints();
 app.MapElderlyEndpoints();
 app.MapAssetVerificationEndpoints();
 app.MapSystemEndpoints();

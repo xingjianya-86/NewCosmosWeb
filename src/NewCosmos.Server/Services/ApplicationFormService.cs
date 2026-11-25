@@ -33,6 +33,9 @@ public sealed class ApplicationFormService(
     IClassificationService classification,
     IIncomeCalculationService incomeCalculation,
     IGuaranteeAmountService guaranteeAmountService,
+    IGracePeriodService gracePeriods,
+    ICapabilityAssessmentService capabilityAssessments,
+    IStandardConfigService standardConfig,
     IFamilyMemberService familyMembers,
     ISupporterService supporters,
     ICaregiverService caregivers,
@@ -127,7 +130,7 @@ public sealed class ApplicationFormService(
                 .ToList(),
             ToEconomyDto(app),
             ToSurveyDto(surveyResult.Value),
-            ToClassificationDto(app),
+            await ToClassificationDtoAsync(app, ct),
             ToEconomicDetailsDto(economicDetailsResult.Value),
             caregiversResult.Value ?? [],
             visitsResult.Value ?? []);
@@ -380,11 +383,42 @@ public sealed class ApplicationFormService(
                 supportersResult.ErrorCode!, supportersResult.Message!);
         }
 
+        // 特困判定会用到照料人（有照料人 → 特困前置条件），必须传库内真实数据，
+        // 不能传空数组（空数组会把“有照料人”误判成“无照料人”）。
+        var caregiversResult = await caregivers.GetByApplicationIdAsync(applicationId, ct);
+        if (caregiversResult.IsFailure)
+        {
+            return Result.Failure<ApplicationFormDto>(
+                caregiversResult.ErrorCode!, caregiversResult.Message!);
+        }
+
+        // 主表没有渐退列：重复判定时原分类/原保障金额只能从 nc_biz_grace_periods 取，
+        // 否则渐退期内再次判定会因 application.ClassificationResult 已变成“低收入”而丢失渐退。
+        var priorGuarantee = application.HouseholdMonthlyGuaranteeAmount;
+        var activeGraceResult = await gracePeriods.GetActiveAsync(applicationId, ct);
+        GracePeriodRecord? activeGrace = null;
+        if (activeGraceResult.IsFailure)
+        {
+            logger.Warn(
+                $"低收入表单读取渐退期失败（按无渐退继续判定）: ApplicationId={applicationId}, " +
+                $"{activeGraceResult.ErrorCode} {activeGraceResult.Message}");
+        }
+        else
+        {
+            activeGrace = activeGraceResult.Value;
+        }
+
+        if (activeGrace is not null && !string.IsNullOrWhiteSpace(activeGrace.OriginalClassification))
+        {
+            // 仅在内存中传给判定服务（主表无该列，UpdateAsync 不会写库）。
+            application.OriginalClassificationResult = activeGrace.OriginalClassification;
+        }
+
         var classificationResult = await classification.DetermineClassificationAsync(
             application,
             membersResult.Value ?? [],
             supportersResult.Value ?? [],
-            [],
+            caregiversResult.Value ?? [],
             ct);
 
         if (classificationResult.IsFailure)
@@ -395,16 +429,103 @@ public sealed class ApplicationFormService(
 
         var result = classificationResult.Value;
 
-        // 照料护理费只对特困人员有意义；其余分类按 0 写入（能力鉴定服务无记录时本身也返回 0）。
-        var caregiverSubsidy = ClassificationConstants.IsCodeDestitute(result.Classification)
+        // 照料护理费只对特困人员有意义；集中供养不发护理费（旧版口径），
+        // 分散供养按能力鉴定计算；其余分类按 0 写入。
+        var isDestitute = ClassificationConstants.IsCodeDestitute(result.Classification);
+        var isCentralized = IsCentralizedSupport(application.DestituteSupportType);
+        var caregiverSubsidy = isDestitute && !isCentralized
             ? await classification.CalculateCareAllowanceAsync(applicationId, ct)
             : 0m;
         var classifiedSubsidy = result.ClassifiedSubsidy?.TotalAmount ?? 0m;
+
+        // 渐退期：判定命中才 UPSERT nc_biz_grace_periods；原额超“低保标准×家庭人数”时封顶，
+        // 渐退期内按封顶额发放。主表没有渐退列，全部写独立表。
+        if (result.ShouldTriggerGracePeriod && result.GracePeriod is { IsEligible: true })
+        {
+            var graceMonths = GracePeriodConstants.IsValidMonths(result.GracePeriod.Months)
+                ? result.GracePeriod.Months
+                : GracePeriodConstants.DEFAULT_MONTHS;
+
+            var fallbackPeriod = gracePeriods.CalculatePeriod(graceMonths);
+            var graceStart = result.GracePeriod.StartDate == default
+                ? fallbackPeriod.GracePeriodStartDate
+                : result.GracePeriod.StartDate;
+            var graceEnd = result.GracePeriod.EndDate == default
+                ? fallbackPeriod.GracePeriodEndDate
+                : result.GracePeriod.EndDate;
+
+            // 原额优先取既有渐退记录（重复判定时不得把原额改成续判后的 0），
+            // 否则取判定前主表保障金额。
+            var originalGuarantee = activeGrace?.OriginalGuaranteeAmount is > 0
+                ? activeGrace.OriginalGuaranteeAmount.Value
+                : priorGuarantee > 0 ? priorGuarantee : 0m;
+
+            var graceGrantAmount = originalGuarantee;
+            if (originalGuarantee > 0)
+            {
+                var familySize = ResolveApplicationFamilySize(
+                    application.FamilySize,
+                    (membersResult.Value ?? []).Where(m => !IsSupportMember(m)).ToList());
+                var hukou = ClassificationConstants.HukouType.Normalize(application.HukouType);
+                var standardType = string.Equals(
+                    hukou, ClassificationConstants.HukouType.URBAN, StringComparison.Ordinal)
+                    ? "UrbanSubsistenceStandard"
+                    : "RuralSubsistenceStandard";
+                var standardResult = await standardConfig.GetStandardValueAsync(
+                    standardType, hukou, ct: ct);
+                if (standardResult.IsSuccess && standardResult.Value > 0 && familySize > 0)
+                {
+                    var cap = standardResult.Value * familySize;
+                    graceGrantAmount = originalGuarantee > cap ? cap : originalGuarantee;
+                }
+                else
+                {
+                    logger.Warn(
+                        $"低收入表单渐退封顶标准读取失败（不封顶）: ApplicationId={applicationId}, " +
+                        $"{standardResult.ErrorCode} {standardResult.Message}");
+                }
+
+                // 渐退期内按原享受额（封顶后）发放，不按本次补差公式重算。
+                result.GuaranteeAmount = graceGrantAmount;
+            }
+
+            var activateResult = await gracePeriods.ActivateAsync(
+                applicationId,
+                graceMonths,
+                graceStart,
+                graceEnd,
+                result.GracePeriod.OriginalClassification,
+                originalGuarantee > 0 ? originalGuarantee : null,
+                graceGrantAmount > 0 ? graceGrantAmount : null,
+                ct);
+            if (activateResult.IsFailure)
+            {
+                logger.Warn(
+                    $"低收入表单渐退期写入失败: ApplicationId={applicationId}, " +
+                    $"{activateResult.ErrorCode} {activateResult.Message}");
+                return Result.Failure<ApplicationFormDto>(
+                    activateResult.ErrorCode!, activateResult.Message!);
+            }
+        }
+        else if (activeGrace is not null)
+        {
+            // 本次判定不再命中渐退 → 结清既有在效记录（is_active=false），与旧版判定后同步一致。
+            var clearResult = await gracePeriods.ClearAsync(applicationId, ct);
+            if (clearResult.IsFailure)
+            {
+                logger.Warn(
+                    $"低收入表单渐退期结清失败: ApplicationId={applicationId}, " +
+                    $"{clearResult.ErrorCode} {clearResult.Message}");
+                return Result.Failure<ApplicationFormDto>(
+                    clearResult.ErrorCode!, clearResult.Message!);
+            }
+        }
+
         var totalGuarantee = guaranteeAmountService.CalculateTotalGuaranteeAmount(
             result.GuaranteeAmount, classifiedSubsidy, caregiverSubsidy);
 
         // 只写主表已有列；IneligibleReason/DeterminationBasis 在主表没有对应列，
-        // 在本次响应中返回给前端展示，不回写数据库（详见子任务报告）。
+        // 在本次响应中返回给前端展示，不回写数据库。主表没有渐退列，渐退只写独立表。
         application.ClassificationResult = result.Classification;
         application.IsEligible = result.IsEligible;
         application.HouseholdMonthlyGuaranteeAmount = result.GuaranteeAmount;
@@ -412,12 +533,6 @@ public sealed class ApplicationFormService(
         application.ClassifiedSubsidyAmount = classifiedSubsidy;
         application.CaregiverSubsidyAmount = caregiverSubsidy;
         application.TotalGuaranteeAmount = totalGuarantee;
-        application.IsInGracePeriod = result.ShouldTriggerGracePeriod;
-
-        var inGrace = result.ShouldTriggerGracePeriod && result.GracePeriod is { IsEligible: true };
-        application.GracePeriodMonths = inGrace ? result.GracePeriod!.Months : null;
-        application.GracePeriodStartDate = inGrace ? result.GracePeriod!.StartDate : null;
-        application.GracePeriodEndDate = inGrace ? result.GracePeriod!.EndDate : null;
         application.UpdatedBy = operatorName;
 
         var updateResult = await applications.UpdateAsync(application, ct);
@@ -435,29 +550,85 @@ public sealed class ApplicationFormService(
             ("Classification", result.Classification ?? string.Empty),
             ("Operator", operatorName));
 
-        var classificationDto = new ApplicationFormClassificationDto(
-            result.Classification ?? string.Empty,
-            ClassificationConstants.ConvertFromCode(result.Classification ?? string.Empty),
-            result.IsEligible,
-            result.IneligibleReason ?? string.Empty,
-            result.DeterminationBasis ?? string.Empty,
-            result.GuaranteeAmount,
-            classifiedSubsidy,
-            caregiverSubsidy,
-            totalGuarantee,
-            result.ShouldTriggerGracePeriod,
-            inGrace ? result.GracePeriod!.Months : null,
-            inGrace ? FormatDate(result.GracePeriod!.EndDate) : string.Empty);
-
-        // 返回完整表单（含服务端刚重算的收入汇总），前端可直接 applyForm 刷新只读合计；
-        // IneligibleReason/DeterminationBasis 无主表列，用本次判定结果覆盖回填块。
+        // 返回完整表单（含服务端刚重算的收入汇总）；渐退/能力鉴定由 GET 链路从权威表读取。
+        // IneligibleReason/DeterminationBasis/判定明细等无主表列，用本次判定结果覆盖回填块。
         var formResult = await GetFormAsync(applicationId, userId, ct);
         if (formResult.IsFailure)
         {
             return Result.Failure<ApplicationFormDto>(formResult.ErrorCode, formResult.Message);
         }
 
+        var classificationDto = formResult.Value.Classification with
+        {
+            IneligibleReason = result.IneligibleReason ?? string.Empty,
+            DeterminationBasis = result.DeterminationBasis ?? string.Empty,
+            ClassifiedSubsidyTypes = result.ClassifiedSubsidy?.Types ?? string.Empty,
+            ClassifiedSubsidyCount = result.ClassifiedSubsidy?.Count,
+            ClassifiedSubsidyPerPersonAmount = result.ClassifiedSubsidy?.PerPersonAmount,
+            DeterminationDetails = result.DeterminationDetails ?? [],
+            NeedsSingleRescueDraft = result.NeedsSingleRescueDraft,
+            SingleRescueMembers = result.SingleRescueMembers ?? []
+        };
+
         return Result.Success(formResult.Value with { Classification = classificationDto });
+    }
+
+    // ───────────────────────────── 特困供养方式 ─────────────────────────────
+
+    /// <summary>
+    /// 更新特困供养方式/供养机构，随后重新执行分类判定并保存。
+    /// 只写主表 destitute_support_type / support_institution_id（旧版口径）；
+    /// 集中/分散直接影响特困分类代码与照料护理费（集中供养护理费为 0）。
+    /// </summary>
+    public async Task<Result<ApplicationFormClassificationDto>> UpdateSupportModeAsync(
+        long applicationId,
+        ApplicationFormSupportModeRequest request,
+        int userId,
+        string operatorName,
+        CancellationToken ct = default)
+    {
+        var appResult = await LoadInScopeAsync(applicationId, userId, ct);
+        if (appResult.IsFailure)
+        {
+            return Result.Failure<ApplicationFormClassificationDto>(
+                appResult.ErrorCode, appResult.Message);
+        }
+
+        var supportType = NormalizeSupportMode(request.SupportType);
+        if (supportType.Length == 0)
+        {
+            return Result.Failure<ApplicationFormClassificationDto>(
+                ErrorCodes.VALIDATION_FAILED, "供养方式无效，只能选择集中供养或分散供养");
+        }
+
+        var application = appResult.Value;
+        application.DestituteSupportType = supportType;
+        application.SupportInstitutionId = request.InstitutionId is > 0
+            ? request.InstitutionId.Value
+            : 0;
+        application.UpdatedBy = operatorName;
+
+        var updateResult = await applications.UpdateAsync(application, ct);
+        if (updateResult.IsFailure)
+        {
+            logger.Warn(
+                $"低收入表单供养方式写回失败: ApplicationId={applicationId}, " +
+                $"{updateResult.ErrorCode} {updateResult.Message}");
+            return Result.Failure<ApplicationFormClassificationDto>(
+                updateResult.ErrorCode!, updateResult.Message!);
+        }
+
+        logger.LogBusiness("低收入表单更新特困供养方式",
+            ("ApplicationId", applicationId),
+            ("SupportType", supportType),
+            ("InstitutionId", application.SupportInstitutionId),
+            ("Operator", operatorName));
+
+        var classifyResult = await ClassifyAsync(applicationId, userId, operatorName, ct);
+        return classifyResult.IsFailure
+            ? Result.Failure<ApplicationFormClassificationDto>(
+                classifyResult.ErrorCode, classifyResult.Message)
+            : Result.Success(classifyResult.Value.Classification);
     }
 
     // ───────────────────────────── 归档完成 ─────────────────────────────
@@ -2527,9 +2698,43 @@ public sealed class ApplicationFormService(
             // 无数据时返回空数组，前端可直接 map/编辑，不出现 null。
             data.LandConfirmationGroups ?? []);
 
-    private static ApplicationFormClassificationDto ToClassificationDto(ApplicationEntity app)
+    /// <summary>
+    /// Step5 分类判定回填：主表只存结论与金额；渐退期从 nc_biz_grace_periods 读，
+    /// 能力鉴定从 nc_biz_capability_assessments 读。无记录/查询失败时对应字段留空，
+    /// 前端统一显示“—”，不伪造数据。
+    /// </summary>
+    private async Task<ApplicationFormClassificationDto> ToClassificationDtoAsync(
+        ApplicationEntity app,
+        CancellationToken ct)
     {
         var classificationResult = app.ClassificationResult ?? string.Empty;
+
+        GracePeriodRecord? grace = null;
+        var graceResult = await gracePeriods.GetActiveAsync(app.Id, ct);
+        if (graceResult.IsFailure)
+        {
+            logger.Warn(
+                $"低收入表单读取渐退期失败（回填留空）: ApplicationId={app.Id}, " +
+                $"{graceResult.ErrorCode} {graceResult.Message}");
+        }
+        else
+        {
+            grace = graceResult.Value;
+        }
+
+        CapabilityAssessment? assessment = null;
+        var assessmentResult = await capabilityAssessments.GetByApplicationIdAsync(app.Id, ct);
+        if (assessmentResult.IsFailure)
+        {
+            logger.Warn(
+                $"低收入表单读取能力鉴定失败（回填留空）: ApplicationId={app.Id}, " +
+                $"{assessmentResult.ErrorCode} {assessmentResult.Message}");
+        }
+        else
+        {
+            assessment = assessmentResult.Value;
+        }
+
         return new ApplicationFormClassificationDto(
             classificationResult,
             ClassificationConstants.ConvertFromCode(classificationResult),
@@ -2541,9 +2746,91 @@ public sealed class ApplicationFormService(
             app.ClassifiedSubsidyAmount,
             app.CaregiverSubsidyAmount,
             app.TotalGuaranteeAmount,
-            app.IsInGracePeriod,
-            app.GracePeriodMonths,
-            FormatDate(app.GracePeriodEndDate));
+            grace is not null,
+            grace?.GracePeriodMonths,
+            FormatDate(grace?.EndDate),
+            // 主表只存分类施保类型/金额，人数与每人标准无列可存 → 留空（classify 响应有值）。
+            ClassifiedSubsidyTypes: string.IsNullOrWhiteSpace(app.ClassifiedSubsidyType)
+                ? null
+                : app.ClassifiedSubsidyType,
+            ClassifiedSubsidyCount: null,
+            ClassifiedSubsidyPerPersonAmount: null,
+            DeterminationDetails: [],
+            NeedsSingleRescueDraft: false,
+            SingleRescueMembers: [],
+            GracePeriodStartDate: FormatDate(grace?.StartDate),
+            OriginalGuaranteeAmount: grace?.OriginalGuaranteeAmount,
+            GracePeriodStatusText: BuildGracePeriodStatusText(grace),
+            GraceGrantAmount: grace?.GraceGrantAmount,
+            CapabilityEating: ToCapabilityFlag(assessment?.Eating),
+            CapabilityDressing: ToCapabilityFlag(assessment?.Dressing),
+            CapabilityGettingInOutOfBed: ToCapabilityFlag(assessment?.GettingInOutOfBed),
+            CapabilityUsingToilet: ToCapabilityFlag(assessment?.UsingToilet),
+            CapabilityIndoorWalking: ToCapabilityFlag(assessment?.IndoorWalking),
+            CapabilityBathing: ToCapabilityFlag(assessment?.Bathing),
+            CapabilityCompletedItems: assessment?.CompletedItems,
+            CapabilitySelfCareLevel: assessment?.SelfCareLevel,
+            DestituteSupportType: string.IsNullOrWhiteSpace(app.DestituteSupportType)
+                ? null
+                : app.DestituteSupportType,
+            SupportInstitutionId: app.SupportInstitutionId > 0 ? app.SupportInstitutionId : null,
+            SupportInstitutionName: string.IsNullOrWhiteSpace(app.SupportInstitutionName)
+                ? null
+                : app.SupportInstitutionName);
+    }
+
+    /// <summary>旧版渐退状态口径：剩余 N 天（至 yyyy-MM-dd）/ 已结束（yyyy-MM-dd）/ 渐退期中。</summary>
+    private static string BuildGracePeriodStatusText(GracePeriodRecord? grace)
+    {
+        if (grace is null)
+        {
+            return string.Empty;
+        }
+
+        if (grace.EndDate is not { } endDate)
+        {
+            return "渐退期中";
+        }
+
+        var daysLeft = (endDate.Date - DateTime.Today).Days;
+        return daysLeft >= 0
+            ? $"剩余 {daysLeft} 天（至 {endDate:yyyy-MM-dd}）"
+            : $"已结束（{endDate:yyyy-MM-dd}）";
+    }
+
+    /// <summary>能力鉴定列 0=不能完成、1=能完成；无记录时留空。</summary>
+    private static bool? ToCapabilityFlag(int? value)
+        => value is null ? null : value > 0;
+
+    /// <summary>旧版集中供养判定：特困供养方式集中，或旧 support_mode=Centralized。</summary>
+    private static bool IsCentralizedSupport(string? destituteSupportType)
+        => string.Equals(
+            destituteSupportType,
+            ClassificationConstants.SupportMode.CENTRALIZED,
+            StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>供养方式归一：只接受集中/分散（含中文别名），其余视为无效。</summary>
+    private static string NormalizeSupportMode(string? value)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (text.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        if (text.Equals(ClassificationConstants.SupportMode.CENTRALIZED, StringComparison.OrdinalIgnoreCase)
+            || text is "集中供养" or "集中")
+        {
+            return ClassificationConstants.SupportMode.CENTRALIZED;
+        }
+
+        if (text.Equals(ClassificationConstants.SupportMode.SCATTERED, StringComparison.OrdinalIgnoreCase)
+            || text is "分散供养" or "分散")
+        {
+            return ClassificationConstants.SupportMode.SCATTERED;
+        }
+
+        return string.Empty;
     }
 
     // ───────────────────────────── 小工具 ─────────────────────────────

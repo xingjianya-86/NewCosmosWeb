@@ -372,7 +372,14 @@ public sealed record ApplicationVisitCreateRequest(
 /// <summary>回访补录返回。</summary>
 public sealed record ApplicationVisitCreatedResult(long Id);
 
-/// <summary>分类判定结果（Step5）。金额与分类只由 Core IClassificationService 产出。</summary>
+/// <summary>
+/// 分类判定结果（Step5）。金额与分类只由 Core IClassificationService 产出。
+/// <para>
+/// 2026-11 Step5 legacy 对齐：渐退期/能力鉴定/判定明细/分类施保/单人保/特困供养字段
+/// 一律追加在末尾并带默认值，保持旧客户端反序列化兼容。
+/// 渐退期只从 nc_biz_grace_periods 读取（主表没有渐退列）。
+/// </para>
+/// </summary>
 public sealed record ApplicationFormClassificationDto(
     string ClassificationResult,
     string ClassificationText,
@@ -385,7 +392,45 @@ public sealed record ApplicationFormClassificationDto(
     decimal? TotalGuaranteeAmount,
     bool IsInGracePeriod,
     int? GracePeriodMonths,
-    string GracePeriodEndDate);
+    string GracePeriodEndDate,
+    string? ClassifiedSubsidyTypes = null,
+    int? ClassifiedSubsidyCount = null,
+    decimal? ClassifiedSubsidyPerPersonAmount = null,
+    List<string>? DeterminationDetails = null,
+    bool NeedsSingleRescueDraft = false,
+    List<FamilyMember>? SingleRescueMembers = null,
+    string GracePeriodStartDate = "",
+    decimal? OriginalGuaranteeAmount = null,
+    string GracePeriodStatusText = "",
+    decimal? GraceGrantAmount = null,
+    bool? CapabilityEating = null,
+    bool? CapabilityDressing = null,
+    bool? CapabilityGettingInOutOfBed = null,
+    bool? CapabilityUsingToilet = null,
+    bool? CapabilityIndoorWalking = null,
+    bool? CapabilityBathing = null,
+    int? CapabilityCompletedItems = null,
+    string? CapabilitySelfCareLevel = null,
+    string? DestituteSupportType = null,
+    long? SupportInstitutionId = null,
+    string? SupportInstitutionName = null);
+
+/// <summary>特困供养方式更新请求（Step5）：只写 destitute_support_type / support_institution_id。</summary>
+public sealed record ApplicationFormSupportModeRequest(
+    string? SupportType,
+    long? InstitutionId);
+
+/// <summary>供养机构选项（Step5）。当前 Web 端无机构数据源时返回空数组，前端显示“暂无机构”。</summary>
+public sealed record ApplicationSupportInstitutionDto(
+    long Id,
+    string Name,
+    string Address,
+    string Phone,
+    decimal BedFee,
+    decimal CareFee,
+    decimal TotalFee,
+    int Capacity,
+    int CurrentOccupancy);
 
 /// <summary>完整表单回填模型。</summary>
 public sealed record ApplicationFormDto(

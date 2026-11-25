@@ -50,6 +50,18 @@ const router = createRouter({
           meta: { title: '申请详情' },
         },
         {
+          path: 'special-approvals/new',
+          name: 'special-approval-new',
+          component: () => import('@/views/special-approvals/SpecialApprovalView.vue'),
+          meta: { title: '一事一议申报' },
+        },
+        {
+          path: 'special-approvals/:id',
+          name: 'special-approval-detail',
+          component: () => import('@/views/special-approvals/SpecialApprovalView.vue'),
+          meta: { title: '一事一议申报' },
+        },
+        {
           path: 'social-assistance',
           name: 'social-assistance-home',
           component: () => import('@/views/social-assistance/SocialAssistanceHomeView.vue'),

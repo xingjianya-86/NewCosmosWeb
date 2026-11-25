@@ -22,6 +22,8 @@ public static class ApplicationFormEndpoints
         app.MapPost("/api/applications/form", CreateAsync);
         app.MapPut("/api/applications/{id}/form", UpdateAsync);
         app.MapPost("/api/applications/{id}/classify", ClassifyAsync);
+        app.MapPost("/api/applications/{id}/support-mode", UpdateSupportModeAsync);
+        app.MapGet("/api/applications/support-institutions", GetSupportInstitutionsAsync);
         app.MapPost("/api/applications/{id}/application-date", ChangeApplicationDateAsync);
         app.MapPost("/api/applications/{id}/complete", CompleteAsync);
         app.MapPost("/api/applications/{id}/visits", AddVisitAsync);
@@ -155,6 +157,66 @@ public static class ApplicationFormEndpoints
         return result.IsFailure
             ? MapResult(context, result)
             : Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// 更新特困供养方式/供养机构（Step5）。body：{ supportType: "Centralized|Scattered", institutionId? }。
+    /// 写主表 destitute_support_type / support_institution_id 后立即重新判定，返回最新 classification。
+    /// </summary>
+    private static async Task<IResult> UpdateSupportModeAsync(
+        string id,
+        ApplicationFormSupportModeRequest? request,
+        HttpContext context,
+        ApplicationFormService forms,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.INCOME_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        if (ParseId(id) is not { } applicationId)
+        {
+            return InvalidId(context);
+        }
+
+        if (request is null)
+        {
+            return InvalidRequest(context, "请求体不能为空");
+        }
+
+        var result = await forms.UpdateSupportModeAsync(
+            applicationId, request, user.Id, OperatorName(user), ct);
+        return result.IsFailure
+            ? MapResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// 供养机构选项（Step5）。当前 Web 端尚无机构数据源（旧库 nc_biz_support_institutions 已不存在），
+    /// 按约定返回空数组，前端显示“暂无机构”，不硬编码任何机构数据。
+    /// </summary>
+    private static async Task<IResult> GetSupportInstitutionsAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.INCOME_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        return Results.Json(Array.Empty<ApplicationSupportInstitutionDto>());
     }
 
     /// <summary>
