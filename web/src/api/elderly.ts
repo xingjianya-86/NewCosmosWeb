@@ -9,6 +9,8 @@ import type {
   ElderlyImportedItem,
   ElderlyPendingResponse,
   ElderlyReviewListResponse,
+  ElderlyStopRequest,
+  ElderlyStopStats,
   ElderlySummary,
 } from '@/types/elderly'
 import { apiHttp } from './http'
@@ -151,6 +153,34 @@ export function deleteElderlyApplication(id: number | string): Promise<void> {
   return apiHttp
     .delete(`/elderly/applications/${encodeURIComponent(String(id))}`)
     .then(() => undefined)
+}
+
+/** 停发办理页头统计（在享人数 / 本月停发人次）。 */
+export function getElderlyStopStats(): Promise<ElderlyStopStats> {
+  return apiHttp.get<ElderlyStopStats>('/elderly/stops/stats').then((response) => response.data)
+}
+
+/** 当前库在享人员停发。 */
+export function stopElderlyApplication(
+  id: number | string,
+  request: ElderlyStopRequest,
+): Promise<void> {
+  return apiHttp
+    .post(`/elderly/applications/${encodeURIComponent(String(id))}/stop`, request)
+    .then(() => undefined)
+}
+
+/** 导入名册建档并停发。 */
+export function stopElderlyFromHistory(
+  historyId: number | string,
+  request: ElderlyStopRequest,
+): Promise<{ id: number }> {
+  return apiHttp
+    .post<{ id: number }>(
+      `/elderly/stops/from-history/${encodeURIComponent(String(historyId))}`,
+      request,
+    )
+    .then((response) => response.data)
 }
 
 /** 身份证 OCR。 */

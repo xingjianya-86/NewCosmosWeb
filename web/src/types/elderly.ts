@@ -339,3 +339,22 @@ export interface ElderlyApplicationCreated {
   id: number
   applicationNo: string
 }
+
+/** 停发办理页头统计。 */
+export interface ElderlyStopStats {
+  activeCount: number | null
+  monthlyStopped: number | null
+}
+
+/** 停发办理请求。 */
+export interface ElderlyStopRequest {
+  dueStopDate: string | null
+  stopReason: string
+  deathDate: string | null
+  otherReasonText: string
+  isRecover: boolean
+  recoverStartMonth: string
+  recoverEndMonth: string
+  recoverAmount: number
+  remark: string
+}

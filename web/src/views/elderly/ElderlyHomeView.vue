@@ -73,8 +73,7 @@ const featureCards: FeatureCard[] = [
     title: '停发办理',
     description: '死亡、户籍迁出等情形停发处理',
     icon: SwitchButton,
-    to: '/elderly/applications',
-    query: { status: 'Stopped' },
+    to: '/elderly/stops',
   },
   {
     key: 'monthly',

@@ -104,6 +104,24 @@ const router = createRouter({
           meta: { title: '编辑高龄津贴登记' },
         },
         {
+          path: 'elderly/stops',
+          name: 'elderly-stops',
+          component: () => import('@/views/elderly/ElderlyStopListView.vue'),
+          meta: { title: '停发办理' },
+        },
+        {
+          path: 'elderly/stops/history/:historyId',
+          name: 'elderly-stop-history',
+          component: () => import('@/views/elderly/ElderlyStopFormView.vue'),
+          meta: { title: '高龄津贴建档并停发' },
+        },
+        {
+          path: 'elderly/stops/:id',
+          name: 'elderly-stop',
+          component: () => import('@/views/elderly/ElderlyStopFormView.vue'),
+          meta: { title: '高龄津贴停发办理' },
+        },
+        {
           path: 'elderly/pending',
           name: 'elderly-pending',
           component: () => import('@/views/elderly/ElderlyPendingView.vue'),

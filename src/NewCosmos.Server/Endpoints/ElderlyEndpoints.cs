@@ -46,6 +46,9 @@ public static class ElderlyEndpoints
         app.MapPut("/api/elderly/applications/{id:long}", UpdateApplicationAsync);
         app.MapPost("/api/elderly/applications/{id:long}/confirm", ConfirmApplicationAsync);
         app.MapDelete("/api/elderly/applications/{id:long}", DeleteApplicationAsync);
+        app.MapPost("/api/elderly/applications/{id:long}/stop", StopApplicationAsync);
+        app.MapPost("/api/elderly/stops/from-history/{historyId:long}", StopFromHistoryAsync);
+        app.MapGet("/api/elderly/stops/stats", GetStopStatsAsync);
 
         // 身份证 OCR（multipart file；请求体上限略大于 10MB，端点再按文件大小拦截）
         app.MapPost("/api/elderly/ocr/idcard", RecognizeIdCardAsync)
@@ -425,6 +428,263 @@ public static class ElderlyEndpoints
             : Results.NoContent();
     }
 
+    // ───────────────────────────── 停发办理 ─────────────────────────────
+
+    private static async Task<IResult> GetStopStatsAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.ELDERLY_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        var statistics = context.RequestServices.GetRequiredService<IStatisticsService>();
+        var stopResult = await statistics.GetElderlyStopStatsAsync(ct);
+        var activeResult = await statistics.GetElderlyStatsAsync(ct);
+
+        return Results.Json(new
+        {
+            activeCount = activeResult.IsSuccess ? activeResult.Value.ActiveCount : (int?)null,
+            monthlyStopped = stopResult.IsSuccess ? stopResult.Value.MonthlyStopped : (int?)null,
+        });
+    }
+
+    private static async Task<IResult> StopApplicationAsync(
+        long id,
+        ElderlyStopRequest? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.ELDERLY_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        if (request is null)
+        {
+            return InvalidRequest(context, "请求体不能为空");
+        }
+
+        var service = context.RequestServices.GetRequiredService<IElderlyApplicationService>();
+        var existing = await service.GetByIdAsync(id, ct);
+        if (existing.IsFailure)
+        {
+            return MapElderlyResult(context, existing);
+        }
+
+        if (existing.Value is null)
+        {
+            return NotFound(context, "登记记录不存在或已删除");
+        }
+
+        if (!string.Equals(
+                existing.Value.Status, ElderlyBenefitConstants.StatusConfirmed, StringComparison.Ordinal))
+        {
+            return InvalidRequest(context, "只有已确认（在享）人员才能停发");
+        }
+
+        if (!TryBuildStopValues(request, out var values, out var validation))
+        {
+            return InvalidRequest(context, validation!);
+        }
+
+        var result = await service.StopAsync(
+            id,
+            values.Reason,
+            OperatorName(user),
+            values.DueStopDate,
+            values.DeathDate,
+            values.IsRecover,
+            values.RecoverStartMonth,
+            values.RecoverEndMonth,
+            values.RecoverAmount,
+            values.Remark,
+            ct);
+
+        return result.IsFailure
+            ? MapElderlyResult(context, result)
+            : Results.NoContent();
+    }
+
+    /// <summary>导入名册“建档并停发”：先迁移建档，再按同一停发参数停发。</summary>
+    private static async Task<IResult> StopFromHistoryAsync(
+        long historyId,
+        ElderlyStopRequest? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.ELDERLY_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        if (request is null)
+        {
+            return InvalidRequest(context, "请求体不能为空");
+        }
+
+        if (!TryBuildStopValues(request, out var values, out var validation))
+        {
+            return InvalidRequest(context, validation!);
+        }
+
+        var service = context.RequestServices.GetRequiredService<IElderlyApplicationService>();
+        var operatorName = OperatorName(user);
+        var migrateResult = await service.MigrateFromHistoryAsync(historyId, operatorName, ct);
+        if (migrateResult.IsFailure)
+        {
+            return MapElderlyResult(context, migrateResult);
+        }
+
+        var applicationId = migrateResult.Value;
+        var result = await service.StopAsync(
+            applicationId,
+            values.Reason,
+            operatorName,
+            values.DueStopDate,
+            values.DeathDate,
+            values.IsRecover,
+            values.RecoverStartMonth,
+            values.RecoverEndMonth,
+            values.RecoverAmount,
+            values.Remark,
+            ct);
+
+        return result.IsFailure
+            ? MapElderlyResult(context, result)
+            : Results.Json(new { id = applicationId });
+    }
+
+    private sealed record StopValues(
+        string Reason,
+        DateTime? DueStopDate,
+        DateTime? DeathDate,
+        bool IsRecover,
+        string RecoverStartMonth,
+        string RecoverEndMonth,
+        decimal RecoverAmount,
+        string Remark);
+
+    private static bool TryBuildStopValues(
+        ElderlyStopRequest request,
+        out StopValues values,
+        out string? error)
+    {
+        values = default!;
+        error = null;
+
+        var reasonKey = (request.StopReason ?? string.Empty).Trim();
+        if (reasonKey.Length == 0)
+        {
+            error = "请选择停发原因";
+            return false;
+        }
+
+        string reason;
+        if (string.Equals(reasonKey, ElderlyBenefitConstants.StopReasonOther, StringComparison.Ordinal))
+        {
+            var other = (request.OtherReasonText ?? string.Empty).Trim();
+            if (other.Length == 0)
+            {
+                error = "请填写“其他”停发原因说明";
+                return false;
+            }
+
+            reason = other;
+        }
+        else
+        {
+            reason = reasonKey;
+        }
+
+        if (string.Equals(reasonKey, ElderlyBenefitConstants.StopReasonDeceased, StringComparison.Ordinal)
+            && request.DeathDate is null)
+        {
+            error = "请选择死亡日期";
+            return false;
+        }
+
+        var start = string.Empty;
+        var end = string.Empty;
+        var amount = 0m;
+        if (request.IsRecover)
+        {
+            if (!TryReadMonth(request.RecoverStartMonth, out start))
+            {
+                error = "追缴起算月格式应为 yyyy-MM";
+                return false;
+            }
+
+            if (!TryReadMonth(request.RecoverEndMonth, out end))
+            {
+                error = "追缴止算月格式应为 yyyy-MM";
+                return false;
+            }
+
+            if (string.CompareOrdinal(start, end) > 0)
+            {
+                error = "追缴止算月不能早于起算月";
+                return false;
+            }
+
+            amount = request.RecoverAmount ?? 0m;
+            if (amount < 0)
+            {
+                error = "追缴金额不能为负数";
+                return false;
+            }
+        }
+
+        values = new StopValues(
+            reason,
+            (request.DueStopDate ?? DateTime.Today).Date,
+            request.DeathDate?.Date,
+            request.IsRecover,
+            start,
+            end,
+            amount,
+            (request.Remark ?? string.Empty).Trim());
+        return true;
+    }
+
+    private static bool TryReadMonth(string? raw, out string month)
+    {
+        month = string.Empty;
+        var value = (raw ?? string.Empty).Trim();
+        if (!DateTime.TryParseExact(
+                value,
+                "yyyy-MM",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var parsed))
+        {
+            return false;
+        }
+
+        month = parsed.ToString("yyyy-MM", CultureInfo.InvariantCulture);
+        return true;
+    }
+
     // ───────────────────────────── OCR ─────────────────────────────
 
     private static async Task<IResult> RecognizeIdCardAsync(
@@ -569,6 +829,13 @@ public static class ElderlyEndpoints
             context,
             StatusCodes.Status400BadRequest,
             ApiErrorCodes.ValidationError,
+            message);
+
+    private static IResult NotFound(HttpContext context, string message)
+        => ApiErrors.Write(
+            context,
+            StatusCodes.Status404NotFound,
+            ApiErrorCodes.NotFound,
             message);
 
     private static IResult Unauthorized(HttpContext context)

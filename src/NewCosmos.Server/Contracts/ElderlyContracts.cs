@@ -248,4 +248,27 @@ public sealed record ElderlyOcrResponse(
     string Address,
     IReadOnlyDictionary<string, string> Fields);
 
+/// <summary>停发办理请求（当前库在享人员或导入名册建档并停发共用）。</summary>
+public sealed class ElderlyStopRequest
+{
+    public DateTime? DueStopDate { get; init; }
+
+    /// <summary>停发原因 key；选择“其他”时传 OTHER，实际原因取 OtherReasonText。</summary>
+    public string? StopReason { get; init; }
+
+    public DateTime? DeathDate { get; init; }
+
+    public string? OtherReasonText { get; init; }
+
+    public bool IsRecover { get; init; }
+
+    public string? RecoverStartMonth { get; init; }
+
+    public string? RecoverEndMonth { get; init; }
+
+    public decimal? RecoverAmount { get; init; }
+
+    public string? Remark { get; init; }
+}
+
 #endregion
