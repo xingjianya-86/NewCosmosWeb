@@ -673,7 +673,6 @@ onMounted(() => {
               v-model:town="form.hukouTown"
               v-model:village="form.hukouVillage"
               :disabled="isView"
-              province-readonly
             />
             <label class="field">
               <span class="field-label">户籍详细地址（门牌号）</span>
@@ -694,7 +693,6 @@ onMounted(() => {
               v-model:town="form.familyTown"
               v-model:village="form.familyVillage"
               :disabled="isView"
-              province-readonly
             />
             <label class="field">
               <span class="field-label">家庭详细地址（门牌号）</span>
