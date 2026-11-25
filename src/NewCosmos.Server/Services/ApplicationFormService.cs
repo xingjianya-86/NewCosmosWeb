@@ -395,6 +395,12 @@ public sealed class ApplicationFormService(
                 caregiversResult.ErrorCode!, caregiversResult.Message!);
         }
 
+        // 草稿/提交中尚未享受低保，不得用上一次试算结果触发渐退。
+        // 渐退只适用于已审批/已享受的低保户复核；否则会把“上一次判定”误当成“原享受分类”。
+        var canTriggerGrace =
+            !string.Equals(application.Status, ApplicationStatusCodes.DRAFT, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(application.Status, ApplicationStatusCodes.SUBMITTED, StringComparison.OrdinalIgnoreCase);
+
         // 主表没有渐退列：重复判定时原分类/原保障金额只能从 nc_biz_grace_periods 取，
         // 否则渐退期内再次判定会因 application.ClassificationResult 已变成“低收入”而丢失渐退。
         var priorGuarantee = application.HouseholdMonthlyGuaranteeAmount;
@@ -417,6 +423,12 @@ public sealed class ApplicationFormService(
             application.OriginalClassificationResult = activeGrace.OriginalClassification;
         }
 
+        if (!canTriggerGrace)
+        {
+            // 草稿/提交中不得把上一次试算分类当作“原享受分类”。
+            application.OriginalClassificationResult = null;
+        }
+
         var classificationResult = await classification.DetermineClassificationAsync(
             application,
             membersResult.Value ?? [],
@@ -431,6 +443,13 @@ public sealed class ApplicationFormService(
         }
 
         var result = classificationResult.Value;
+
+        if (!canTriggerGrace)
+        {
+            // 草稿/提交中不参与渐退：正常分类金额照常计算，渐退标记一律清空。
+            result.ShouldTriggerGracePeriod = false;
+            result.GracePeriod = new GracePeriodCheckResult();
+        }
 
         // 照料护理费只对特困人员有意义；集中供养不发护理费（旧版口径），
         // 分散供养按能力鉴定计算；其余分类按 0 写入。
@@ -2797,7 +2816,13 @@ public sealed class ApplicationFormService(
             return "渐退期中";
         }
 
-        var daysLeft = (endDate.Date - DateTime.Today).Days;
+        var today = DateTime.Today;
+        if (grace.StartDate is { } startDate && today < startDate.Date)
+        {
+            return $"未开始（{startDate:yyyy-MM-dd} 起）";
+        }
+
+        var daysLeft = (endDate.Date - today).Days;
         return daysLeft >= 0
             ? $"剩余 {daysLeft} 天（至 {endDate:yyyy-MM-dd}）"
             : $"已结束（{endDate:yyyy-MM-dd}）";
