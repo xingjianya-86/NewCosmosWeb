@@ -8,7 +8,7 @@
  * - status 为空表示全部状态，onlyCurrent=true 表示不展开整户。
  */
 
-import { API_PREFIX } from './http'
+import { API_PREFIX, apiHttp } from './http'
 import { getStoredSessionId } from './session'
 import { getDeviceId } from '@/utils/device'
 
@@ -173,4 +173,33 @@ export async function exportMonthlyReport(
 
   saveBlob(blob, fileName)
   return { fileName }
+}
+
+/** 预览或打印核对月报/周报：后端固定使用当前账号默认绑定打印机。 */
+export interface MonthlyReportOutputRequest {
+  mode: 'preview' | 'print'
+  year?: number
+  month?: number
+  weekStart?: string
+  weekEnd?: string
+  allMonths?: boolean
+  status?: MonthlyReportStatus | null
+  onlyCurrent: boolean
+  copies?: number
+  isDuplex?: boolean
+}
+
+export interface MonthlyReportOutputResult {
+  id: number
+  jobNo: string
+  status: string
+  jobKind: string
+}
+
+export function createMonthlyReportOutput(
+  request: MonthlyReportOutputRequest,
+): Promise<MonthlyReportOutputResult> {
+  return apiHttp
+    .post<MonthlyReportOutputResult>('/asset-verification/monthly/output', request)
+    .then((response) => response.data)
 }

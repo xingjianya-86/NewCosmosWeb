@@ -52,6 +52,12 @@ public interface ITemplateJobRenderer
         int copies,
         bool isDuplex,
         CancellationToken ct);
+
+    /// <summary>
+    /// 模板索引槽每页容量（FAMILY_MEMBER_NAME_1..N → N）；0 表示不是名册类模板。
+    /// 行数超过容量时必须拆页，否则第 N+1 行起会被静默丢弃。
+    /// </summary>
+    int GetIndexSlotCapacity(string? templateConfigJson);
 }
 
 /// <summary>
@@ -168,6 +174,34 @@ public sealed class TemplateJobRenderer : ITemplateJobRenderer
             "xlsx" => new ExcelEngine(_logger, _perfOptions, _storageOptions),
             _ => throw new NotSupportedException($"不支持的模板类型: {fileType}")
         };
+    }
+
+    public int GetIndexSlotCapacity(string? templateConfigJson)
+    {
+        var config = ParseConfig(templateConfigJson);
+        if (config?.Fields is not { Count: > 0 })
+        {
+            return 0;
+        }
+
+        const string prefix = "FAMILY_MEMBER_NAME_";
+        var capacity = 0;
+        foreach (var field in config.Fields)
+        {
+            var key = field?.FieldKey;
+            if (string.IsNullOrWhiteSpace(key)
+                || !key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (int.TryParse(key[prefix.Length..], out var index) && index > capacity)
+            {
+                capacity = index;
+            }
+        }
+
+        return capacity;
     }
 
     private void ApplyPayload(

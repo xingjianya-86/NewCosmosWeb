@@ -1,5 +1,6 @@
 using NewCosmos.Agent.Models;
 using NewCosmos.Constants;
+using NewCosmos.Helpers;
 using NewCosmos.Models.Results;
 using NewCosmos.Services.Core;
 
@@ -81,19 +82,40 @@ public sealed class JobTaskExecutor : IJobTaskExecutor
         var tableRows = payload.TableRows ?? new List<Dictionary<string, string>>();
         var images = FilterImages(payload.Images);
 
+        // 名册类模板用 FAMILY_MEMBER_NAME_1..N 索引槽承载一页；超过容量必须拆页，
+        // 否则第 N+1 行起会被静默丢弃（旧版 PrintExecuteService 同样按槽位分页）。
+        var slotCapacity = _renderer.GetIndexSlotCapacity(payload.TemplateConfigJson);
+        var chunks = slotCapacity > 0 && tableRows.Count > slotCapacity
+            ? ChunkRows(tableRows, slotCapacity)
+            : null;
+
+        var printerName = FirstNonEmpty(payload.PrinterName, job.PrinterName);
+        var copies = payload.Copies > 0 ? payload.Copies : Math.Max(1, job.Copies);
+        var isDuplex = payload.IsDuplex || job.IsDuplex;
+
         try
         {
             _logger.Info(
                 $"[JobTask] 模板就绪: No={jobNo}, Type={fileType}, Template={job.TemplateId?.ToString() ?? "-"}, " +
-                $"Fields={fields.Count}, Rows={tableRows.Count}, Images={images.Count}, JobKind={(isPreview ? "Preview" : "Print")}");
+                $"Fields={fields.Count}, Rows={tableRows.Count}, Images={images.Count}, " +
+                $"Pages={(chunks?.Count ?? 1)}, JobKind={(isPreview ? "Preview" : "Print")}");
 
             if (isPreview)
             {
-                await _renderer
-                    .RenderPdfAsync(
-                        templatePath, fileType, fields, tableRows, images,
-                        payload.TemplateConfigJson, payload.TableStartMarker, payload.TableEndMarker, pdfPath, ct)
-                    .ConfigureAwait(false);
+                if (chunks is null)
+                {
+                    await _renderer
+                        .RenderPdfAsync(
+                            templatePath, fileType, fields, tableRows, images,
+                            payload.TemplateConfigJson, payload.TableStartMarker, payload.TableEndMarker, pdfPath, ct)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await RenderMergedPreviewAsync(
+                        templatePath, fileType, fields, chunks, images, payload, pdfPath, ct)
+                        .ConfigureAwait(false);
+                }
 
                 _logger.Info($"[JobTask] 预览 PDF 已生成: No={jobNo}, Bytes={new FileInfo(pdfPath).Length}");
                 _files.OpenWithShell(pdfPath);
@@ -102,6 +124,19 @@ public sealed class JobTaskExecutor : IJobTaskExecutor
                 // 预览不立即删除（用户可能还开着），只保留最近 N 个。
                 _files.TrimPreviewFiles(_previewKeepCount);
                 return null;
+            }
+
+            if (chunks is not null)
+            {
+                var pageWarning = await PrintChunksAsync(
+                    templatePath, fileType, fields, chunks, images, payload,
+                    jobNo, printerName, copies, isDuplex, ct)
+                    .ConfigureAwait(false);
+
+                _logger.Info(
+                    $"[JobTask] 打印完成并已清理渲染产物: No={jobNo}, Pages={chunks.Count}, " +
+                    $"Copies={copies}, Duplex={isDuplex}");
+                return pageWarning;
             }
 
             await _renderer
@@ -114,10 +149,6 @@ public sealed class JobTaskExecutor : IJobTaskExecutor
             await _renderer
                 .ExportPdfFromSourceAsync(sourcePath, fileType, pdfPath, ct)
                 .ConfigureAwait(false);
-
-            var printerName = FirstNonEmpty(payload.PrinterName, job.PrinterName);
-            var copies = payload.Copies > 0 ? payload.Copies : Math.Max(1, job.Copies);
-            var isDuplex = payload.IsDuplex || job.IsDuplex;
 
             var warning = await _printer
                 .PrintAsync(pdfPath, sourcePath, fileType, printerName, copies, isDuplex, ct)
@@ -134,6 +165,135 @@ public sealed class JobTaskExecutor : IJobTaskExecutor
             _files.TryDelete(sourcePath, pdfPath);
             throw;
         }
+    }
+
+    /// <summary>名册拆页预览：每页渲染 PDF，合并成一个 PDF 再打开。</summary>
+    private async Task RenderMergedPreviewAsync(
+        string templatePath,
+        string fileType,
+        IReadOnlyDictionary<string, string> fields,
+        IReadOnlyList<List<Dictionary<string, string>>> chunks,
+        IReadOnlyList<PrintImagePayload> images,
+        AgentJobPayload payload,
+        string pdfPath,
+        CancellationToken ct)
+    {
+        var partPaths = new List<string>(chunks.Count);
+        try
+        {
+            var partPdfs = new List<byte[]>(chunks.Count);
+            for (var index = 0; index < chunks.Count; index++)
+            {
+                var partPath = $"{pdfPath}.part{index + 1}.pdf";
+                partPaths.Add(partPath);
+
+                await _renderer
+                    .RenderPdfAsync(
+                        templatePath, fileType, fields, chunks[index], images,
+                        payload.TemplateConfigJson, payload.TableStartMarker, payload.TableEndMarker,
+                        partPath, ct)
+                    .ConfigureAwait(false);
+
+                partPdfs.Add(await File.ReadAllBytesAsync(partPath, ct).ConfigureAwait(false));
+            }
+
+            var merged = PdfMergeHelper.Merge(partPdfs);
+            await File.WriteAllBytesAsync(pdfPath, merged, ct).ConfigureAwait(false);
+            _files.TryDelete(partPaths.ToArray());
+        }
+        catch
+        {
+            _files.TryDelete(partPaths.ToArray());
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// 名册拆页打印：逐页渲染源 xlsx 并交给 Office COM 打印，
+    /// 保证每页的打印机/份数/双面参数生效（旧版同样按页拆分后打印）。
+    /// </summary>
+    private async Task<string?> PrintChunksAsync(
+        string templatePath,
+        string fileType,
+        IReadOnlyDictionary<string, string> fields,
+        IReadOnlyList<List<Dictionary<string, string>>> chunks,
+        IReadOnlyList<PrintImagePayload> images,
+        AgentJobPayload payload,
+        string jobNo,
+        string? printerName,
+        int copies,
+        bool isDuplex,
+        CancellationToken ct)
+    {
+        var partPaths = new List<string>(chunks.Count * 2);
+        string? combinedWarning = null;
+
+        try
+        {
+            for (var index = 0; index < chunks.Count; index++)
+            {
+                var partNo = $"{jobNo}_p{index + 1}";
+                var partSource = _files.GetRenderedSourcePath(partNo, fileType);
+                var partPdf = _files.GetPdfPath(partNo);
+                partPaths.Add(partSource);
+                partPaths.Add(partPdf);
+
+                await _renderer
+                    .RenderSourceAsync(
+                        templatePath, fileType, fields, chunks[index], images,
+                        payload.TemplateConfigJson, payload.TableStartMarker, payload.TableEndMarker,
+                        partSource, ct)
+                    .ConfigureAwait(false);
+
+                await _renderer
+                    .ExportPdfFromSourceAsync(partSource, fileType, partPdf, ct)
+                    .ConfigureAwait(false);
+
+                var warning = await _printer
+                    .PrintAsync(partPdf, partSource, fileType, printerName, copies, isDuplex, ct)
+                    .ConfigureAwait(false);
+
+                combinedWarning = CombineWarnings(combinedWarning, warning);
+                _files.TryDelete(partSource, partPdf);
+            }
+
+            return combinedWarning;
+        }
+        catch
+        {
+            _files.TryDelete(partPaths.ToArray());
+            throw;
+        }
+    }
+
+    private static List<List<Dictionary<string, string>>> ChunkRows(
+        IReadOnlyList<Dictionary<string, string>> rows,
+        int capacity)
+    {
+        var chunks = new List<List<Dictionary<string, string>>>();
+        for (var index = 0; index < rows.Count; index += capacity)
+        {
+            chunks.Add(rows.Skip(index).Take(capacity).ToList());
+        }
+
+        return chunks;
+    }
+
+    private static string? CombineWarnings(string? existing, string? next)
+    {
+        if (string.IsNullOrWhiteSpace(next))
+        {
+            return existing;
+        }
+
+        if (string.IsNullOrWhiteSpace(existing))
+        {
+            return next;
+        }
+
+        return existing.Contains(next, StringComparison.Ordinal)
+            ? existing
+            : $"{existing}; {next}";
     }
 
     /// <summary>只保留可用的照片图片（SIGNATURE_* 签名系统未设计，直接跳过）。</summary>

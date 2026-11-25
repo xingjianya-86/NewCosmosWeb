@@ -5,13 +5,15 @@ import { ElMessage } from 'element-plus'
 import { ArrowLeft, Refresh } from '@element-plus/icons-vue'
 import { listAssetTasks } from '@/api/assetVerification'
 import { getErrorMessage } from '@/api/http'
-import { exportMonthlyReport } from '@/api/assetMonthlyReport'
+import { createMonthlyReportOutput, exportMonthlyReport } from '@/api/assetMonthlyReport'
 import type {
   MonthlyReportExportScope,
   MonthlyReportPeriod,
   MonthlyReportStats,
   MonthlyReportStatus,
 } from '@/api/assetMonthlyReport'
+import { listPrinters } from '@/api/printers'
+import type { PrinterBinding } from '@/types/api'
 import NcCard from '@/components/NcCard.vue'
 import NcPageHeader from '@/components/NcPageHeader.vue'
 import NcStat from '@/components/NcStat.vue'
@@ -47,7 +49,61 @@ const loading = ref(false)
 const loaded = ref(false)
 const loadError = ref('')
 const exporting = ref(false)
+const printers = ref<PrinterBinding[]>([])
+const printersLoading = ref(false)
+const printersError = ref('')
+/** 'all' 为 Element Plus 可接受的字符串哨兵，提交时映射回 null。 */
+const outputStatus = ref<MonthlyReportStatus | 'all'>('0')
+const outputAction = ref<'preview' | 'print' | null>(null)
+const copies = ref(1)
+const isDuplex = ref(false)
 let requestTicket = 0
+
+interface OutputStatusOption {
+  label: string
+  value: MonthlyReportStatus | 'all'
+}
+
+/** 与旧版核对月报表 5 个输出按钮完全一致。 */
+const outputStatusOptions: OutputStatusOption[] = [
+  { label: '已提交申请', value: '0' },
+  { label: '有报告未建档', value: '1' },
+  { label: '全部导出', value: 'all' },
+  { label: '已建档', value: '2' },
+  { label: '不予认定', value: '3' },
+]
+
+const selectedOutputStatus = computed<MonthlyReportStatus | null>(() =>
+  outputStatus.value === 'all' ? null : outputStatus.value,
+)
+
+const outputStatusLabel = computed(
+  () =>
+    outputStatusOptions.find((option) => option.value === outputStatus.value)?.label
+    ?? '全部导出',
+)
+
+/** 固定默认打印机：优先 isDefault，其次第一台（与服务端 ResolveTargetAsync 顺序一致）。 */
+const defaultPrinter = computed(
+  () => printers.value.find((printer) => printer.isDefault) ?? printers.value[0] ?? null,
+)
+
+const canOutput = computed(
+  () => defaultPrinter.value?.online === true && outputAction.value === null,
+)
+
+const printerText = computed(() => {
+  if (printersLoading.value) {
+    return '正在读取默认打印机…'
+  }
+
+  const printer = defaultPrinter.value
+  if (!printer) {
+    return '当前账号未绑定打印机'
+  }
+
+  return `${printer.deviceName} · ${printer.printerName} · ${printer.online ? '在线' : '离线'}`
+})
 
 const isWeeklyMode = computed(() =>
   isWeeklyMonth(selectedYear.value, selectedMonth.value),
@@ -331,11 +387,75 @@ async function handleExport(
   }
 }
 
+async function loadPrinterBindings(): Promise<void> {
+  printersLoading.value = true
+  printersError.value = ''
+  try {
+    printers.value = await listPrinters()
+  } catch (error) {
+    printers.value = []
+    printersError.value = getErrorMessage(error, '打印机绑定加载失败')
+  } finally {
+    printersLoading.value = false
+  }
+}
+
+async function handleOutput(mode: 'preview' | 'print'): Promise<void> {
+  const current = period.value
+  if (current.mode === 'weekly' && current.weekNumber === null) {
+    ElMessage.warning('请先选择周')
+    return
+  }
+
+  const printer = defaultPrinter.value
+  if (!printer) {
+    ElMessage.warning('当前账号未绑定打印机，请先在打印机绑定页生成绑定码并在本机 Agent 绑定')
+    return
+  }
+
+  if (!printer.online) {
+    ElMessage.warning('默认打印机离线，请先启动本机 Agent 并刷新打印机状态')
+    return
+  }
+
+  outputAction.value = mode
+  try {
+    const result = await createMonthlyReportOutput({
+      mode,
+      year: current.year,
+      month: current.month,
+      weekStart: current.mode === 'weekly' ? current.startDate : undefined,
+      weekEnd: current.mode === 'weekly' ? current.endDate : undefined,
+      status: selectedOutputStatus.value,
+      onlyCurrent: onlyCurrentStatusPersons.value,
+      copies: copies.value,
+      isDuplex: isDuplex.value,
+    })
+    ElMessage.success(
+      mode === 'preview'
+        ? `已推送到 PC 端预览（${result.jobNo}）`
+        : `已推送打印任务（${result.jobNo}）`,
+    )
+  } catch (error) {
+    ElMessage.error(
+      getErrorMessage(error, mode === 'preview' ? '推送预览失败' : '推送打印失败'),
+    )
+  } finally {
+    outputAction.value = null
+  }
+}
+
+function handleExportSource(): void {
+  const label = outputStatusLabel.value === '全部导出' ? '全部' : outputStatusLabel.value
+  void handleExport('period', selectedOutputStatus.value, label)
+}
+
 /* 首帧即按当前年月确定月报/周报与默认周，避免先渲染月报再切周报。 */
 syncWeeks()
 
 onMounted(() => {
   void loadStats()
+  void loadPrinterBindings()
 })
 </script>
 
@@ -432,60 +552,81 @@ onMounted(() => {
 
     <NcCard :title="`${reportTypeLabel}表输出`">
       <p class="export-desc">
-        选择时间周期后，按旧版《经济核查汇总表》模板导出核查人员名册。
+        选择状态后预览、打印或导出源文件；预览和打印使用旧版《经济核查汇总表》模板，
+        导出源文件为模板填充后的 xlsx。
       </p>
 
       <el-checkbox v-model="onlyCurrentStatusPersons" class="roster-scope">
-        仅导出当前状态人员（不展开整户）
+        仅输出当前状态人员（不展开整户）
       </el-checkbox>
 
-      <div class="export-actions">
-        <el-button
-          type="primary"
-          :loading="exporting"
-          :disabled="exporting"
-          @click="handleExport('period', '0', '已提交申请')"
+      <div class="output-controls">
+        <el-select
+          v-model="outputStatus"
+          class="output-status"
+          aria-label="选择输出状态"
         >
-          已提交申请
-        </el-button>
-        <el-button
-          type="primary"
-          :loading="exporting"
-          :disabled="exporting"
-          @click="handleExport('period', '1', '有报告未建档')"
-        >
-          有报告未建档
-        </el-button>
-        <el-button
-          type="primary"
-          :loading="exporting"
-          :disabled="exporting"
-          @click="handleExport('period', null, '全部导出')"
-        >
-          全部导出
-        </el-button>
+          <el-option
+            v-for="option in outputStatusOptions"
+            :key="option.label"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
+
+        <div class="output-actions">
+          <el-button
+            type="primary"
+            :loading="outputAction === 'preview'"
+            :disabled="!canOutput"
+            @click="handleOutput('preview')"
+          >
+            预览
+          </el-button>
+          <el-button
+            type="primary"
+            :loading="outputAction === 'print'"
+            :disabled="!canOutput"
+            @click="handleOutput('print')"
+          >
+            打印
+          </el-button>
+          <el-button
+            :loading="exporting"
+            :disabled="exporting || outputAction !== null"
+            @click="handleExportSource"
+          >
+            导出源文件
+          </el-button>
+        </div>
       </div>
 
-      <div class="export-actions export-actions--secondary">
-        <el-button
-          :loading="exporting"
-          :disabled="exporting"
-          @click="handleExport('period', '2', '已建档')"
-        >
-          导出已建档
-        </el-button>
-        <el-button
-          :loading="exporting"
-          :disabled="exporting"
-          @click="handleExport('period', '3', '不予认定')"
-        >
-          导出不予认定
-        </el-button>
+      <div class="print-options">
+        <span class="print-option-label">份数</span>
+        <el-input-number
+          v-model="copies"
+          :min="1"
+          :max="99"
+          size="small"
+          controls-position="right"
+        />
+        <el-checkbox v-model="isDuplex">双面打印</el-checkbox>
       </div>
+
+      <p
+        class="printer-note"
+        :class="{ 'is-offline': defaultPrinter && !defaultPrinter.online, 'is-missing': !defaultPrinter }"
+      >
+        <span>默认打印机：{{ printerText }}</span>
+        <el-button link type="primary" :loading="printersLoading" @click="loadPrinterBindings()">
+          刷新
+        </el-button>
+      </p>
+      <p v-if="printersError" class="printer-error">{{ printersError }}</p>
 
       <p class="export-note">
-        按旧版模板输出，每页 28 人；超过一页时生成多个独立 xlsx 并打包为 zip。
-        默认展开同户全部成员，勾选后仅导出状态匹配人员。
+        预览和打印固定使用当前账号默认打印机；超过 28 人自动分页，预览合并为一个 PDF，打印逐页输出。
+        导出源文件超过 28 人时打包为 zip。
       </p>
     </NcCard>
 
@@ -674,11 +815,68 @@ onMounted(() => {
   margin-top: 14px;
 }
 
+.output-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.output-status {
+  width: 220px;
+}
+
+.output-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.output-actions :deep(.el-button) {
+  margin-left: 0;
+}
+
+.print-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.print-option-label {
+  color: var(--nc-muted-2);
+  font-size: var(--nc-text-sm);
+}
+
+.printer-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  color: var(--nc-muted-2);
+  font-size: var(--nc-text-sm);
+  line-height: 1.6;
+}
+
+.printer-note.is-offline,
+.printer-note.is-missing {
+  color: var(--el-color-danger);
+}
+
+.printer-error {
+  margin-top: 4px;
+  color: var(--el-color-danger);
+  font-size: var(--nc-text-xs);
+}
+
 .export-note {
   margin-top: 12px;
   color: var(--nc-muted);
   font-family: var(--nc-font-mono);
   font-size: var(--nc-text-xs);
+  line-height: 1.65;
 }
 
 @media (max-width: 960px) {
@@ -704,6 +902,19 @@ onMounted(() => {
   .export-actions,
   .export-actions--secondary {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .output-controls {
+    flex-direction: column;
+  }
+
+  .output-status {
+    width: 100%;
+  }
+
+  .output-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 

@@ -84,56 +84,16 @@ public sealed class AssetMonthlyReportExportService(
         AssetMonthlyReportExportRequest request,
         CancellationToken ct = default)
     {
-        var period = ResolvePeriod(request);
-        var (where, parameters) = await BuildWhereAsync(userId, request, period, ct);
-
-        var targetSql =
-            $"SELECT {SelectColumns} FROM {FromClause}{where} " +
-            $"ORDER BY {OrderByClause} LIMIT {MaxExportRows}";
-
-        var targetResult = await database.QueryAsync<AssetMonthlyReportRow>(
-            targetSql, ct, parameters.ToArray());
-        if (targetResult.IsFailure)
+        var snapshotResult = await QueryAsync(userId, request, ct);
+        if (snapshotResult.IsFailure)
         {
             return Result.Failure<AssetMonthlyReportExportFile>(
-                targetResult.ErrorCode!, targetResult.Message!);
+                snapshotResult.ErrorCode!, snapshotResult.Message!);
         }
 
-        var targetRows = targetResult.Value ?? [];
-        IReadOnlyList<AssetMonthlyReportRow> exportRows = targetRows;
-
-        // 默认展开整户：目标行只用于确定 batch，成员查询不再筛状态与日期。
-        if (!request.OnlyCurrent && targetRows.Count > 0)
-        {
-            var batchIds = targetRows
-                .Select(row => row.BatchId)
-                .Where(batchId => !string.IsNullOrWhiteSpace(batchId))
-                .Select(batchId => batchId!)
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-
-            if (batchIds.Length > 0)
-            {
-                var memberSql =
-                    $"SELECT {SelectColumns} FROM {FromClause} " +
-                    "WHERE v.batch_id = ANY($1) AND v.deleted_at IS NULL " +
-                    $"ORDER BY {OrderByClause} LIMIT {MaxExportRows}";
-
-                var memberResult = await database.QueryAsync<AssetMonthlyReportRow>(
-                    memberSql, ct, (object)batchIds);
-                if (memberResult.IsFailure)
-                {
-                    return Result.Failure<AssetMonthlyReportExportFile>(
-                        memberResult.ErrorCode!, memberResult.Message!);
-                }
-
-                exportRows = targetRows
-                    .Concat(memberResult.Value ?? [])
-                    .GroupBy(row => row.Id)
-                    .Select(group => group.First())
-                    .ToList();
-            }
-        }
+        var snapshot = snapshotResult.Value;
+        var period = snapshot.Period;
+        var exportRows = snapshot.Rows;
 
         var orderedRows = exportRows
             .OrderBy(row => row.ApplicationDate)
@@ -177,6 +137,69 @@ public sealed class AssetMonthlyReportExportService(
             new AssetMonthlyReportExportFile(content, period.FileName, ContentType));
     }
 
+    /// <summary>
+    /// 查询月报/周报人员名册（含整户展开）。导出与预览/打印必须共用此方法，
+    /// 保证三份输出的筛选、排序来源和户成员范围一致。
+    /// </summary>
+    public async Task<Result<MonthlyReportDataSnapshot>> QueryAsync(
+        int userId,
+        AssetMonthlyReportExportRequest request,
+        CancellationToken ct = default)
+    {
+        var period = ResolvePeriod(request);
+        var (where, parameters) = await BuildWhereAsync(userId, request, period, ct);
+
+        var targetSql =
+            $"SELECT {SelectColumns} FROM {FromClause}{where} " +
+            $"ORDER BY {OrderByClause} LIMIT {MaxExportRows}";
+
+        var targetResult = await database.QueryAsync<AssetMonthlyReportRow>(
+            targetSql, ct, parameters.ToArray());
+        if (targetResult.IsFailure)
+        {
+            return Result.Failure<MonthlyReportDataSnapshot>(
+                targetResult.ErrorCode!, targetResult.Message!);
+        }
+
+        var targetRows = targetResult.Value ?? [];
+        IReadOnlyList<AssetMonthlyReportRow> exportRows = targetRows;
+
+        // 默认展开整户：目标行只用于确定 batch，成员查询不再筛状态与日期。
+        if (!request.OnlyCurrent && targetRows.Count > 0)
+        {
+            var batchIds = targetRows
+                .Select(row => row.BatchId)
+                .Where(batchId => !string.IsNullOrWhiteSpace(batchId))
+                .Select(batchId => batchId!)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+
+            if (batchIds.Length > 0)
+            {
+                var memberSql =
+                    $"SELECT {SelectColumns} FROM {FromClause} " +
+                    "WHERE v.batch_id = ANY($1) AND v.deleted_at IS NULL " +
+                    $"ORDER BY {OrderByClause} LIMIT {MaxExportRows}";
+
+                var memberResult = await database.QueryAsync<AssetMonthlyReportRow>(
+                    memberSql, ct, (object)batchIds);
+                if (memberResult.IsFailure)
+                {
+                    return Result.Failure<MonthlyReportDataSnapshot>(
+                        memberResult.ErrorCode!, memberResult.Message!);
+                }
+
+                exportRows = targetRows
+                    .Concat(memberResult.Value ?? [])
+                    .GroupBy(row => row.Id)
+                    .Select(group => group.First())
+                    .ToList();
+            }
+        }
+
+        return Result.Success(new MonthlyReportDataSnapshot(exportRows, period));
+    }
+
     /// <summary>读取旧版《通用_经济核查汇总表》模板（分类 AssetVerificationMonthlyReport）。</summary>
     private async Task<MonthlyReportTemplate?> LoadTemplateAsync(CancellationToken ct)
     {
@@ -212,7 +235,7 @@ public sealed class AssetMonthlyReportExportService(
         MonthlyReportTemplate template,
         IReadOnlyList<AssetMonthlyReportRow> rows,
         AssetMonthlyReportExportRequest request,
-        ExportPeriod period)
+        MonthlyReportPeriodRange period)
     {
         var fields = ParseTemplateFields(template.ConfigJson);
         var capacity = GetIndexSlotCapacity(fields);
@@ -449,7 +472,7 @@ public sealed class AssetMonthlyReportExportService(
     /// 与旧版 AddressResolver.BuildAddress 同口径：
     /// 详细地址为空时用村社区名；详细地址已含镇/村/街道时直接使用；否则村社区名 + 门牌。
     /// </summary>
-    private static string BuildTemplateAddress(AssetMonthlyReportRow row)
+    public static string BuildTemplateAddress(AssetMonthlyReportRow row)
     {
         var detail = (row.FamilyAddress ?? string.Empty).Trim();
         var community = (row.CommunityDisplay ?? string.Empty).Trim();
@@ -473,9 +496,9 @@ public sealed class AssetMonthlyReportExportService(
         return community + detail;
     }
 
-    private static Dictionary<string, string> BuildReportContextValues(
+    public static Dictionary<string, string> BuildReportContextValues(
         AssetMonthlyReportExportRequest request,
-        ExportPeriod period)
+        MonthlyReportPeriodRange period)
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -501,7 +524,7 @@ public sealed class AssetMonthlyReportExportService(
 
     private static string DescribePeriod(
         AssetMonthlyReportExportRequest request,
-        ExportPeriod period)
+        MonthlyReportPeriodRange period)
     {
         if (request.AllMonths)
         {
@@ -560,7 +583,7 @@ public sealed class AssetMonthlyReportExportService(
     private async Task<(string Where, List<object?> Parameters)> BuildWhereAsync(
         int userId,
         AssetMonthlyReportExportRequest request,
-        ExportPeriod period,
+        MonthlyReportPeriodRange period,
         CancellationToken ct)
     {
         var conditions = new List<string> { "v.deleted_at IS NULL" };
@@ -606,11 +629,11 @@ public sealed class AssetMonthlyReportExportService(
         return (" WHERE " + string.Join(" AND ", conditions), parameters);
     }
 
-    private static ExportPeriod ResolvePeriod(AssetMonthlyReportExportRequest request)
+    private static MonthlyReportPeriodRange ResolvePeriod(AssetMonthlyReportExportRequest request)
     {
         if (request.AllMonths)
         {
-            return new ExportPeriod(null, null, "核对月报表_全部月份.xlsx");
+            return new MonthlyReportPeriodRange(null, null, "核对月报表_全部月份.xlsx");
         }
 
         if (request.WeekStart is { } weekStart && request.WeekEnd is { } weekEnd)
@@ -619,7 +642,7 @@ public sealed class AssetMonthlyReportExportService(
             var end = weekEnd.Date;
             var weekYear = ISOWeek.GetYear(start);
             var weekNumber = ISOWeek.GetWeekOfYear(start);
-            return new ExportPeriod(
+            return new MonthlyReportPeriodRange(
                 start,
                 end.AddDays(1),
                 $"核对周报表_{weekYear}年第{weekNumber}周.xlsx");
@@ -629,12 +652,12 @@ public sealed class AssetMonthlyReportExportService(
         if (request.Month is { } month)
         {
             var (start, endExclusive) = ALinePeriodHelper.GetPeriod(year, month);
-            return new ExportPeriod(
+            return new MonthlyReportPeriodRange(
                 start, endExclusive, $"核对月报表_{year}-{month:D2}.xlsx");
         }
 
         var (yearStart, yearEndExclusive) = ALinePeriodHelper.GetYearPeriod(year);
-        return new ExportPeriod(
+        return new MonthlyReportPeriodRange(
             yearStart, yearEndExclusive, $"核对月报表_{year}年.xlsx");
     }
 
@@ -744,11 +767,18 @@ public sealed class AssetMonthlyReportExportService(
         return $"%{escaped}%";
     }
 
-    private sealed record ExportPeriod(
-        DateTime? Start,
-        DateTime? EndExclusive,
-        string FileName);
 }
+
+/// <summary>月报/周报周期范围与文件名。导出、预览、打印共用同一份周期解析。</summary>
+public sealed record MonthlyReportPeriodRange(
+    DateTime? Start,
+    DateTime? EndExclusive,
+    string FileName);
+
+/// <summary>查询快照：供导出与预览/打印共用。</summary>
+public sealed record MonthlyReportDataSnapshot(
+    IReadOnlyList<AssetMonthlyReportRow> Rows,
+    MonthlyReportPeriodRange Period);
 
 /// <summary>月报 / 周报导出请求；周参数优先于年月，<see cref="AllMonths"/> 优先于两者。</summary>
 public sealed class AssetMonthlyReportExportRequest

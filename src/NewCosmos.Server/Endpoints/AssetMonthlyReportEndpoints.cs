@@ -20,7 +20,111 @@ public static class AssetMonthlyReportEndpoints
     public static IEndpointRouteBuilder MapAssetMonthlyReportEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapGet("/api/asset-verification/monthly/export", ExportAsync);
+        app.MapPost("/api/asset-verification/monthly/output", CreateOutputAsync);
         return app;
+    }
+
+    /// <summary>
+    /// 预览或打印核对月报/周报（模板任务交给 PC Agent）。
+    /// 目标固定为当前账号默认绑定打印机；导出源文件仍走 GET /monthly/export。
+    /// </summary>
+    private static async Task<IResult> CreateOutputAsync(
+        MonthlyReportOutputRequest? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        IDatabaseService database,
+        DataScopeFilterBuilder dataScope,
+        ArchivePrintQueueService queue,
+        PrinterBindingService printers,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.PRINT_ASSETVERIFICATIONMONTHLYREPORT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        if (request is null)
+        {
+            return InvalidRequest(context, "请求体不能为空");
+        }
+
+        var mode = (request.Mode ?? "preview").Trim().ToLowerInvariant();
+        if (mode is not ("preview" or "print"))
+        {
+            return InvalidRequest(context, "mode 只能是 preview 或 print");
+        }
+
+        if (request.Year is < 1900 or > 9999)
+        {
+            return InvalidRequest(context, "年份参数无效");
+        }
+
+        if (request.Month is < 1 or > 12)
+        {
+            return InvalidRequest(context, "月份参数应为 1-12");
+        }
+
+        if ((request.WeekStart is null) != (request.WeekEnd is null))
+        {
+            return InvalidRequest(context, "周起始日与结束日必须同时提供");
+        }
+
+        if (request.WeekStart is { } weekStart
+            && request.WeekEnd is { } weekEnd
+            && weekStart.Date > weekEnd.Date)
+        {
+            return InvalidRequest(context, "周起始日不能晚于结束日");
+        }
+
+        var normalizedStatus = string.IsNullOrWhiteSpace(request.Status)
+            ? null
+            : request.Status.Trim();
+        if (normalizedStatus is not null
+            && normalizedStatus is not (AssetCheckStatusConstants.SUBMITTED
+                or AssetCheckStatusConstants.VERIFIED
+                or AssetCheckStatusConstants.INCLUDED
+                or AssetCheckStatusConstants.REFUSED))
+        {
+            return InvalidRequest(context, "状态参数应为 0、1、2 或 3");
+        }
+
+        var normalizedRequest = new MonthlyReportOutputRequest
+        {
+            Mode = mode,
+            Year = request.Year,
+            Month = request.Month,
+            WeekStart = request.WeekStart?.Date,
+            WeekEnd = request.WeekEnd?.Date,
+            AllMonths = request.AllMonths,
+            Status = normalizedStatus,
+            OnlyCurrent = request.OnlyCurrent,
+            Copies = request.Copies,
+            IsDuplex = request.IsDuplex,
+        };
+
+        var service = new AssetMonthlyReportPrintService(
+            database, dataScope, queue, printers);
+        var result = await service.CreateAsync(
+            user.Id,
+            string.IsNullOrWhiteSpace(user.FullName) ? user.Username : user.FullName!,
+            normalizedRequest,
+            ct);
+
+        if (result.IsFailure)
+        {
+            return ApiErrors.FromResult(context, result);
+        }
+
+        var job = result.Value;
+        return Results.Json(new PrintJobCreatedResponse(
+            job.Id, job.JobNo, job.Status, job.JobKind, []));
     }
 
     private static async Task<IResult> ExportAsync(
