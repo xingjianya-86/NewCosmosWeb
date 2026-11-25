@@ -80,7 +80,7 @@ public sealed class PrinterBindingService(
     // ───────────────────────── 绑定码（Agent 按码绑定） ─────────────────────────
 
     /// <summary>绑定码长度固定 6 位数字。</summary>
-    private const int BindCodeLength = 6;
+    public const int BindCodeLength = 6;
 
     /// <summary>绑定码有效期（分钟）；与写入 SQL 的 interval 保持一致。</summary>
     private const int BindCodeLifetimeMinutes = 5;
@@ -258,10 +258,58 @@ public sealed class PrinterBindingService(
                 ApiErrorCodes.ValidationError, "设备未上报打印机，请先在 Agent 中选择要绑定的打印机");
         }
 
+        var bindResult = await BindPrintersForDeviceAsync(bindCode.UserId, device.Id, printers, ct);
+        if (bindResult.IsFailure)
+        {
+            return bindResult;
+        }
+
+        var markUsedResult = await database.ExecuteNonQueryAsync(
+            @"UPDATE nc_sys_printer_bind_codes
+              SET used_at = now()
+              WHERE id = $1 AND used_at IS NULL",
+            ct,
+            bindCode.Id);
+        if (markUsedResult.IsFailure)
+        {
+            return Result.Failure<PrinterBindingsResponse>(
+                markUsedResult.ErrorCode!, markUsedResult.Message!);
+        }
+
+        await transaction.CommitAsync(ct);
+        logger.Info(
+            $"Agent 按码绑定打印机: UserId={bindCode.UserId}, DeviceId={device.Id}, Count={bindResult.Value.Bindings.Count}");
+
+        return bindResult;
+    }
+
+    /// <summary>
+    /// 把打印机 upsert 到指定账号 + 设备的绑定中，返回本次写入/更新的绑定。
+    /// 默认打印机规则：请求指定默认则切换默认；账号已有默认且本次未指定则保持；
+    /// 账号没有默认则把本次第一台设为默认。调用方负责事务与 printers 规范化。
+    /// </summary>
+    public async Task<Result<PrinterBindingsResponse>> BindPrintersForDeviceAsync(
+        int userId,
+        long deviceId,
+        IReadOnlyCollection<AgentPrinterReport> printers,
+        CancellationToken ct = default)
+    {
+        if (deviceId <= 0)
+        {
+            return Result.Failure<PrinterBindingsResponse>(
+                ApiErrorCodes.ValidationError, "设备 ID 无效");
+        }
+
+        if (printers.Count == 0)
+        {
+            return Result.Failure<PrinterBindingsResponse>(
+                ApiErrorCodes.ValidationError, "设备未上报打印机，请先在 Agent 中选择要绑定的打印机");
+        }
+
         var defaultCountResult = await database.ExecuteScalarAsync<long?>(
             "SELECT COUNT(*) FROM nc_sys_printer_bindings WHERE user_id = $1 AND is_default",
             ct,
-            bindCode.UserId);
+            userId);
         if (defaultCountResult.IsFailure)
         {
             return Result.Failure<PrinterBindingsResponse>(
@@ -275,11 +323,11 @@ public sealed class PrinterBindingService(
             .FirstOrDefault();
 
         // 未指定默认：账号已有默认则保持，没有则把本次第一台设为默认。
-        var defaultPrinterName = requestedDefault ?? (hasDefault ? null : printers[0].Name!.Trim());
+        var defaultPrinterName = requestedDefault ?? (hasDefault ? null : printers.First().Name!.Trim());
 
         if (defaultPrinterName is not null)
         {
-            var clearResult = await ClearDefaultAsync(bindCode.UserId, ct);
+            var clearResult = await ClearDefaultAsync(userId, ct);
             if (clearResult.IsFailure)
             {
                 return Result.Failure<PrinterBindingsResponse>(
@@ -311,9 +359,9 @@ public sealed class PrinterBindingService(
 
             var upsertResult = defaultPrinterName is null
                 ? await database.ExecuteScalarAsync<long?>(
-                    preserveDefaultSql, ct, bindCode.UserId, device.Id, printerName)
+                    preserveDefaultSql, ct, userId, deviceId, printerName)
                 : await database.ExecuteScalarAsync<long?>(
-                    setDefaultSql, ct, bindCode.UserId, device.Id, printerName, isDefault);
+                    setDefaultSql, ct, userId, deviceId, printerName, isDefault);
 
             if (upsertResult.IsFailure)
             {
@@ -330,24 +378,12 @@ public sealed class PrinterBindingService(
             bindingIds.Add(bindingId);
         }
 
-        var markUsedResult = await database.ExecuteNonQueryAsync(
-            @"UPDATE nc_sys_printer_bind_codes
-              SET used_at = now()
-              WHERE id = $1 AND used_at IS NULL",
-            ct,
-            bindCode.Id);
-        if (markUsedResult.IsFailure)
-        {
-            return Result.Failure<PrinterBindingsResponse>(
-                markUsedResult.ErrorCode!, markUsedResult.Message!);
-        }
-
         var policy = await sessions.GetPolicyAsync(ct);
         var bindingsResult = await database.QueryAsync<PrinterBindingDto>(
             BindingSelect + @" AND b.id = ANY($3::bigint[])
                                ORDER BY b.is_default DESC, b.created_at ASC, b.id ASC",
             ct,
-            bindCode.UserId,
+            userId,
             policy.OnlineWindowSeconds,
             bindingIds.ToArray());
         if (bindingsResult.IsFailure)
@@ -355,10 +391,6 @@ public sealed class PrinterBindingService(
             return Result.Failure<PrinterBindingsResponse>(
                 bindingsResult.ErrorCode!, bindingsResult.Message!);
         }
-
-        await transaction.CommitAsync(ct);
-        logger.Info(
-            $"Agent 按码绑定打印机: UserId={bindCode.UserId}, DeviceId={device.Id}, Count={bindingIds.Count}");
 
         return Result.Success(new PrinterBindingsResponse(bindingsResult.Value ?? []));
     }

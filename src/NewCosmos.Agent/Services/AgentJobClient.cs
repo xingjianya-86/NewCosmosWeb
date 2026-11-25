@@ -123,7 +123,7 @@ public sealed partial class HttpAgentClient
     private static void EnsureDeviceKey(string deviceKey)
     {
         if (string.IsNullOrWhiteSpace(deviceKey))
-            throw new AgentApiException(0, "AGENT_DEVICE_KEY_MISSING", "缺少设备密钥，请先运行 --register");
+            throw new AgentApiException(0, "AGENT_DEVICE_KEY_MISSING", "缺少设备密钥，请先用网页绑定码运行 --bind-code 自动注册本机");
     }
 
     /// <summary>清洗 claim 上报的缓存清单：去重、去非法 hash、限制条数（老服务端忽略该字段）。</summary>

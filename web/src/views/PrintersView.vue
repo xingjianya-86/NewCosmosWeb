@@ -320,7 +320,7 @@ onBeforeUnmount(() => {
   <div class="nc-page printers-page">
     <NcPageHeader
       title="打印机绑定"
-      description="网页生成绑定码，Agent 读取本机打印机后自动写入绑定。手机端仅入队，实际打印由绑定的 Windows 电脑执行。"
+      description="网页生成绑定码；在本机 NewCosmos Agent 托盘选择『绑定本机打印机』并输入此码。首次使用会自动注册本机设备，不需要服务器注册令牌。"
     >
       <template #actions>
         <div class="header-actions">
@@ -345,7 +345,7 @@ onBeforeUnmount(() => {
 
     <div class="hint-bar">
       <el-icon><InfoFilled /></el-icon>
-      <span>推荐在目标电脑上点「生成本机绑定码」，由 Agent 自动读取本机打印机完成绑定；也可手动选择设备与打印机作为兜底。绑定只属于当前账号，不会打到别人的打印机。</span>
+      <span>推荐在目标电脑上点「生成本机绑定码」，由 Agent 自动读取本机打印机完成绑定；首次使用会自动注册本机设备，无需服务器注册令牌。也可手动选择设备与打印机作为兜底，绑定只属于当前账号。</span>
     </div>
 
     <el-alert
@@ -479,11 +479,11 @@ onBeforeUnmount(() => {
         </template>
 
         <div v-else-if="!loading && !loadError" class="empty-wrap">
-          <el-empty description="尚未绑定打印机">
+          <el-empty description="还没有绑定打印机？">
             <el-button type="primary" :icon="Key" @click="openBindCodeDialog">生成本机绑定码</el-button>
             <el-button :icon="Plus" @click="openBindDialog">手动绑定</el-button>
             <p class="empty-tip">
-              请在 Windows 电脑启动 Agent 后生成本机绑定码，或在下方手动选择该电脑上报的打印机。
+              点击「生成本机绑定码」，在本机 Agent 输入即可自动注册并绑定。
             </p>
           </el-empty>
         </div>
@@ -522,9 +522,9 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="bind-code-steps">
-          <p>请在当前电脑的 NewCosmos Agent 托盘选择「绑定本机打印机」并输入此码。</p>
+          <p>请在当前电脑打开 NewCosmos Agent 托盘 → 绑定本机打印机，输入此码。</p>
           <p class="nc-muted">
-            Agent 读取本机打印机后会自动写入绑定，成功后本页列表会自动刷新。
+            Agent 未注册时会自动完成注册并绑定本机打印机，成功后本页列表会自动刷新。
           </p>
         </div>
 

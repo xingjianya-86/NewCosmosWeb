@@ -221,14 +221,14 @@ NewCosmos.Agent — Windows 固定 PC 的 Office/打印代理（P0）
 
 命令（缺省 = tray：托盘 + 心跳 + 任务轮询）:
   --tray                托盘模式（缺省）：托盘图标 + 心跳 + 任务轮询
-  --register            向服务端注册本机，保存 deviceKey 后退出
+  --register            用一次性注册令牌注册本机（可选；通常直接用 --bind-code 自动注册）
   --heartbeat           心跳 + 任务轮询并行（控制台，Ctrl+C 退出）
   --heartbeat-once      只发一次心跳
   --worker              只轮询/执行打印任务（纯控制台，不关心跳）
   --install-autostart   写入 HKCU\...\Run 实现开机自启（配合 --autostart-mode）
   --uninstall-autostart 删除开机自启项
   --printers            列出本机打印机（默认打印机标 [默认]）
-  --bind-code <code>    用 6 位绑定码把本机打印机绑定到当前设备
+  --bind-code <code>    绑定本机打印机；首次使用会自动注册本机
   --probe-office        探测 Microsoft Office / WPS 可用性
   --render              用 Office 模板渲染一次 PDF（真实 COM）
 
@@ -255,13 +255,15 @@ NewCosmos.Agent — Windows 固定 PC 的 Office/打印代理（P0）
   NC_AGENT_REGISTER_TOKEN  等同于 --register-token（推荐部署时注入）
 
 示例:
+  NewCosmos.Agent.exe --bind-code 482913
   NewCosmos.Agent.exe --server https://cosmos-static.sua17.cn:20000 --register
   NewCosmos.Agent.exe --heartbeat-once
   NewCosmos.Agent.exe --worker
-  NewCosmos.Agent.exe --bind-code 482913
   NewCosmos.Agent.exe --render --template C:\tpl\低保审核审批表.docx --data C:\tpl\data.json --out C:\out\result.pdf
 
 说明:
+  - 首次使用只需在网页端生成绑定码，再运行 --bind-code（或托盘右键「绑定本机打印机…」）：
+    Agent 会自动注册本机、保存设备密钥并完成打印机绑定，无需注册令牌。
   - 仓库/源码不包含任何密码或令牌；注册令牌只从环境变量/配置文件/命令行读取。
   - deviceKey 默认 DPAPI(CurrentUser) 加密；DPAPI 不可用时降级为当前用户 ACL 文件并记警告。
   - worker 轮询 /api/agent/jobs/*：Preview 任务用默认 PDF 阅读器打开；其他任务渲染 PDF 并打印。

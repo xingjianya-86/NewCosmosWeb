@@ -77,6 +77,27 @@ dotnet publish src\NewCosmos.Agent\NewCosmos.Agent.csproj -c Release -r win-x64 
 
 ## 3. 设备注册
 
+### 3.1 首次使用：网页绑定码自动注册（推荐）
+
+在网页「打印机」页生成本机绑定码，然后：
+
+```powershell
+NewCosmos.Agent.exe --server https://cosmos-static.sua17.cn:20000 --bind-code 482913
+# 托盘模式：右键「绑定本机打印机…」输入 6 位码
+```
+
+`--bind-code` 发现本地没有 `deviceKey` 时，会自动调用匿名接口
+`POST /api/agent/register-by-code`，一次完成：
+
+1. 注册本机：请求体 `code`、`machineName`、`agentVersion`、`printers[{name,isDefault}]`；
+2. 服务端返回 `{ deviceId, deviceKey, heartbeatSeconds, bindings[] }`；
+3. 本地保存 `deviceId` / `machineName` / `heartbeatSeconds` / `deviceKey`；
+4. 直接使用返回的 `bindings[]`，不再二次调用 `bind-by-code`。
+
+成功后提示「已自动注册并绑定 N 台打印机」。**不再需要** `--register` 或服务器注册令牌。
+
+### 3.2 可选：一次性注册令牌（兼容旧部署）
+
 ```powershell
 $env:NC_AGENT_SERVER_URL = "https://cosmos-static.sua17.cn:20000"
 $env:NC_AGENT_REGISTER_TOKEN = "<向管理员索取的一次性令牌>"
@@ -143,17 +164,21 @@ NewCosmos.Agent.exe bind-code 482913
 
 流程：
 
-1. 校验绑定码必须是 6 位数字；
-2. 读取 `deviceKey`（未注册会提示先运行 `--register`）；
-3. 用 `PrinterDiscovery` 枚举本机全部打印机（含默认打印机标记）；
-4. `POST /api/printers/bind-by-code`，请求头 `X-NC-Device-Key`，
-   请求体 `{ "code": "482913", "printers": [{ "name": "HP1020", "isDefault": true }] }`；
-5. 成功返回 `bindings[]`，命令行打印绑定的打印机名称；托盘模式随后补发一次心跳刷新在线状态。
+1. 校验绑定码必须是 6 位数字，并检查 ServerBaseUrl、本机打印机列表；
+2. 读取 `deviceKey`：
+   - **有**：调用 `POST /api/printers/bind-by-code`（请求头 `X-NC-Device-Key`，
+     请求体 `{ "code": "482913", "printers": [...] }`）；
+   - **无**：调用匿名 `POST /api/agent/register-by-code` 自动注册并绑定，
+     保存 `deviceId` / `machineName` / `heartbeatSeconds` / `deviceKey`（DPAPI），
+     直接采用响应里的 `bindings[]`；
+3. 成功返回 `bindings[]`，命令行打印「已自动注册并绑定 N 台打印机」或「已绑定 N 台打印机」；
+4. 托盘模式随后补发一次心跳刷新在线状态；首次自动注册后还会启动后台心跳/任务轮询。
 
 常见失败：
 
-- 绑定码格式错误 / 不存在或已过期（HTTP 404）；
-- 设备未注册或已失效（HTTP 401/403）→ 重新运行 `--register`；
+- 绑定码格式错误 / 不存在或已被使用（HTTP 404）/ 已过期（HTTP 400）；
+- 请求过于频繁（HTTP 429）→ 稍后重试；
+- 设备已失效（HTTP 401/403）→ 确认服务端设备状态；必要时清理本地设备密钥后重新绑定；
 - 未发现本机打印机 → 检查打印驱动与 Windows 打印服务。
 
 ## 6. 模板渲染（真实 Office COM）
@@ -246,7 +271,7 @@ NewCosmos.Agent.exe
 
 - 打印任务按 `user_id + device_id + printer_name` 绑定，任务固化目标，只有对应 Agent 能认领。
 - `deviceKey` 用 **DPAPI CurrentUser** 加密，绑定当前 Windows 登录账户：
-  - 换账户运行 → 必须重新 `--register`；
+  - 换账户运行 → 需在网页端重新生成绑定码，再运行 `--bind-code` 自动注册；
   - 把 `%APPDATA%\NewCosmos\agent.json` 拷到另一台机器/另一账户 → 解密失败，属预期。
 - Office COM、打印机队列、默认打印机、字体都属于当前 Windows 账户，**不要**用 Windows 服务（Session 0）运行。
 - 建议固定 PC 使用专用账户自动登录，只安装业务需要的打印机，并把模板/输出目录授权给该账户。
@@ -269,7 +294,7 @@ NewCosmos.Agent.exe
 |---|---|
 | `0` | 成功 / Ctrl+C 正常退出 |
 | `1` | 未处理异常（看日志） |
-| `2` | 参数/配置错误（缺 ServerBaseUrl、缺注册令牌、未注册等） |
+| `2` | 参数/配置错误（缺 ServerBaseUrl、绑定码格式错误、未发现打印机等） |
 | `3` | 服务端 API 失败 / 设备未授权 / 数据文件错误 |
 | `4` | 未检测到可用的 Microsoft Office |
 | `5` | 渲染失败（COM/模板/PDF 导出） |
@@ -281,6 +306,7 @@ NewCosmos.Agent.exe
 
 - 配置读取（文件 + 环境变量 + 命令行覆盖）
 - 设备注册 + DPAPI 密钥保存 + ACL 降级
+- 用网页绑定码自动注册并绑定打印机（无需 `--register` / 注册令牌）
 - 心跳循环 / 单次心跳，Ctrl+C 退出
 - 打印机枚举、Office 探测
 - 按绑定码绑定本机打印机（托盘菜单 + 命令行）
@@ -301,7 +327,8 @@ NewCosmos.Agent.exe
 - [ ] `--version`、`--help` 正常。
 - [ ] `--printers` 列出真实打印机并正确标记默认打印机。
 - [ ] 托盘「绑定本机打印机…」输入 6 位码后可绑定，并补发心跳。
-- [ ] `--bind-code 482913` 成功打印绑定的打印机名称；错误码有明确提示。
+- [ ] 全新机器（无 agent.json / 无 deviceKey）直接输入网页绑定码：自动注册、保存密钥并绑定，无需 `--register`。
+- [ ] `--bind-code 482913` 成功打印绑定的打印机名称；过期/已用/频率限制/网络错误有明确提示。
 - [ ] `--probe-office` 显示 Word/Excel 可用。
 - [ ] `--register` 成功写入 `%APPDATA%\NewCosmos\agent.json`，且文件中没有明文 `deviceKey`（DPAPI 正常时）。
 - [ ] `--heartbeat-once` 返回成功；服务端设备列表显示 lastSeen 更新。

@@ -85,7 +85,7 @@ public sealed partial class HttpAgentClient : IAgentClient, IAgentJobClient, IDi
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(deviceKey))
-            throw new AgentApiException(0, "AGENT_DEVICE_KEY_MISSING", "缺少设备密钥，请先运行 --register");
+            throw new AgentApiException(0, "AGENT_DEVICE_KEY_MISSING", "缺少设备密钥，请先用网页绑定码运行 --bind-code 自动注册本机");
 
         using var message = new HttpRequestMessage(HttpMethod.Post, CombineUrl(serverBaseUrl, "/api/agent/heartbeat"))
         {

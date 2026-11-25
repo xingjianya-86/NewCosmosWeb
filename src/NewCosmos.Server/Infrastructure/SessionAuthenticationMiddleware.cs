@@ -19,6 +19,7 @@ public sealed class SessionAuthenticationMiddleware(RequestDelegate next, ILogge
     [
         new("/api/auth/login"),
         new("/api/agent/register"),
+        new("/api/agent/register-by-code"),
         new("/api/agent/heartbeat"),
         new("/api/agent/jobs"),
         new("/api/printers/bind-by-code"),

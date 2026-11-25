@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using NewCosmos.Agent.Configuration;
+using NewCosmos.Agent.Security;
 using NewCosmos.Services.Core;
 using Forms = System.Windows.Forms;
 
@@ -24,7 +25,7 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
 
     private readonly Forms.NotifyIcon _notifyIcon;
     private readonly Icon _icon;
-    private readonly Task<int> _serviceTask;
+    private Task<int>? _serviceTask;
     private bool _disposed;
 
     public TrayApplicationContext(
@@ -50,16 +51,51 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
         };
         _notifyIcon.DoubleClick += (_, _) => OpenLogDirectory();
 
-        // 线程池执行：不捕获 WinForms 同步上下文。
-        _serviceTask = Task.Run(() => AgentServiceRunner.RunHeartbeatAndWorkerAsync(
-            _settings, _configFilePath, _client, _client, _logger, _cts));
+        // 已注册：立即启动心跳/任务轮询；未注册：等用户用网页绑定码完成自动注册后再启动，
+        // 避免后台循环因缺少 deviceKey 立即退出。
+        if (!string.IsNullOrWhiteSpace(DeviceKeyStore.Load(_settings, _configFilePath, _logger)))
+        {
+            StartBackgroundService();
+        }
+        else
+        {
+            _logger.Info("[Tray] 尚未绑定设备：请右键「绑定本机打印机…」输入网页绑定码，首次使用会自动注册本机。");
+            ShowUnboundHint();
+        }
 
-        _ = ObserveServiceAsync();
         _logger.Info($"[Tray] 托盘已启动: Machine={_settings.MachineName}");
     }
 
     /// <summary>托盘退出后由 Program 等待后台循环收尾并返回进程退出码。</summary>
-    public Task<int> Completion => _serviceTask;
+    public Task<int> Completion => _serviceTask ?? Task.FromResult(0);
+
+    private void StartBackgroundService()
+    {
+        if (_serviceTask is { IsCompleted: false })
+            return;
+
+        // 线程池执行：不捕获 WinForms 同步上下文。
+        _serviceTask = Task.Run(() => AgentServiceRunner.RunHeartbeatAndWorkerAsync(
+            _settings, _configFilePath, _client, _client, _logger, _cts));
+        _ = ObserveServiceAsync(_serviceTask);
+        _logger.Info("[Tray] 后台心跳/任务轮询已启动");
+    }
+
+    /// <summary>启动后提示一次：未绑定设备时引导用户输入网页绑定码，而不是要求先 --register。</summary>
+    private void ShowUnboundHint()
+    {
+        var timer = new Forms.Timer { Interval = 1500 };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            timer.Dispose();
+            ShowBalloon(
+                "NewCosmos Agent",
+                "尚未绑定设备。请右键「绑定本机打印机…」输入网页绑定码，首次使用会自动注册本机。",
+                Forms.ToolTipIcon.Info);
+        };
+        timer.Start();
+    }
 
     private Forms.ContextMenuStrip BuildMenu()
     {
@@ -159,6 +195,10 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
 
             if (heartbeatCode != 0)
                 _logger.Warn($"[Tray] 绑定成功后刷新心跳失败（退出码 {heartbeatCode}）");
+
+            // 首次使用没有 deviceKey 时，后台循环此前未启动；自动注册成功后补启动，
+            // 让心跳与任务轮询持续运行（本次绑定已额外补发过一次心跳）。
+            StartBackgroundService();
         }
         catch (Exception ex)
         {
@@ -192,7 +232,7 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
         {
             if (!File.Exists(_configFilePath))
             {
-                ShowBalloon("配置文件不存在", $"{_configFilePath}（首次 --register 后生成）", Forms.ToolTipIcon.Warning);
+                ShowBalloon("配置文件不存在", $"{_configFilePath}（首次绑定成功后生成）", Forms.ToolTipIcon.Warning);
                 return;
             }
 
@@ -217,11 +257,11 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
     }
 
     /// <summary>后台循环异常退出（非用户退出）时给出托盘提示，便于现场发现。</summary>
-    private async Task ObserveServiceAsync()
+    private async Task ObserveServiceAsync(Task<int> serviceTask)
     {
         try
         {
-            var code = await _serviceTask.ConfigureAwait(false);
+            var code = await serviceTask.ConfigureAwait(false);
             if (code == 0 || _cts.IsCancellationRequested) return;
 
             var message = code == 3

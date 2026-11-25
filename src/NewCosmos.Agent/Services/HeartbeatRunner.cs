@@ -25,7 +25,9 @@ public static class HeartbeatRunner
         var deviceKey = DeviceKeyStore.Load(settings, configFilePath, logger);
         if (string.IsNullOrWhiteSpace(deviceKey))
         {
-            AgentConsole.Error($"未找到设备密钥（{settings.DeviceKeyFile}）。请先运行: NewCosmos.Agent.exe --register");
+            AgentConsole.Error(
+                $"未找到设备密钥（{settings.DeviceKeyFile}）。请先在网页端生成绑定码，再运行: " +
+                "NewCosmos.Agent.exe --bind-code <绑定码>（首次使用会自动注册本机）。");
             return 2;
         }
 
@@ -87,7 +89,7 @@ public static class HeartbeatRunner
 
                 if (ex.IsUnauthorized)
                 {
-                    AgentConsole.Error("设备不存在或被禁用，停止心跳。请确认服务端设备状态，必要时重新注册。");
+                    AgentConsole.Error("设备不存在或被禁用，停止心跳。请确认服务端设备状态；如需重新绑定，请清理本地设备密钥后使用网页绑定码重新注册。");
                     return 3;
                 }
 

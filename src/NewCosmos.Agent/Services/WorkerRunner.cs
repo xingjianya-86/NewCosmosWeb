@@ -23,7 +23,9 @@ public static class WorkerRunner
         var deviceKey = DeviceKeyStore.Load(settings, configFilePath, logger);
         if (string.IsNullOrWhiteSpace(deviceKey))
         {
-            AgentConsole.Error($"未找到设备密钥（{settings.DeviceKeyFile}）。请先运行: NewCosmos.Agent.exe --register");
+            AgentConsole.Error(
+                $"未找到设备密钥（{settings.DeviceKeyFile}）。请先在网页端生成绑定码，再运行: " +
+                "NewCosmos.Agent.exe --bind-code <绑定码>（首次使用会自动注册本机）。");
             return 2;
         }
 

@@ -84,6 +84,23 @@ public sealed record AgentRegisterResponse(
     string DeviceKey,
     int HeartbeatSeconds);
 
+/// <summary>
+/// POST /api/agent/register-by-code 请求体：未注册 Agent 仅凭网页绑定码完成注册并绑定打印机。
+/// userId 由绑定码在服务端解析，请求体不接受 userId。
+/// </summary>
+public sealed record AgentRegisterByCodeRequest(
+    string? Code,
+    string? MachineName,
+    string? AgentVersion,
+    List<AgentPrinterReport>? Printers);
+
+/// <summary>POST /api/agent/register-by-code 响应：新设备密钥 + 心跳周期 + 本次写入的绑定。</summary>
+public sealed record AgentRegisterByCodeResponse(
+    long DeviceId,
+    string DeviceKey,
+    int HeartbeatSeconds,
+    IReadOnlyList<PrinterBindingDto> Bindings);
+
 public sealed record AgentHeartbeatRequest(
     string? AgentVersion,
     List<AgentPrinterReport>? Printers);
