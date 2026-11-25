@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft, ArrowRight, Document, Refresh, Search, Tickets } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowRight, Document, Plus, Refresh, Search, Tickets } from '@element-plus/icons-vue'
 import { getAssetVerificationSummary } from '@/api/assetVerification'
 import { getErrorMessage } from '@/api/http'
 import type { AssetVerificationSummary } from '@/types/assetVerification'
@@ -38,6 +38,12 @@ const stats = computed<StatCapsule[]>(() => [
 
 /* 文案与旧版 Pages/AssetVerification/AssetVerificationHomePage.xaml 一致。 */
 const featureCards: FeatureCard[] = [
+  {
+    title: '发起核查',
+    description: '录入申请人与授权人，提交快速经济状况核查',
+    icon: Plus,
+    to: '/asset-verification/new',
+  },
   {
     title: '快速经济核对',
     description: '发起单户家庭经济状况核对申请',

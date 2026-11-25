@@ -110,6 +110,12 @@ const router = createRouter({
           meta: { title: '家庭经济状况核对' },
         },
         {
+          path: 'asset-verification/new',
+          name: 'asset-verification-new',
+          component: () => import('@/views/asset-verification/AssetQuickCreateView.vue'),
+          meta: { title: '快速资产核查申请' },
+        },
+        {
           path: 'asset-verification/tasks',
           name: 'asset-verification-tasks',
           component: () => import('@/views/asset-verification/AssetTaskListView.vue'),

@@ -56,3 +56,65 @@ export function listMonthlyAssetTasks(
     .get<AssetTaskListResponse>('/asset-verification/monthly', { params })
     .then((response) => response.data)
 }
+
+/** 当前经办人机构区划与村社区列表。 */
+export interface AssetOperatorVillage {
+  id: number
+  name: string
+  code: string
+}
+
+export interface AssetOperatorContext {
+  townId: number | null
+  countyId: number | null
+  townName: string
+  countyName: string
+  unitName: string
+  operatorName: string
+  operatorAccount: string
+  villages: AssetOperatorVillage[]
+}
+
+export interface QuickAssetApplicantPayload {
+  name: string
+  idType: string
+  idCard: string
+  relationship: string
+  isHead: boolean
+}
+
+export interface QuickAssetCheckPayload {
+  applicationDate: string
+  community: string
+  addressDetail: string
+  contactPhone: string
+  applicationReason: string
+  isAgent: boolean
+  agentName: string
+  agentIdType: string
+  agentIdCard: string
+  agentRelationship: string
+  overwriteExisting: boolean
+  applicants: QuickAssetApplicantPayload[]
+}
+
+export interface QuickAssetCheckCreated {
+  batchId: string
+  count: number
+}
+
+/** 读取当前账号经办乡镇、经办单位与村社区。 */
+export function getAssetOperatorContext(): Promise<AssetOperatorContext> {
+  return apiHttp
+    .get<AssetOperatorContext>('/asset-verification/operator-context')
+    .then((response) => response.data)
+}
+
+/** 提交快速资产核查申请（复用 Core SubmitQuickVerificationAsync）。 */
+export function createQuickAssetCheck(
+  payload: QuickAssetCheckPayload,
+): Promise<QuickAssetCheckCreated> {
+  return apiHttp
+    .post<QuickAssetCheckCreated>('/asset-verification/checks', payload)
+    .then((response) => response.data)
+}
