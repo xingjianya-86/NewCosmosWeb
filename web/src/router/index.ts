@@ -74,6 +74,86 @@ const router = createRouter({
           meta: { title: '渐退期管理' },
         },
         {
+          path: 'social-assistance/college-students',
+          name: 'social-assistance-college-students',
+          component: () => import('@/views/social-assistance/CollegeStudentManagementView.vue'),
+          meta: { title: '大学生管理' },
+        },
+        {
+          path: 'social-assistance/near-relatives',
+          name: 'social-assistance-near-relatives',
+          component: () => import('@/views/social-assistance/NearRelativeListView.vue'),
+          meta: { title: '近亲属备案' },
+        },
+        {
+          path: 'social-assistance/near-relatives/new',
+          name: 'social-assistance-near-relative-new',
+          component: () => import('@/views/social-assistance/NearRelativeEntryView.vue'),
+          meta: { title: '近亲属备案录入' },
+        },
+        {
+          path: 'social-assistance/near-relatives/:id/edit',
+          name: 'social-assistance-near-relative-edit',
+          component: () => import('@/views/social-assistance/NearRelativeEntryView.vue'),
+          meta: { title: '近亲属备案编辑' },
+        },
+        {
+          path: 'social-assistance/quick-verify',
+          name: 'social-assistance-quick-verify',
+          component: () => import('@/views/social-assistance/QuickVerifyView.vue'),
+          meta: { title: '快速核验 · 模拟测算' },
+        },
+        {
+          path: 'social-assistance/temp-relief',
+          name: 'social-assistance-temp-relief',
+          component: () => import('@/views/social-assistance/temp-relief/TempReliefListView.vue'),
+          meta: { title: '临时救助' },
+        },
+        {
+          path: 'social-assistance/temp-relief/new',
+          name: 'social-assistance-temp-relief-new',
+          component: () => import('@/views/social-assistance/temp-relief/TempReliefFormView.vue'),
+          meta: { title: '临时救助申请' },
+        },
+        {
+          path: 'social-assistance/temp-relief/:id/edit',
+          name: 'social-assistance-temp-relief-edit',
+          component: () => import('@/views/social-assistance/temp-relief/TempReliefFormView.vue'),
+          meta: { title: '临时救助申请' },
+        },
+        {
+          path: 'social-assistance/change-management',
+          name: 'social-assistance-change-management',
+          component: () => import('@/views/social-assistance/change/ChangeManagementView.vue'),
+          meta: { title: '保障对象动态管理' },
+        },
+        {
+          path: 'social-assistance/change-management/head/:id',
+          name: 'social-assistance-head-change',
+          component: () => import('@/views/social-assistance/change/HeadChangeView.vue'),
+          meta: { title: '户主变更' },
+        },
+        {
+          path: 'social-assistance/change-management/death/:id',
+          name: 'social-assistance-household-death',
+          component: () =>
+            import('@/views/social-assistance/change/HouseholdDeathChangeView.vue'),
+          meta: { title: '户主死亡变更' },
+        },
+        {
+          path: 'social-assistance/change-management/grace/:id',
+          name: 'social-assistance-grace-confirm',
+          component: () =>
+            import('@/views/social-assistance/change/GracePeriodConfirmView.vue'),
+          meta: { title: '渐退期确认' },
+        },
+        {
+          path: 'social-assistance/monthly-report',
+          name: 'social-assistance-monthly-report',
+          component: () => import('@/views/social-assistance/MonthlyReportView.vue'),
+          meta: { title: '救助月报表' },
+        },
+        {
           path: 'elderly',
           name: 'elderly-home',
           component: () => import('@/views/elderly/ElderlyHomeView.vue'),

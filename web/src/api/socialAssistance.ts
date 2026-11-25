@@ -1,5 +1,6 @@
 import type {
   GracePeriodListResponse,
+  GracePeriodMembersResponse,
   SocialAssistanceModuleSummary,
 } from '@/types/socialAssistance'
 import { apiHttp } from './http'
@@ -23,5 +24,16 @@ export function listGracePeriods(
 ): Promise<GracePeriodListResponse> {
   return apiHttp
     .get<GracePeriodListResponse>('/social-assistance/grace-periods', { params })
+    .then((response) => response.data)
+}
+
+/** 渐退期选中户的家庭成员明细（INCOME_VIEW + 申请数据范围）。 */
+export function listGracePeriodMembers(
+  applicationId: number,
+): Promise<GracePeriodMembersResponse> {
+  return apiHttp
+    .get<GracePeriodMembersResponse>(
+      `/social-assistance/grace-periods/${applicationId}/members`,
+    )
     .then((response) => response.data)
 }

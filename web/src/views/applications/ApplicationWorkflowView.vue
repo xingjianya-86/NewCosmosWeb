@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, h, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -14,9 +14,11 @@ import {
   Search,
 } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
+import { changeApplicationDate, completeApplication } from '@/api/applicationForm'
 import { deleteApplication, getWorkflowSummary, listWorkflow } from '@/api/applicationWorkflow'
 import type { WorkflowItem, WorkflowSummary } from '@/types/applicationWorkflow'
 import NcPageHeader from '@/components/NcPageHeader.vue'
+import WorkflowPhotosDialog from './WorkflowPhotosDialog.vue'
 
 interface WorkflowTab {
   index: number
@@ -78,6 +80,24 @@ const loadError = ref('')
 const summary = ref<WorkflowSummary | null>(null)
 const summaryError = ref('')
 
+/* ── 照片对话框 ────────────────────────────────────────────── */
+const photosVisible = ref(false)
+const photosSubject = ref('')
+const photosApplicationId = ref<number | null>(null)
+const photosAssetCheckId = ref<number | null>(null)
+
+/* ── 改期对话框 ────────────────────────────────────────────── */
+const changeDateVisible = ref(false)
+const changeDateItem = ref<WorkflowItem | null>(null)
+const newDate = ref('')
+const changeDateSubmitting = ref(false)
+
+/* ── 已建档未提交：批量归档 ────────────────────────────────── */
+const selectedIds = ref<number[]>([])
+const batchArchiving = ref(false)
+const batchProgress = ref(0)
+const batchProgressText = ref('')
+
 let requestTicket = 0
 
 const visibleTabs = computed(() =>
@@ -130,6 +150,7 @@ async function load(): Promise<void> {
     pageSize.value = response.pageSize || pageSize.value
     totalCount.value = response.totalCount ?? 0
     totalPages.value = response.totalPages ?? 0
+    selectedIds.value = []
   } catch (error) {
     if (ticket !== requestTicket) return
     items.value = []
@@ -150,6 +171,7 @@ function selectTab(index: number): void {
   if (activeTab.value === index) return
   activeTab.value = index
   page.value = 1
+  selectedIds.value = []
   void load()
 }
 
@@ -175,14 +197,29 @@ function handleSizeChange(value: number): void {
   void load()
 }
 
-type ActionKey = 'view' | 'photo' | 'archive' | 'changeDate' | 'edit' | 'delete'
+type ActionKey =
+  | 'nearRelative'
+  | 'view'
+  | 'photo'
+  | 'archive'
+  | 'output'
+  | 'changeDate'
+  | 'edit'
+  | 'delete'
 
 interface CardAction {
   key: ActionKey
   label: string
-  type: 'primary' | 'info' | 'warning' | 'danger' | 'default'
+  type: 'primary' | 'info' | 'warning' | 'danger' | 'success' | 'default'
 }
 
+/**
+ * 旧版 WorkflowCardItem 的显示条件（XAML 79-140 行 / WorkflowCardItem.cs）：
+ * - 资产核查两 Tab：照片 + 档案制作；
+ * - 草稿：近亲属备案 + 照片 + 改期 + 编辑 + 删除；
+ * - 已建档未提交：近亲属备案 + 照片 + 编辑 + 出文书 + 删除；
+ * - 已完结：近亲属备案 + 查看档案 + 照片。
+ */
 function actionsFor(item: WorkflowItem): CardAction[] {
   if (item.kind === 'asset') {
     return [
@@ -193,7 +230,9 @@ function actionsFor(item: WorkflowItem): CardAction[] {
 
   if (activeTab.value === 2) {
     return [
-      { key: 'changeDate', label: '改期', type: 'info' },
+      { key: 'nearRelative', label: '近亲属备案', type: 'default' },
+      { key: 'photo', label: '照片', type: 'info' },
+      { key: 'changeDate', label: '改期', type: 'default' },
       { key: 'edit', label: '编辑', type: 'warning' },
       { key: 'delete', label: '删除', type: 'danger' },
     ]
@@ -201,21 +240,48 @@ function actionsFor(item: WorkflowItem): CardAction[] {
 
   if (activeTab.value === 3) {
     return [
-      { key: 'view', label: '查看档案', type: 'primary' },
+      { key: 'nearRelative', label: '近亲属备案', type: 'default' },
       { key: 'photo', label: '照片', type: 'info' },
-      { key: 'archive', label: '档案制作', type: 'primary' },
-      { key: 'changeDate', label: '改期', type: 'info' },
       { key: 'edit', label: '编辑', type: 'warning' },
+      { key: 'output', label: '出文书', type: 'success' },
       { key: 'delete', label: '删除', type: 'danger' },
     ]
   }
 
-  return [{ key: 'view', label: '查看档案', type: 'primary' }]
+  return [
+    { key: 'nearRelative', label: '近亲属备案', type: 'default' },
+    { key: 'view', label: '查看档案', type: 'primary' },
+    { key: 'photo', label: '照片', type: 'info' },
+  ]
 }
 
 function handleAction(action: CardAction, item: WorkflowItem): void {
-  if (action.key === 'view' && item.kind === 'application') {
-    void router.push({ name: 'application-detail', params: { id: item.id } })
+  if (action.key === 'nearRelative') {
+    if (item.kind === 'application') {
+      void router.push(`/social-assistance/near-relatives/new?applicationId=${item.id}`)
+    }
+    return
+  }
+
+  if (action.key === 'view') {
+    if (item.kind === 'application') {
+      void router.push({ name: 'application-detail', params: { id: item.id } })
+    }
+    return
+  }
+
+  if (action.key === 'photo') {
+    openPhotos(item)
+    return
+  }
+
+  if (action.key === 'archive' || action.key === 'output') {
+    openArchiveProduction(item)
+    return
+  }
+
+  if (action.key === 'changeDate') {
+    openChangeDate(item)
     return
   }
 
@@ -224,44 +290,58 @@ function handleAction(action: CardAction, item: WorkflowItem): void {
     return
   }
 
-  if (action.key === 'archive') {
-    if (item.kind === 'asset') {
-      void router.push({
-        path: '/applications/new',
-        query: { assetCheckId: String(item.id) },
-      })
-    } else {
-      void router.push(`/applications/${item.id}/edit`)
-    }
-    return
-  }
-
-  if (action.key === 'delete' && activeTab.value === 2 && item.kind === 'application') {
+  if (action.key === 'delete' && item.kind === 'application') {
     void handleDelete(item)
+  }
+}
+
+/** 档案制作/出文书：申请卡片直达档案制作页；资产核查卡片沿用旧版“从核查发起申请”。 */
+function openArchiveProduction(item: WorkflowItem): void {
+  if (item.kind === 'asset') {
+    void router.push({
+      path: '/applications/new',
+      query: { assetCheckId: String(item.id) },
+    })
     return
   }
 
-  ElMessage.info(`「${action.label}」将在下一批开放`)
+  void router.push({
+    path: '/archives/production',
+    query: { applicationId: String(item.id) },
+  })
+}
+
+/** 照片：申请卡片按申请 ID 取（服务端解析身份证），资产核查卡片走已有核查照片接口。 */
+function openPhotos(item: WorkflowItem): void {
+  photosSubject.value = item.name
+  photosApplicationId.value = item.kind === 'application' ? item.id : null
+  photosAssetCheckId.value = item.kind === 'asset' ? item.id : null
+  photosVisible.value = true
 }
 
 async function handleDelete(item: WorkflowItem): Promise<void> {
+  const confirmMessage = h(
+    'div',
+    { style: 'white-space: pre-line; line-height: 1.7;' },
+    [
+      `确定删除「${item.name}」${item.applicationNo ? `（${item.applicationNo}）` : ''}的申请吗？`,
+      '此操作不可恢复。',
+    ].join('\n'),
+  )
+
   try {
-    await ElMessageBox.confirm(
-      `确定删除「${item.name}」的申请草稿吗？删除后不可恢复。`,
-      '删除草稿',
-      {
-        confirmButtonText: '删除',
-        cancelButtonText: '取消',
-        type: 'warning',
-      },
-    )
+    await ElMessageBox.confirm(confirmMessage, '确认删除', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
   } catch {
     return
   }
 
   try {
     await deleteApplication(item.id)
-    ElMessage.success('草稿已删除')
+    ElMessage.success('申请已删除')
     if (items.value.length === 1 && page.value > 1) {
       page.value -= 1
     }
@@ -271,12 +351,190 @@ async function handleDelete(item: WorkflowItem): Promise<void> {
   }
 }
 
+/* ── 改期 ─────────────────────────────────────────────────── */
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+function toDateOnly(value: string | null): string {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value.slice(0, 10)
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+}
+
+function isFutureDate(date: Date): boolean {
+  const endOfToday = new Date()
+  endOfToday.setHours(23, 59, 59, 999)
+  return date.getTime() > endOfToday.getTime()
+}
+
+function openChangeDate(item: WorkflowItem): void {
+  if (item.kind !== 'application') return
+  changeDateItem.value = item
+  newDate.value = toDateOnly(item.createdAt)
+  changeDateVisible.value = true
+}
+
+async function confirmChangeDate(): Promise<void> {
+  const item = changeDateItem.value
+  if (!item || item.kind !== 'application') return
+
+  const target = newDate.value.trim()
+  if (!target) {
+    ElMessage.warning('请选择新的申请日期')
+    return
+  }
+
+  const current = toDateOnly(item.createdAt)
+  if (current && target === current) {
+    ElMessage.info('申请日期未变化，无需修改')
+    return
+  }
+
+  const confirmMessage = h(
+    'div',
+    { style: 'white-space: pre-line; line-height: 1.7;' },
+    [
+      `申请日期：${current || '—'} → ${target}`,
+      '',
+      '修改后将改变该档案的公示窗口、卷号与文书上的申请日期（批次顺延提示随之重算）；已打印的文书不受影响，需重新出文书才会更新。',
+      '',
+      '注意：批次按入户调查日期锚定——若入户日期超出新窗口，系统会自动把它同步到「新申请日 ~ 会议日」之间，否则批次不变。',
+    ].join('\n'),
+  )
+
+  try {
+    await ElMessageBox.confirm(confirmMessage, '确认修改申请日期', {
+      type: 'warning',
+      confirmButtonText: '确认修改',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+
+  changeDateSubmitting.value = true
+  try {
+    const result = await changeApplicationDate(item.id, target)
+    const syncedSurvey = result.surveyDate ? String(result.surveyDate).slice(0, 10) : ''
+    ElMessage.success(
+      syncedSurvey
+        ? `申请日期已改为 ${target}，编号 ${result.applicationNo}；入户调查日期已同步为 ${syncedSurvey}`
+        : `申请日期已改为 ${target}，编号 ${result.applicationNo}`,
+    )
+    changeDateVisible.value = false
+    await Promise.all([loadSummary(), load()])
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '修改申请日期失败'))
+  } finally {
+    changeDateSubmitting.value = false
+  }
+}
+
+/* ── 已建档未提交：批量归档 ───────────────────────────────── */
+
+function isSelected(id: number): boolean {
+  return selectedIds.value.includes(id)
+}
+
+function toggleSelection(id: number, value: string | number | boolean): void {
+  if (value === true) {
+    if (!selectedIds.value.includes(id)) {
+      selectedIds.value = [...selectedIds.value, id]
+    }
+    return
+  }
+
+  selectedIds.value = selectedIds.value.filter((itemId) => itemId !== id)
+}
+
+function selectAllBatch(): void {
+  selectedIds.value = items.value
+    .filter((item) => item.kind === 'application')
+    .map((item) => item.id)
+}
+
+function clearBatchSelection(): void {
+  selectedIds.value = []
+}
+
+async function handleBatchArchive(): Promise<void> {
+  if (batchArchiving.value) return
+
+  const targets = items.value.filter(
+    (item) => item.kind === 'application' && isSelected(item.id),
+  )
+  if (targets.length === 0) {
+    ElMessage.warning('请先勾选要归档的档案卡片')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `将逐户完成归档，共 ${targets.length} 户。归档后档案状态推进为「已完结」，是否继续？`,
+      '确认批量归档',
+      {
+        confirmButtonText: '确认',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+
+  batchArchiving.value = true
+  batchProgress.value = 0
+  batchProgressText.value = ''
+  const failures: string[] = []
+  let successCount = 0
+
+  try {
+    // 逐条串行，避免并发归档压垮服务端；失败不中断后续条目。
+    for (let index = 0; index < targets.length; index += 1) {
+      const item = targets[index]
+      batchProgressText.value = `正在归档 (${index + 1}/${targets.length})：${item.name}`
+
+      try {
+        await completeApplication(item.id)
+        successCount += 1
+        selectedIds.value = selectedIds.value.filter((id) => id !== item.id)
+      } catch (error) {
+        failures.push(`${item.name}：${getErrorMessage(error, '归档失败')}`)
+      }
+
+      batchProgress.value = Math.round(((index + 1) / targets.length) * 100)
+    }
+  } finally {
+    batchArchiving.value = false
+    batchProgressText.value = ''
+  }
+
+  await Promise.all([loadSummary(), load()])
+
+  let message = `批量归档完成：成功 ${successCount} 户`
+  if (failures.length > 0) {
+    message +=
+      `，失败 ${failures.length} 户\n\n` +
+      failures.slice(0, 8).join('\n') +
+      (failures.length > 8 ? `\n...等共 ${failures.length} 户` : '')
+    await ElMessageBox.alert(
+      h('div', { style: 'white-space: pre-line; line-height: 1.7;' }, message),
+      '批量归档',
+      { type: 'warning', confirmButtonText: '确定' },
+    )
+  } else {
+    ElMessage.success(message)
+  }
+}
+
 function formatTime(value: string | null): string {
   if (!value) return '—'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
 }
 
 function formatAmount(value: number | null): string {
@@ -364,6 +622,36 @@ onMounted(() => {
       <el-button link type="primary" @click="load">重新加载</el-button>
     </el-alert>
 
+    <div v-if="activeTab === 3" class="workflow-batch">
+      <div class="workflow-batch__bar">
+        <el-button size="small" :disabled="batchArchiving" @click="selectAllBatch">
+          全选本页
+        </el-button>
+        <el-button size="small" :disabled="batchArchiving" @click="clearBatchSelection">
+          清空选择
+        </el-button>
+        <span class="workflow-batch__hint">
+          勾选后可批量归档（状态推进为已完结）
+        </span>
+        <el-progress
+          v-if="batchArchiving"
+          class="workflow-batch__progress"
+          :percentage="batchProgress"
+          :show-text="false"
+          :stroke-width="8"
+        />
+        <el-button
+          type="primary"
+          size="small"
+          :loading="batchArchiving"
+          @click="handleBatchArchive"
+        >
+          批量归档
+        </el-button>
+      </div>
+      <p v-if="batchArchiving" class="workflow-batch__text">{{ batchProgressText }}</p>
+    </div>
+
     <section class="workflow-list" aria-live="polite">
       <el-skeleton v-if="loading && items.length === 0" :rows="6" animated />
 
@@ -376,6 +664,13 @@ onMounted(() => {
         >
           <header class="workflow-card__head">
             <div class="workflow-card__identity">
+              <el-checkbox
+                v-if="activeTab === 3 && item.kind === 'application'"
+                class="workflow-card__check"
+                :model-value="isSelected(item.id)"
+                :disabled="batchArchiving"
+                @change="toggleSelection(item.id, $event)"
+              />
               <strong class="workflow-card__name">{{ item.name }}</strong>
               <span class="workflow-status" :class="`tone-${item.statusTone}`">
                 {{ item.statusText }}
@@ -395,7 +690,7 @@ onMounted(() => {
                 :key="action.key"
                 size="small"
                 :type="action.type === 'default' ? undefined : action.type"
-                :plain="action.key === 'photo' || action.key === 'changeDate'"
+                :plain="action.key === 'photo'"
                 @click="handleAction(action, item)"
               >
                 {{ action.label }}
@@ -466,6 +761,42 @@ onMounted(() => {
         @size-change="handleSizeChange"
       />
     </footer>
+
+    <el-dialog
+      v-model="changeDateVisible"
+      title="修改申请日期"
+      width="min(420px, 92vw)"
+      append-to-body
+    >
+      <p class="workflow-date__hint">
+        修改申请日期会同步重算该档案的批次、公示窗口与文书日期；入户日期由服务端同步。
+      </p>
+      <el-date-picker
+        v-model="newDate"
+        class="workflow-date__picker"
+        type="date"
+        format="YYYY-MM-DD"
+        value-format="YYYY-MM-DD"
+        placeholder="选择申请日期"
+        :disabled-date="isFutureDate"
+        :disabled="changeDateSubmitting"
+      />
+      <template #footer>
+        <el-button :disabled="changeDateSubmitting" @click="changeDateVisible = false">
+          取消
+        </el-button>
+        <el-button type="primary" :loading="changeDateSubmitting" @click="confirmChangeDate">
+          确认修改
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <WorkflowPhotosDialog
+      v-model="photosVisible"
+      :subject="photosSubject"
+      :application-id="photosApplicationId"
+      :asset-check-id="photosAssetCheckId"
+    />
   </div>
 </template>
 
@@ -585,6 +916,65 @@ onMounted(() => {
 
 .workflow-error {
   margin: 10px 16px 0;
+}
+
+/* ── 已建档未提交：批量归档工具条 ───────────────────────────── */
+.workflow-batch {
+  padding: 10px 16px 0;
+  background-color: var(--nc-paper-2);
+}
+
+.workflow-batch__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  background-color: #5b6770;
+}
+
+.workflow-batch__bar .el-button + .el-button {
+  margin-left: 0;
+}
+
+.workflow-batch__hint {
+  flex: 1;
+  min-width: 160px;
+  color: #fff;
+  font-size: 13px;
+  text-align: right;
+}
+
+.workflow-batch__progress {
+  width: 110px;
+  flex: none;
+}
+
+.workflow-batch__progress :deep(.el-progress-bar__outer) {
+  background-color: rgba(255, 255, 255, 0.28);
+}
+
+.workflow-batch__text {
+  margin: 6px 0 0;
+  color: var(--nc-seal-dark);
+  font-size: 13px;
+}
+
+.workflow-card__check {
+  flex: none;
+  margin-right: 2px;
+}
+
+/* ── 改期对话框 ─────────────────────────────────────────────── */
+.workflow-date__hint {
+  margin: 0 0 12px;
+  color: var(--nc-muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.workflow-date__picker {
+  width: 100%;
 }
 
 /* ── 卡片列表 ───────────────────────────────────────────────── */
@@ -766,6 +1156,11 @@ onMounted(() => {
 
   .workflow-search__input {
     flex-basis: 100%;
+  }
+
+  .workflow-batch__hint {
+    flex-basis: 100%;
+    text-align: left;
   }
 
   .workflow-card__head {

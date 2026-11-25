@@ -19,6 +19,9 @@ public static class SocialAssistanceEndpoints
     {
         app.MapGet("/api/social-assistance/summary", GetSummaryAsync);
         app.MapGet("/api/social-assistance/grace-periods", ListGracePeriodsAsync);
+        app.MapGet(
+            "/api/social-assistance/grace-periods/{applicationId:long}/members",
+            ListGracePeriodMembersAsync);
         return app;
     }
 
@@ -75,6 +78,47 @@ public static class SocialAssistanceEndpoints
             page ?? 1,
             pageSize ?? GracePeriodQueryService.DefaultPageSize,
             keyword,
+            ct);
+
+        return result.IsFailure
+            ? ApiErrors.FromResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// 渐退期选中户的家庭成员明细：INCOME_VIEW + 申请数据范围（越权按 404 不泄露存在性）。
+    /// </summary>
+    private static async Task<IResult> ListGracePeriodMembersAsync(
+        HttpContext context,
+        long applicationId,
+        INewPermissionService permissions,
+        IDatabaseService database,
+        DataScopeFilterBuilder dataScope,
+        IFamilyMemberService familyMembers,
+        ILoggerService logger,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.INCOME_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        var userId = context.GetUserId();
+        if (userId is null)
+        {
+            return ApiErrors.Write(context, StatusCodes.Status401Unauthorized,
+                ApiErrorCodes.AuthRequired, "请先登录");
+        }
+
+        var result = await GracePeriodMemberQueryService.ListAsync(
+            database,
+            dataScope,
+            familyMembers,
+            logger,
+            userId.Value,
+            applicationId,
             ct);
 
         return result.IsFailure

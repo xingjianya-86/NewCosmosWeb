@@ -86,6 +86,11 @@ function backToList(): void {
   void router.push({ name: 'applications' })
 }
 
+function editDraft(): void {
+  if (!detail.value) return
+  void router.push(`/applications/${detail.value.id}/edit`)
+}
+
 watch(
   () => route.params.id,
   () => {
@@ -107,8 +112,12 @@ onMounted(() => {
     >
       <template #actions>
         <el-button :icon="ArrowLeft" @click="backToList">返回列表</el-button>
-        <el-button :icon="Edit" disabled title="编辑与提交功能将在下一批上线">
-          编辑（即将上线）
+        <el-button
+          v-if="detail?.status === 'Draft'"
+          :icon="Edit"
+          @click="editDraft"
+        >
+          编辑草稿
         </el-button>
       </template>
     </NcPageHeader>

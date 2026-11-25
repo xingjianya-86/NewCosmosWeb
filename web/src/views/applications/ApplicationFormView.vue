@@ -67,6 +67,13 @@ const assetCheckId = computed(() => {
   return text.trim()
 })
 
+/** 动态管理/渐退期「经济复核」入口：Web 端 Review 模式尚未开放，页面显式提示，避免静默只读。 */
+const isReviewRequest = computed(() => {
+  const value = route.query.mode
+  const text = Array.isArray(value) ? (value[0] ?? '') : (value ?? '')
+  return text === 'review'
+})
+
 const currentStep = computed(() => form.value.currentStep)
 const basicIssues = computed(() => validateBasic(form.value.basic))
 const step1Valid = computed(() => basicIssues.value.length === 0)
@@ -393,6 +400,16 @@ onMounted(() => {
       </div>
     </header>
 
+    <el-alert
+      v-if="isReviewRequest"
+      class="review-notice"
+      type="warning"
+      :closable="false"
+      show-icon
+      title="经济复核（Review 模式）尚未在 Web 端开放"
+      description="当前页面仅展示档案信息，已审批档案不能在此保存。请在 PC 端完成经济复核后刷新档案。"
+    />
+
     <!-- 步骤卡片条：旧版横向 5 卡 + 连接线 -->
     <section class="form-steps" aria-label="办理步骤">
       <div class="step-scroll">
@@ -705,6 +722,10 @@ onMounted(() => {
 }
 
 /* ── 步骤卡片条 ───────────────────────────────────────────────── */
+.review-notice {
+  margin: 10px 20px 0;
+}
+
 .form-steps {
   padding: 12px 20px;
   border-bottom: 1px solid var(--nc-line-faint);

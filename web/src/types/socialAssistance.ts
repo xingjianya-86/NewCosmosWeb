@@ -19,6 +19,24 @@ export interface GracePeriodListItem {
   daysLeft: number
   status: 'Active' | 'Expired' | string
   statusText: string
+  gracePeriodMonths: number | null
+  durationText: string
+  originalClassification: string
+}
+
+export interface GracePeriodMember {
+  id: number
+  name: string
+  relationship: string
+  relationshipText: string
+  age: number | null
+  idCard: string
+  annualIncome: number
+}
+
+export interface GracePeriodMembersResponse {
+  applicationId: number
+  items: GracePeriodMember[]
 }
 
 export interface GracePeriodListResponse {

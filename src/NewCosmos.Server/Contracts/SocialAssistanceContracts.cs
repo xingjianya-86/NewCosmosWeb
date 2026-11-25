@@ -31,6 +31,24 @@ public sealed record GracePeriodListItemDto(
     DateTime? EndDate,
     int DaysLeft,
     string Status,
-    string StatusText);
+    string StatusText,
+    int? GracePeriodMonths,
+    string DurationText,
+    string OriginalClassification);
+
+/// <summary>渐退期选中户的家庭成员明细（户主+共同生活成员，已排除赡养与死亡成员）。</summary>
+public sealed record GracePeriodMembersResponse(
+    long ApplicationId,
+    IReadOnlyList<GracePeriodMemberDto> Items);
+
+/// <summary>家庭成员行：关系同时给出代码与字典显示文本；身份证与旧版一致展示完整值。</summary>
+public sealed record GracePeriodMemberDto(
+    long Id,
+    string Name,
+    string Relationship,
+    string RelationshipText,
+    int? Age,
+    string IdCard,
+    decimal AnnualIncome);
 
 #endregion

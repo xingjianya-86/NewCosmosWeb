@@ -39,6 +39,7 @@ public static class GracePeriodQueryService
                  gp.start_date AS grace_period_start_date,
                  gp.end_date AS grace_period_end_date,
                  gp.grace_period_months,
+                 gp.original_classification,
                  (gp.end_date >= CURRENT_DATE) AS is_active_period,
                  (gp.end_date - CURRENT_DATE) AS days_left";
 
@@ -131,7 +132,12 @@ public static class GracePeriodQueryService
                     row.GracePeriodEndDate,
                     row.DaysLeft,
                     isActive ? ApplicationStatusCodes.ACTIVE : StatusExpired,
-                    isActive ? "进行中" : "已到期"));
+                    isActive ? "进行中" : "已到期",
+                    row.GracePeriodMonths,
+                    isActive
+                        ? $"剩 {Math.Abs(row.DaysLeft)} 天"
+                        : $"逾期 {Math.Abs(row.DaysLeft)} 天",
+                    row.OriginalClassification ?? string.Empty));
             }
 
             var totalPages = (int)((totalCount + effectivePageSize - 1) / effectivePageSize);
@@ -143,6 +149,57 @@ public static class GracePeriodQueryService
         {
             logger.Error($"查询渐退期列表异常: {ex.Message}");
             return Result.Failure<GracePeriodListResponse>(ErrorCodes.DB_QUERY_ERROR, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 校验申请档案是否在当前用户的数据范围内（成员明细接口的越权闸门）。
+    /// 口径与列表筛选一致：nc_biz_applications + DataScopeTarget.Applications，未命中按 404 处理。
+    /// </summary>
+    public static async Task<Result<bool>> IsApplicationInScopeAsync(
+        IDatabaseService database,
+        DataScopeFilterBuilder dataScope,
+        ILoggerService logger,
+        int userId,
+        long applicationId,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            if (applicationId <= 0)
+            {
+                return Result.Failure<bool>(ErrorCodes.VALIDATION_FAILED, "申请 id 无效");
+            }
+
+            // $1 申请 id，数据范围参数从 $2 开始。
+            var scope = await dataScope.BuildAsync(
+                userId, DataScopeTarget.Applications, "a", 2, ct);
+
+            var sql = "SELECT COUNT(*) FROM nc_biz_applications a " +
+                      "WHERE a.id = $1 AND a.deleted_at IS NULL";
+            if (!scope.IsEmpty)
+            {
+                sql += " AND " + scope.Sql;
+            }
+
+            var parameters = new List<object?> { applicationId };
+            parameters.AddRange(scope.Parameters);
+
+            var countResult = await database.ExecuteScalarAsync<long>(
+                sql, ct, parameters.ToArray());
+            if (countResult.IsFailure)
+            {
+                logger.Warn(
+                    $"渐退期成员范围校验失败: {countResult.ErrorCode} {countResult.Message}");
+                return Result.Failure<bool>(countResult.ErrorCode!, countResult.Message!);
+            }
+
+            return Result.Success(countResult.Value > 0);
+        }
+        catch (Exception ex)
+        {
+            logger.Error($"渐退期成员范围校验异常: {ex.Message}");
+            return Result.Failure<bool>(ErrorCodes.DB_QUERY_ERROR, ex.Message);
         }
     }
 }
@@ -159,6 +216,7 @@ public sealed class GracePeriodListRow
     public DateTime? GracePeriodStartDate { get; set; }
     public DateTime? GracePeriodEndDate { get; set; }
     public int? GracePeriodMonths { get; set; }
+    public string? OriginalClassification { get; set; }
     public bool IsActivePeriod { get; set; }
     public int DaysLeft { get; set; }
 }

@@ -60,19 +60,19 @@ const featureCards: FeatureCard[] = [
     title: '保障对象动态管理',
     description: '户主变更、成员增减、死亡减员',
     icon: UserFilled,
-    to: '/coming-soon/change-management',
+    to: '/social-assistance/change-management',
   },
   {
     title: '临时救助',
     description: '急难型与支出型临时救助办理',
     icon: Star,
-    to: '/coming-soon/temp-relief',
+    to: '/social-assistance/temp-relief',
   },
   {
     title: '救助月报表',
     description: '按月生成、导出救助统计报表',
     icon: DataBoard,
-    to: '/coming-soon/social-report',
+    to: '/social-assistance/monthly-report',
   },
   {
     title: '渐退期管理',
@@ -84,19 +84,19 @@ const featureCards: FeatureCard[] = [
     title: '大学生管理',
     description: '18-23周岁家庭成员大学生档案关联与毕业管理',
     icon: Reading,
-    to: '/coming-soon/college-student',
+    to: '/social-assistance/college-students',
   },
   {
     title: '近亲属备案',
     description: '工作人员近亲属享受救助备案名册维护',
     icon: Notebook,
-    to: '/coming-soon/near-relative',
+    to: '/social-assistance/near-relatives',
   },
   {
     title: '快速核验·模拟测算',
     description: '身份证一键核验土地/补贴/保障身份，收入与标准试算',
     icon: Search,
-    to: '/coming-soon/quick-verify',
+    to: '/social-assistance/quick-verify',
   },
 ]
 

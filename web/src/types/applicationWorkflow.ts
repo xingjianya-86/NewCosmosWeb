@@ -46,3 +46,13 @@ export interface WorkflowListResponse {
   totalCount: number
   totalPages: number
 }
+
+/** 工作流「照片」对话框条目，对应 server/Contracts/ApplicationWorkflowPhotoContracts.cs。 */
+export interface WorkflowPhoto {
+  id: number
+  category: string
+  photoName: string
+  format: string
+  /** 服务端已拼好的 data:{mime};base64,... */
+  dataUrl: string
+}
