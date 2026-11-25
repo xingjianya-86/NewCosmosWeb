@@ -356,40 +356,37 @@ public sealed class TemplateJobRenderer : ITemplateJobRenderer
         TemplateConfig? config)
     {
         var result = new Dictionary<string, string>(fields, StringComparer.Ordinal);
-        if (config == null || config.Fields is not { Count: > 0 } || tableRows.Count == 0) return result;
+        if (config?.Fields is not { Count: > 0 }) return result;
 
-        var hasIndexedFields = config.Fields.Any(field => TryGetIndexedKey(field?.FieldKey, out _, out _));
-        if (!hasIndexedFields) return result;
-
-        var maxIndexByBase = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var field in config.Fields)
+        // 索引槽展平（tableRows 为空时跳过，月报批量把数据直接放在 fields 里）。
+        if (tableRows.Count > 0)
         {
-            if (!TryGetIndexedKey(field?.FieldKey, out var baseKey, out var index)) continue;
-            if (!maxIndexByBase.TryGetValue(baseKey, out var existing) || index > existing)
-                maxIndexByBase[baseKey] = index;
-        }
-
-        if (maxIndexByBase.Count == 0) return result;
-
-        for (var i = 0; i < tableRows.Count; i++)
-        {
-            var suffix = i + 1;
-            foreach (var (key, value) in tableRows[i])
+            var maxIndexByBase = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var field in config.Fields)
             {
-                if (maxIndexByBase.ContainsKey(key))
-                    result[$"{key}_{suffix}"] = value;
+                if (!TryGetIndexedKey(field?.FieldKey, out var baseKey, out var index)) continue;
+                if (!maxIndexByBase.TryGetValue(baseKey, out var existing) || index > existing)
+                    maxIndexByBase[baseKey] = index;
+            }
+
+            for (var i = 0; i < tableRows.Count; i++)
+            {
+                var suffix = i + 1;
+                foreach (var (key, value) in tableRows[i])
+                {
+                    if (maxIndexByBase.ContainsKey(key))
+                        result[$"{key}_{suffix}"] = value;
+                }
             }
         }
 
-        // 没有数据行的槽位清空，避免模板残留未替换的占位符。
-        foreach (var (baseKey, maxIndex) in maxIndexByBase)
+        // 与旧版 PrintService.FillTemplateEngineAsync 一致：config 里声明了、fields 里没有的字段，
+        // 一律补 DefaultValue ?? ""。这样模板中未使用的行/槽位会被清空，不会残留 {占位符}。
+        foreach (var mapping in config.Fields)
         {
-            for (var i = 1; i <= maxIndex; i++)
-            {
-                var key = $"{baseKey}_{i}";
-                if (!result.ContainsKey(key))
-                    result[key] = string.Empty;
-            }
+            if (string.IsNullOrEmpty(mapping?.FieldKey)) continue;
+            if (!result.ContainsKey(mapping.FieldKey))
+                result[mapping.FieldKey] = mapping.DefaultValue ?? string.Empty;
         }
 
         return result;

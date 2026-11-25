@@ -537,8 +537,10 @@ public class PrintExecuteService : BaseService, IPrintExecuteService
         List<Dictionary<string, string>> tableRows,
         TemplateConfig config)
     {
-        if (tableRows == null || tableRows.Count == 0 || config == null)
+        if (config == null)
             return new Dictionary<string, string>(fields, StringComparer.Ordinal);
+
+        var result = new Dictionary<string, string>(fields, StringComparer.Ordinal);
 
         // 始终检测 config.Fields 中是否有索引字段（不依赖 config.Tables）
         var hasIndexedFields = config.Fields.Any(f =>
@@ -547,46 +549,54 @@ public class PrintExecuteService : BaseService, IPrintExecuteService
             return idx > 0 && idx < f.FieldKey.Length - 1
                 && int.TryParse(f.FieldKey[(idx + 1)..], out _);
         });
-        if (!hasIndexedFields)
-            return new Dictionary<string, string>(fields, StringComparer.Ordinal);
 
-        var result = new Dictionary<string, string>(fields, StringComparer.Ordinal);
-
-        var maxIndexByBase = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var field in config.Fields)
+        if (hasIndexedFields && tableRows is { Count: > 0 })
         {
-            var idx = field.FieldKey.LastIndexOf('_');
-            if (idx <= 0 || idx >= field.FieldKey.Length - 1) continue;
-            if (!int.TryParse(field.FieldKey[(idx + 1)..], out var num)) continue;
-            var baseKey = field.FieldKey[..idx];
-            if (!maxIndexByBase.TryGetValue(baseKey, out var existing) || num > existing)
-                maxIndexByBase[baseKey] = num;
-        }
-
-        if (maxIndexByBase.Count == 0)
-            return result;
-
-        for (var i = 0; i < tableRows.Count; i++)
-        {
-            var suffix = i + 1;
-            foreach (var kv in tableRows[i])
+            var maxIndexByBase = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var field in config.Fields)
             {
-                if (maxIndexByBase.ContainsKey(kv.Key))
-                    result[$"{kv.Key}_{suffix}"] = kv.Value;
+                var idx = field.FieldKey.LastIndexOf('_');
+                if (idx <= 0 || idx >= field.FieldKey.Length - 1) continue;
+                if (!int.TryParse(field.FieldKey[(idx + 1)..], out var num)) continue;
+                var baseKey = field.FieldKey[..idx];
+                if (!maxIndexByBase.TryGetValue(baseKey, out var existing) || num > existing)
+                    maxIndexByBase[baseKey] = num;
+            }
+
+            if (maxIndexByBase.Count > 0)
+            {
+                for (var i = 0; i < tableRows.Count; i++)
+                {
+                    var suffix = i + 1;
+                    foreach (var kv in tableRows[i])
+                    {
+                        if (maxIndexByBase.ContainsKey(kv.Key))
+                            result[$"{kv.Key}_{suffix}"] = kv.Value;
+                    }
+                }
+
+                foreach (var (baseKey, maxIdx) in maxIndexByBase)
+                {
+                    // 按各索引组实际已填充值决定置空范围（从 _1 起，而非 tableRows.Count+1）：
+                    // 1) 由 ViewModel 直接填充、与 tableRows 无关的索引（如 SUPPORTER_*/SHARED_*）真实值被保留；
+                    // 2) 无数据的槽位全部清空（含 _1），避免残留未替换占位符。
+                    for (var i = 1; i <= maxIdx; i++)
+                    {
+                        var key = $"{baseKey}_{i}";
+                        if (!result.ContainsKey(key))
+                            result[key] = string.Empty;
+                    }
+                }
             }
         }
 
-        foreach (var (baseKey, maxIdx) in maxIndexByBase)
+        // 与旧版 PrintService.FillTemplateEngineAsync 一致：config 里声明了、fields 里没有的字段，
+        // 一律补 DefaultValue ?? ""。这样模板中未使用的行/槽位会被清空，不会残留 {占位符}。
+        foreach (var mapping in config.Fields)
         {
-            // 按各索引组实际已填充值决定置空范围（从 _1 起，而非 tableRows.Count+1）：
-            // 1) 由 ViewModel 直接填充、与 tableRows 无关的索引（如 SUPPORTER_*/SHARED_*）真实值被保留；
-            // 2) 无数据的槽位全部清空（含 _1），避免残留未替换占位符。
-            for (var i = 1; i <= maxIdx; i++)
-            {
-                var key = $"{baseKey}_{i}";
-                if (!result.ContainsKey(key))
-                    result[key] = string.Empty;
-            }
+            if (string.IsNullOrEmpty(mapping?.FieldKey)) continue;
+            if (!result.ContainsKey(mapping.FieldKey))
+                result[mapping.FieldKey] = mapping.DefaultValue ?? string.Empty;
         }
 
         return result;

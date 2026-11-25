@@ -128,9 +128,13 @@ public static class ElderlyPrintDataBuilder
     {
         return new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            // 批D2 清理（2026-10-16）：原 ELDERLY_ADJUST_NAME/ID_CARD/HUKOU_ADDRESS/FAMILY_ADDRESS 四键
-            // 供给已删（全库 config 读取 0）；下方 REASON/TIME/AMOUNT/PAYBACK_*/ACCEPT_DATE 为 C 类
-            // 保留键（满90月报继续读取），勿动。
+            // 模板 250 config 明确映射：APPLICANT_NAME/APPLICANT_ID_CARD/HUKOU_ADDRESS/FAMILY_ADDRESS
+            // 分别对应 {调整姓名}/{调整身份证号}/{调整户籍地址}/{调整家庭地址}。
+            // 注意：旧版删除的是 ELDERLY_ADJUST_NAME/ID_CARD/... 四个旧键，不是这组通用键。
+            [FieldKeys.APPLICANT_NAME] = row.Name,
+            [FieldKeys.APPLICANT_ID_CARD] = row.IdCard,
+            [FieldKeys.HUKOU_ADDRESS] = row.HukouAddress,
+            [FieldKeys.FAMILY_ADDRESS] = row.FamilyAddress,
             [FieldKeys.ELDERLY_ADJUST_REASON] = ElderlyBenefitConstants.BuildAdjustReasonCheckText(
                 ElderlyBenefitConstants.AdjustReasonAge, false),
             [FieldKeys.ELDERLY_ADJUST_TIME] = monthText,
