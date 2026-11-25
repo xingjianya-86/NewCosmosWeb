@@ -115,6 +115,9 @@ public sealed class ApplicationFormService(
         // 地址分级列（户籍/现住）在主表只有 ID 或合并文本；先统一反解，成员回填可复用。
         var basicDto = await ToBasicDtoAsync(app, ct);
 
+        // 照料人字典列落库为旧版 key，输出统一转中文，避免下拉回显英文代码。
+        var caregiverDtos = (caregiversResult.Value ?? []).Select(ToFormCaregiver).ToList();
+
         var dto = new ApplicationFormDto(
             app.Id,
             app.ApplicationNo ?? string.Empty,
@@ -132,7 +135,7 @@ public sealed class ApplicationFormService(
             ToSurveyDto(surveyResult.Value),
             await ToClassificationDtoAsync(app, ct),
             ToEconomicDetailsDto(economicDetailsResult.Value),
-            caregiversResult.Value ?? [],
+            caregiverDtos,
             visitsResult.Value ?? []);
 
         return Result.Success(dto);
@@ -1112,13 +1115,13 @@ public sealed class ApplicationFormService(
                 Relationship = ToCoreRelationship(dto.Relationship),
                 Gender = NormalizeGender(dto.Gender),
                 Age = dto.Age,
-                Ethnicity = dto.Ethnicity ?? string.Empty,
-                MaritalStatus = dto.MaritalStatus ?? string.Empty,
+                Ethnicity = ToCoreEthnicity(dto.Ethnicity),
+                MaritalStatus = ToCoreMaritalStatus(dto.MaritalStatus),
                 HukouType = dto.HukouType ?? string.Empty,
-                EducationLevel = dto.EducationLevel ?? string.Empty,
-                PoliticalStatus = dto.PoliticalStatus ?? string.Empty,
-                HealthStatus = dto.HealthStatus ?? string.Empty,
-                EmploymentStatus = dto.EmploymentStatus ?? string.Empty,
+                EducationLevel = ToCoreEducationLevel(dto.EducationLevel),
+                PoliticalStatus = ToCorePoliticalStatus(dto.PoliticalStatus),
+                HealthStatus = ToCoreHealthStatus(dto.HealthStatus),
+                EmploymentStatus = ToCoreEmploymentStatus(dto.EmploymentStatus),
                 MainIncomeSource = dto.MainIncomeSource ?? string.Empty,
                 WorkUnit = dto.WorkUnit ?? string.Empty,
                 Position = dto.Position ?? string.Empty,
@@ -1376,7 +1379,9 @@ public sealed class ApplicationFormService(
             supporter.AnnualIncome = existing?.AnnualIncome ?? 0m;
             supporter.WorkCapacity = existing?.WorkCapacity ?? string.Empty;
 
-            supporter.Ethnicity = dto.Ethnicity ?? existing?.Ethnicity ?? string.Empty;
+            supporter.Ethnicity = dto.Ethnicity is null
+                ? existing?.Ethnicity ?? string.Empty
+                : ToCoreEthnicity(dto.Ethnicity);
             supporter.HukouType = dto.HukouType ?? existing?.HukouType ?? string.Empty;
             supporter.WorkUnit = dto.WorkUnit ?? existing?.WorkUnit ?? string.Empty;
             supporter.MainIncomeSource = dto.MainIncomeSource ?? existing?.MainIncomeSource ?? string.Empty;
@@ -1699,7 +1704,7 @@ public sealed class ApplicationFormService(
         application.ApplicantIdCard = (basic.ApplicantIdCard ?? string.Empty).Trim();
         application.ApplicantPhone = basic.Phone ?? string.Empty;
         application.Gender = NormalizeGender(basic.Gender);
-        application.Ethnicity = basic.Ethnicity ?? string.Empty;
+        application.Ethnicity = ToCoreEthnicity(basic.Ethnicity);
         application.HukouType = basic.HukouType ?? string.Empty;
         application.HukouAddress = ComposeHukouAddress(basic);
 
@@ -2191,7 +2196,7 @@ public sealed class ApplicationFormService(
             member.Gender ?? string.Empty,
             FormatDate(member.BirthDate),
             member.Age,
-            member.Ethnicity ?? string.Empty,
+            ToFormEthnicity(member.Ethnicity),
             member.Phone ?? string.Empty,
             member.HukouType ?? string.Empty,
             ToFormHealthStatus(member.HealthStatus),
@@ -2272,7 +2277,7 @@ public sealed class ApplicationFormService(
             member.Phone ?? string.Empty,
             // Address 是旧字段，语义=家庭详细地址，保持与 HomeAddress 同步。
             member.HomeAddress ?? string.Empty,
-            member.Ethnicity ?? string.Empty,
+            ToFormEthnicity(member.Ethnicity),
             ToFormMaritalStatus(member.MaritalStatus),
             ToFormEducationLevel(member.EducationLevel),
             ToFormPoliticalStatus(member.PoliticalStatus),
@@ -2333,7 +2338,7 @@ public sealed class ApplicationFormService(
             familySize > 0 ? familySize : 1,
             supporter.Phone ?? string.Empty,
             supporter.HomeAddress ?? string.Empty,
-            supporter.Ethnicity ?? string.Empty,
+            ToFormEthnicity(supporter.Ethnicity),
             ToFormMaritalStatus(supporter.MaritalStatus),
             ToFormEducationLevel(supporter.EducationLevel),
             ToFormPoliticalStatus(supporter.PoliticalStatus),
@@ -2381,7 +2386,7 @@ public sealed class ApplicationFormService(
             Gender = NormalizeGender(member.Gender),
             Age = member.Age,
             BirthDate = ParseDate(member.BirthDate),
-            Ethnicity = member.Ethnicity ?? string.Empty,
+            Ethnicity = ToCoreEthnicity(member.Ethnicity),
             Phone = member.Phone ?? string.Empty,
             HukouType = member.HukouType ?? string.Empty,
             HealthStatus = healthStatus,
@@ -2610,7 +2615,7 @@ public sealed class ApplicationFormService(
             app.ApplicantName ?? string.Empty,
             app.ApplicantIdCard ?? string.Empty,
             NormalizeGender(app.Gender),
-            app.Ethnicity ?? string.Empty,
+            ToFormEthnicity(app.Ethnicity),
             app.ApplicantPhone ?? string.Empty,
             hukou.Province,
             hukou.City,
@@ -3418,116 +3423,211 @@ public sealed class ApplicationFormService(
     // ── 旧版字典 key ↔ 中文显示值（表单只显示中文，落库保留 key） ────────────────
     private static string ToFormEducationLevel(string? value) => value?.Trim() switch
     {
-        "Illiterate" => "文盲/半文盲",
-        "Primary" => "小学",
-        "JuniorHigh" => "初中",
-        "SeniorHigh" => "高中/中专",
-        "College" => "大专",
-        "Bachelor" => "本科",
-        "Postgraduate" => "研究生及以上",
+        "Illiterate" or "文盲" or "文盲/半文盲" => "文盲/半文盲",
+        "Primary" or "小学" => "小学",
+        "JuniorHigh" or "初中" => "初中",
+        "SeniorHigh" or "高中" or "中专" or "高中/中专" => "高中/中专",
+        "College" or "专科" or "大专" => "大专",
+        "Bachelor" or "本科" => "本科",
+        "Postgraduate" or "研究生" or "研究生及以上" => "研究生及以上",
         var other => other ?? string.Empty
     };
 
     private static string ToCoreEducationLevel(string? value) => value?.Trim() switch
     {
-        "文盲/半文盲" => "Illiterate",
-        "小学" => "Primary",
-        "初中" => "JuniorHigh",
-        "高中/中专" => "SeniorHigh",
-        "大专" => "College",
-        "本科" => "Bachelor",
-        "研究生及以上" => "Postgraduate",
+        "Illiterate" or "文盲" or "文盲/半文盲" => "Illiterate",
+        "Primary" or "小学" => "Primary",
+        "JuniorHigh" or "初中" => "JuniorHigh",
+        "SeniorHigh" or "高中" or "中专" or "高中/中专" => "SeniorHigh",
+        "College" or "专科" or "大专" => "College",
+        "Bachelor" or "本科" => "Bachelor",
+        "Postgraduate" or "研究生" or "研究生及以上" => "Postgraduate",
         var other => other ?? string.Empty
     };
 
     private static string ToFormMaritalStatus(string? value) => value?.Trim() switch
     {
-        "Single" => "未婚",
-        "Married" => "已婚",
-        "Widowed" => "丧偶",
-        "Divorced" => "离婚",
-        "Other" => "其他",
+        "Single" or "未婚" => "未婚",
+        "Married" or "已婚" => "已婚",
+        "Widowed" or "丧偶" => "丧偶",
+        "Divorced" or "离婚" => "离婚",
+        "Other" or "其他" => "其他",
         var other => other ?? string.Empty
     };
 
     private static string ToCoreMaritalStatus(string? value) => value?.Trim() switch
     {
-        "未婚" => "Single",
-        "已婚" => "Married",
-        "丧偶" => "Widowed",
-        "离婚" => "Divorced",
-        "其他" => "Other",
+        "Single" or "未婚" => "Single",
+        "Married" or "已婚" => "Married",
+        "Widowed" or "丧偶" => "Widowed",
+        "Divorced" or "离婚" => "Divorced",
+        "Other" or "其他" => "Other",
         var other => other ?? string.Empty
     };
 
     private static string ToFormPoliticalStatus(string? value) => value?.Trim() switch
     {
-        "CPCMember" => "中共党员",
-        "CYLMembers" or "CYLCadre" => "共青团员",
-        "Masses" => "群众",
-        "DemocraticParty" => "民主党派",
-        "Other" => "其他",
+        "CPCMember" or "中共党员" => "中共党员",
+        "CYLMembers" or "CYLCadre" or "共青团员" => "共青团员",
+        "Masses" or "群众" => "群众",
+        "DemocraticParty" or "民主党派" => "民主党派",
+        "Other" or "其他" => "其他",
         var other => other ?? string.Empty
     };
 
     private static string ToCorePoliticalStatus(string? value) => value?.Trim() switch
     {
-        "中共党员" => "CPCMember",
-        "共青团员" => "CYLMembers",
-        "群众" => "Masses",
-        "民主党派" => "DemocraticParty",
-        "其他" => "Other",
+        "CPCMember" or "中共党员" => "CPCMember",
+        "CYLMembers" or "CYLCadre" or "共青团员" => "CYLMembers",
+        "Masses" or "群众" => "Masses",
+        "DemocraticParty" or "民主党派" => "DemocraticParty",
+        "Other" or "其他" => "Other",
+        var other => other ?? string.Empty
+    };
+
+    /// <summary>旧版民族字典 key ↔ 中文；历史前端 key "Mongolian" 归一为字典 key "Mongol"。</summary>
+    private static string ToFormEthnicity(string? value) => value?.Trim() switch
+    {
+        "Han" or "汉族" => "汉族",
+        "Mongol" or "Mongolian" or "蒙古族" => "蒙古族",
+        "Hui" or "回族" => "回族",
+        "Tibetan" or "藏族" => "藏族",
+        "Uyghur" or "维吾尔族" => "维吾尔族",
+        "Miao" or "苗族" => "苗族",
+        "Yi" or "彝族" => "彝族",
+        "Zhuang" or "壮族" => "壮族",
+        "Bouyei" or "布依族" => "布依族",
+        "Korean" or "朝鲜族" => "朝鲜族",
+        "Manchu" or "满族" => "满族",
+        "Dong" or "侗族" => "侗族",
+        "Yao" or "瑶族" => "瑶族",
+        "Bai" or "白族" => "白族",
+        "Tujia" or "土家族" => "土家族",
+        "Hani" or "哈尼族" => "哈尼族",
+        "Dai" or "傣族" => "傣族",
+        "Li" or "黎族" => "黎族",
+        "Other" or "其他" => "其他",
+        // 旧前端曾使用、但旧字典未收录的 key：仅做中文回显兼容，保存时仍写回原 key。
+        "Daur" or "达斡尔族" => "达斡尔族",
+        "Xibe" or "锡伯族" => "锡伯族",
+        var other => other ?? string.Empty
+    };
+
+    private static string ToCoreEthnicity(string? value) => value?.Trim() switch
+    {
+        "Han" or "汉族" => "Han",
+        "Mongol" or "Mongolian" or "蒙古族" => "Mongol",
+        "Hui" or "回族" => "Hui",
+        "Tibetan" or "藏族" => "Tibetan",
+        "Uyghur" or "维吾尔族" => "Uyghur",
+        "Miao" or "苗族" => "Miao",
+        "Yi" or "彝族" => "Yi",
+        "Zhuang" or "壮族" => "Zhuang",
+        "Bouyei" or "布依族" => "Bouyei",
+        "Korean" or "朝鲜族" => "Korean",
+        "Manchu" or "满族" => "Manchu",
+        "Dong" or "侗族" => "Dong",
+        "Yao" or "瑶族" => "Yao",
+        "Bai" or "白族" => "Bai",
+        "Tujia" or "土家族" => "Tujia",
+        "Hani" or "哈尼族" => "Hani",
+        "Dai" or "傣族" => "Dai",
+        "Li" or "黎族" => "Li",
+        "Other" or "其他" => "Other",
+        "Daur" or "达斡尔族" => "Daur",
+        "Xibe" or "锡伯族" => "Xibe",
         var other => other ?? string.Empty
     };
 
     private static string ToFormEmploymentStatus(string? value) => value?.Trim() switch
     {
-        "Employed" => "在职",
-        "Unemployed" => "失业",
-        "Farming" => "务农",
-        "Student" => "学生",
-        "Retired" => "退休",
-        "Other" => "其他",
+        "Employed" or "在职" or "务工" or "个体经营" or "灵活就业" or "自谋职业" => "在职",
+        "Unemployed" or "失业" or "无业" or "待业" => "失业",
+        "Farming" or "务农" or "农业" => "务农",
+        "Student" or "学生" or "在校学生" => "学生",
+        "Retired" or "退休" or "离退休" => "退休",
+        "Other" or "其他" => "其他",
         var other => other ?? string.Empty
     };
 
     private static string ToCoreEmploymentStatus(string? value) => value?.Trim() switch
     {
-        "在职" => "Employed",
-        "失业" => "Unemployed",
-        "务农" => "Farming",
-        "学生" => "Student",
-        "退休" => "Retired",
-        "其他" => "Other",
+        "Employed" or "在职" or "务工" or "个体经营" or "灵活就业" or "自谋职业" => "Employed",
+        "Unemployed" or "失业" or "无业" or "待业" => "Unemployed",
+        "Farming" or "务农" or "农业" => "Farming",
+        "Student" or "学生" or "在校学生" => "Student",
+        "Retired" or "退休" or "离退休" => "Retired",
+        "Other" or "其他" => "Other",
         var other => other ?? string.Empty
     };
 
-    private static string ToFormRelationship(string? value) => value?.Trim() switch
+    /// <summary>家庭关系 key → 旧版中文显示值；未知英文 key 退化为“其他”，中文历史值原样保留。</summary>
+    private static string ToFormRelationship(string? value)
     {
-        "Head" => "本人/户主",
-        "Spouse" => "配偶",
-        "Son" => "子/婿",
-        "Daughter" => "女/媳",
-        "Grandchild" => "孙子女/外孙子女",
-        "Parent" => "父母/岳父母/公婆",
-        "Grandparent" => "祖父母/外祖父母",
-        "Sibling" => "兄弟姐妹",
-        "Other" => "其他",
-        var other => other ?? string.Empty
-    };
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var text = value.Trim();
+        return text switch
+        {
+            "Head" or "户主" or "本人" or "本人/户主" => "本人/户主",
+            "Spouse" or "Husband" or "Wife" or "配偶" => "配偶",
+            "Son" or "Child" or "子" or "儿子" or "子女" or "子/婿" => "子/婿",
+            "Daughter" or "女" or "女儿" or "女/媳" => "女/媳",
+            "Grandchild" or "孙子女" or "孙子女/外孙子女" => "孙子女/外孙子女",
+            "Parent" or "Father" or "Mother" or "父母" or "父母/岳父母/公婆" => "父母/岳父母/公婆",
+            "Grandparent" or "祖父母" or "祖父母/外祖父母" => "祖父母/外祖父母",
+            "Sibling" or "Brother" or "Sister" or "兄弟姐妹" => "兄弟姐妹",
+            "Other" or "其他" => "其他",
+            // 纯 ASCII 的未知代码不直接回显；中文历史值（如“患病”同类的自由文本）保留。
+            _ => text.All(char.IsAscii) ? "其他" : text
+        };
+    }
 
     private static string ToCoreRelationship(string? value) => value?.Trim() switch
     {
-        "本人/户主" => "Head",
-        "配偶" => "Spouse",
-        "子/婿" => "Son",
-        "女/媳" => "Daughter",
-        "孙子女/外孙子女" => "Grandchild",
-        "父母/岳父母/公婆" => "Parent",
-        "祖父母/外祖父母" => "Grandparent",
-        "兄弟姐妹" => "Sibling",
-        "其他" => "Other",
+        "Head" or "户主" or "本人" or "本人/户主" => "Head",
+        "Spouse" or "Husband" or "Wife" or "配偶" => "Spouse",
+        "Son" or "Child" or "子" or "儿子" or "子女" or "子/婿" => "Son",
+        "Daughter" or "女" or "女儿" or "女/媳" => "Daughter",
+        "Grandchild" or "孙子女" or "孙子女/外孙子女" => "Grandchild",
+        "Parent" or "Father" or "Mother" or "父母" or "父母/岳父母/公婆" => "Parent",
+        "Grandparent" or "祖父母" or "祖父母/外祖父母" => "Grandparent",
+        "Sibling" or "Brother" or "Sister" or "兄弟姐妹" => "Sibling",
+        "Other" or "其他" => "Other",
         var other => other ?? string.Empty
+    };
+
+    /// <summary>照料人输出：字典列由 key 转中文显示值（落库仍为旧版 key）。</summary>
+    private static Caregiver ToFormCaregiver(Caregiver source) => new()
+    {
+        Id = source.Id,
+        ApplicationId = source.ApplicationId,
+        CaredMemberId = source.CaredMemberId,
+        Name = source.Name,
+        IdCard = source.IdCard,
+        Phone = source.Phone,
+        Relationship = ToFormRelationship(source.Relationship),
+        Gender = NormalizeGender(source.Gender),
+        Age = source.Age,
+        Ethnicity = ToFormEthnicity(source.Ethnicity),
+        MaritalStatus = ToFormMaritalStatus(source.MaritalStatus),
+        HukouType = source.HukouType,
+        EducationLevel = ToFormEducationLevel(source.EducationLevel),
+        PoliticalStatus = ToFormPoliticalStatus(source.PoliticalStatus),
+        HealthStatus = ToFormHealthStatus(source.HealthStatus),
+        EmploymentStatus = ToFormEmploymentStatus(source.EmploymentStatus),
+        MainIncomeSource = source.MainIncomeSource,
+        WorkUnit = source.WorkUnit,
+        Position = source.Position,
+        Address = source.Address,
+        BankName = source.BankName,
+        BankAccount = source.BankAccount,
+        CreatedAt = source.CreatedAt,
+        DeletedAt = source.DeletedAt,
+        GenderAgeDisplay = source.GenderAgeDisplay
     };
     /// <summary>历史数据存在 Male/Female 英文代码，表单统一输出/保存为中文。</summary>
     private static string NormalizeGender(string? value) => value?.Trim() switch
@@ -3542,8 +3642,9 @@ public sealed class ApplicationFormService(
             ? date.ToString("yyyy-MM-dd", DateCulture)
             : string.Empty;
 
-    // 前端下拉使用中文显示值（Step2 选项），Core 判定使用字典 key；在 API 边界双向换算。
-    // 已是 key 的值原样透传，兼容导入/历史数据。
+    // 健康状况按旧字典 HealthStatuses 全量换算（Healthy/Weak/SevereIllness/SevereDisability/
+    // SevereIllnessAndDisability/Other）。旧字典没有“患病/残疾”档，历史值原样保留，
+    // 不再错误归入“一般”；空值/空白统一返回空字符串。
 
     private static string ToCoreHealthStatus(string? value)
     {
@@ -3554,11 +3655,13 @@ public sealed class ApplicationFormService(
 
         return value.Trim() switch
         {
-            "健康" or "健康或良好" => HealthStatusConstants.HEALTHY,
-            "一般" or "一般或较弱" or "患病" or "残疾" => HealthStatusConstants.FAIR_OR_WEAK,
-            "重病" => HealthStatusConstants.SEVERE_DISEASE,
-            "重残" => HealthStatusConstants.SEVERE_DISABILITY,
-            "重病且重残" => HealthStatusConstants.SEVERE_DISEASE_AND_DISABILITY,
+            HealthStatusConstants.HEALTHY or "健康" or "健康或良好" => HealthStatusConstants.HEALTHY,
+            HealthStatusConstants.FAIR_OR_WEAK or "一般" or "一般或较弱" => HealthStatusConstants.FAIR_OR_WEAK,
+            HealthStatusConstants.SEVERE_DISEASE or "重病" => HealthStatusConstants.SEVERE_DISEASE,
+            HealthStatusConstants.SEVERE_DISABILITY or "重残" => HealthStatusConstants.SEVERE_DISABILITY,
+            HealthStatusConstants.SEVERE_DISEASE_AND_DISABILITY or "重病且重残"
+                => HealthStatusConstants.SEVERE_DISEASE_AND_DISABILITY,
+            "Other" or "其他" => "Other",
             _ => value.Trim()
         };
     }
@@ -3572,11 +3675,12 @@ public sealed class ApplicationFormService(
 
         return value.Trim() switch
         {
-            HealthStatusConstants.HEALTHY or "健康或良好" => "健康",
-            HealthStatusConstants.FAIR_OR_WEAK or "一般或较弱" => "一般",
-            HealthStatusConstants.SEVERE_DISEASE => "重病",
-            HealthStatusConstants.SEVERE_DISABILITY => "重残",
-            HealthStatusConstants.SEVERE_DISEASE_AND_DISABILITY => "重病且重残",
+            HealthStatusConstants.HEALTHY or "健康" or "健康或良好" => "健康",
+            HealthStatusConstants.FAIR_OR_WEAK or "一般" or "一般或较弱" => "一般",
+            HealthStatusConstants.SEVERE_DISEASE or "重病" => "重病",
+            HealthStatusConstants.SEVERE_DISABILITY or "重残" => "重残",
+            HealthStatusConstants.SEVERE_DISEASE_AND_DISABILITY or "重病且重残" => "重病且重残",
+            "Other" or "其他" => "其他",
             _ => value.Trim()
         };
     }

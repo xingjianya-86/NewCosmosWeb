@@ -15,9 +15,13 @@ export const HUKOU_TYPE_OPTIONS: SelectOption[] = [
   { label: '城市户口', value: 'Urban' },
 ]
 
+/**
+ * 民族：key 与旧版字典 Ethnicities（ethnicities.yaml）一致，显示中文。
+ * 字典只有 19 项（无 Daur/Xibe），未知 key 由后端原样透传以兼容历史数据。
+ */
 export const ETHNICITY_OPTIONS: SelectOption[] = [
   { label: '汉族', value: 'Han' },
-  { label: '蒙古族', value: 'Mongolian' },
+  { label: '蒙古族', value: 'Mongol' },
   { label: '回族', value: 'Hui' },
   { label: '藏族', value: 'Tibetan' },
   { label: '维吾尔族', value: 'Uyghur' },
@@ -34,27 +38,32 @@ export const ETHNICITY_OPTIONS: SelectOption[] = [
   { label: '哈尼族', value: 'Hani' },
   { label: '傣族', value: 'Dai' },
   { label: '黎族', value: 'Li' },
-  { label: '达斡尔族', value: 'Daur' },
-  { label: '锡伯族', value: 'Xibe' },
   { label: '其他', value: 'Other' },
 ]
 
+/**
+ * 家庭关系：value 用旧版中文显示值（FamilyRelationships 字典），后端 ToCoreRelationship
+ * 负责换算为 Head/Spouse/Son…；历史英文 key 也能被后端映射回中文。
+ */
 export const RELATION_OPTIONS: SelectOption[] = [
-  { label: '户主', value: '户主' },
+  { label: '本人/户主', value: '本人/户主' },
   { label: '配偶', value: '配偶' },
-  { label: '子女', value: '子女' },
-  { label: '父母', value: '父母' },
+  { label: '子/婿', value: '子/婿' },
+  { label: '女/媳', value: '女/媳' },
+  { label: '孙子女/外孙子女', value: '孙子女/外孙子女' },
+  { label: '父母/岳父母/公婆', value: '父母/岳父母/公婆' },
+  { label: '祖父母/外祖父母', value: '祖父母/外祖父母' },
   { label: '兄弟姐妹', value: '兄弟姐妹' },
-  { label: '祖父母', value: '祖父母' },
-  { label: '孙子女', value: '孙子女' },
   { label: '其他', value: '其他' },
 ]
 
+/**
+ * 健康状况：按旧字典 HealthStatuses 的 5 个业务档 + 其他（旧字典无“患病/残疾”，已移除；
+ * 历史“患病/残疾”值由后端原样保留，不再错误并入“一般”）。
+ */
 export const HEALTH_STATUS_OPTIONS: SelectOption[] = [
   { label: '健康', value: '健康' },
   { label: '一般', value: '一般' },
-  { label: '患病', value: '患病' },
-  { label: '残疾', value: '残疾' },
   { label: '重病', value: '重病' },
   { label: '重残', value: '重残' },
   { label: '重病且重残', value: '重病且重残' },
@@ -72,12 +81,12 @@ export const EDUCATION_LEVEL_OPTIONS: SelectOption[] = [
   { label: '研究生及以上', value: '研究生及以上' },
 ]
 
-/** 婚姻状况（与字典 MaritalStatuses 的中文显示值一致）。 */
+/** 婚姻状况（与字典 MaritalStatuses 的中文显示值/顺序一致）。 */
 export const MARITAL_STATUS_OPTIONS: SelectOption[] = [
   { label: '未婚', value: '未婚' },
   { label: '已婚', value: '已婚' },
-  { label: '离婚', value: '离婚' },
   { label: '丧偶', value: '丧偶' },
+  { label: '离婚', value: '离婚' },
   { label: '其他', value: '其他' },
 ]
 
@@ -125,14 +134,12 @@ export const PERSON_TYPE_OPTIONS: SelectOption[] = [
   { label: '扶养', value: '扶养' },
 ]
 
+/** 就业状况：严格按旧字典 EmploymentStatuses（在职/失业/务农/学生/退休/其他）。 */
 export const EMPLOYMENT_STATUS_OPTIONS: SelectOption[] = [
-  { label: '务农', value: '务农' },
-  { label: '务工', value: '务工' },
   { label: '在职', value: '在职' },
-  { label: '个体经营', value: '个体经营' },
-  { label: '学生', value: '学生' },
   { label: '失业', value: '失业' },
-  { label: '无业', value: '无业' },
+  { label: '务农', value: '务农' },
+  { label: '学生', value: '学生' },
   { label: '退休', value: '退休' },
   { label: '其他', value: '其他' },
 ]
@@ -166,12 +173,14 @@ export const APPLICATION_REASON_OPTIONS: SelectOption[] = [
   { label: '其他', value: 'Other' },
 ]
 
+/** 赡养关系：沿用家庭关系字典（排除“本人/户主”），value 用旧版中文显示值。 */
 export const SUPPORT_RELATION_OPTIONS: SelectOption[] = [
-  { label: '子女', value: '子女' },
   { label: '配偶', value: '配偶' },
-  { label: '父母', value: '父母' },
-  { label: '祖父母', value: '祖父母' },
+  { label: '子/婿', value: '子/婿' },
+  { label: '女/媳', value: '女/媳' },
+  { label: '孙子女/外孙子女', value: '孙子女/外孙子女' },
+  { label: '父母/岳父母/公婆', value: '父母/岳父母/公婆' },
+  { label: '祖父母/外祖父母', value: '祖父母/外祖父母' },
   { label: '兄弟姐妹', value: '兄弟姐妹' },
-  { label: '孙子女', value: '孙子女' },
   { label: '其他', value: '其他' },
 ]

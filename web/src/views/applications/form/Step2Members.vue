@@ -20,7 +20,6 @@ import {
   PERSON_TYPE_OPTIONS,
   POLITICAL_STATUS_OPTIONS,
   RELATION_OPTIONS,
-  SELF_CARE_ABILITY_OPTIONS,
   SUPPORT_RELATION_OPTIONS,
 } from './options'
 import type {
@@ -876,62 +875,6 @@ onMounted(() => {
                   :disabled="isReadonly"
                   @update:model-value="member.monthlyIncomeCapacity = $event ?? null"
                 />
-              </label>
-            </div>
-          </section>
-
-          <section class="member-section">
-            <h4 class="member-section__title">人员认定</h4>
-            <div class="member-grid">
-              <label class="field">
-                <span class="field__label">人员类型</span>
-                <el-select
-                  v-model="member.personType"
-                  filterable
-                  allow-create
-                  default-first-option
-                  clearable
-                  placeholder="请选择或输入人员类型"
-                  :disabled="isReadonly"
-                >
-                  <el-option
-                    v-for="item in PERSON_TYPE_OPTIONS"
-                    :key="item.value"
-                    :label="item.label"
-                    :value="item.value"
-                  />
-                </el-select>
-              </label>
-
-              <label class="field field--switch">
-                <span class="field__label">单人保</span>
-                <el-switch
-                  v-model="member.isSingleRescue"
-                  active-text="是"
-                  inactive-text="否"
-                  inline-prompt
-                  :disabled="isReadonly"
-                />
-              </label>
-
-              <label class="field">
-                <span class="field__label">自理能力</span>
-                <el-select
-                  v-model="member.selfCareAbility"
-                  filterable
-                  allow-create
-                  default-first-option
-                  clearable
-                  placeholder="请选择或输入自理能力"
-                  :disabled="isReadonly"
-                >
-                  <el-option
-                    v-for="item in SELF_CARE_ABILITY_OPTIONS"
-                    :key="item.value"
-                    :label="item.label"
-                    :value="item.value"
-                  />
-                </el-select>
               </label>
             </div>
           </section>
