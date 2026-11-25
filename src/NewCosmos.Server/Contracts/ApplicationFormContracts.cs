@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using NewCosmos.Models.Entities;
 
 namespace NewCosmos.Server.Contracts;
@@ -205,9 +207,9 @@ public sealed record ApplicationFormSurveyDto(
     string SurveyConclusion);
 
 /// <summary>
-/// 经济明细（Step4）。直接复用 Core 实体列表，字段名与前端 economicDetails 的花名册一致。
-/// 土地确权组（LandConfirmationGroup）含嵌套集合，暂不进入表单契约；保存时服务端沿用旧组，
-/// 避免整表重写把确权数据清空。
+/// 经济明细（Step3/Step4）。直接复用 Core 实体列表，字段名与前端 economicDetails 的花名册一致。
+/// 土地确权归户表按组整包读写（组内 records/persons 一起保存）；null 表示旧客户端未携带该块，
+/// 服务端沿用库内已保存的组，避免整表重写把确权数据清空。
 /// </summary>
 public sealed record ApplicationFormEconomicDetailsDto(
     List<LaborIncome>? LaborIncomes,
@@ -222,7 +224,143 @@ public sealed record ApplicationFormEconomicDetailsDto(
     List<Vehicle>? Vehicles,
     List<Machinery>? Machineries,
     List<FinancialAsset>? FinancialAssets,
-    List<LandRegistration>? LandRegistrations);
+    List<LandRegistration>? LandRegistrations,
+    [property: JsonConverter(typeof(LandConfirmationGroupsJsonConverter))]
+    List<LandConfirmationGroup>? LandConfirmationGroups = null);
+
+/// <summary>
+/// 土地确权组列表转换器。
+/// <para>
+/// Core 的 <see cref="LandConfirmationGroup.Records"/> / <see cref="LandConfirmationGroup.Persons"/>
+/// 是只读集合（仅 getter），System.Text.Json 默认不会向只读集合回填元素，直接反序列化会得到
+/// 空组，保存时会把地块与人员静默丢掉。此转换器显式读取嵌套数组后逐个 Add，保证整包读写。
+/// </para>
+/// </summary>
+public sealed class LandConfirmationGroupsJsonConverter : JsonConverter<List<LandConfirmationGroup>>
+{
+    public override List<LandConfirmationGroup>? Read(
+        ref Utf8JsonReader reader,
+        Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+        {
+            return null;
+        }
+
+        if (reader.TokenType != JsonTokenType.StartArray)
+        {
+            throw new JsonException("landConfirmationGroups 必须是数组");
+        }
+
+        using var document = JsonDocument.ParseValue(ref reader);
+        var groups = new List<LandConfirmationGroup>();
+        foreach (var element in document.RootElement.EnumerateArray())
+        {
+            if (element.ValueKind == JsonValueKind.Null)
+            {
+                continue;
+            }
+
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                throw new JsonException("土地确权组必须是对象");
+            }
+
+            groups.Add(ReadGroup(element, options));
+        }
+
+        return groups;
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer,
+        List<LandConfirmationGroup> value,
+        JsonSerializerOptions options)
+    {
+        writer.WriteStartArray();
+        foreach (var group in value)
+        {
+            JsonSerializer.Serialize(writer, group, options);
+        }
+        writer.WriteEndArray();
+    }
+
+    private static LandConfirmationGroup ReadGroup(
+        JsonElement element,
+        JsonSerializerOptions options)
+    {
+        var group = new LandConfirmationGroup
+        {
+            Id = ReadInt64(element, "id"),
+            GroupId = ReadInt32(element, "groupId"),
+            ContractorName = ReadString(element, "contractorName"),
+            VillageName = ReadString(element, "villageName"),
+            DryFieldArea = ReadDouble(element, "dryFieldArea"),
+            WetFieldArea = ReadDouble(element, "wetFieldArea"),
+        };
+
+        if (element.TryGetProperty("records", out var records)
+            && records.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in records.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                var record = item.Deserialize<LandConfirmationRecord>(options);
+                if (record is not null)
+                {
+                    group.Records.Add(record);
+                }
+            }
+        }
+
+        if (element.TryGetProperty("persons", out var persons)
+            && persons.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in persons.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                var person = item.Deserialize<LandConfirmationPerson>(options);
+                if (person is not null)
+                {
+                    group.Persons.Add(person);
+                }
+            }
+        }
+
+        return group;
+    }
+
+    private static string ReadString(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : string.Empty;
+
+    private static long ReadInt64(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value)
+           && value.ValueKind == JsonValueKind.Number
+           && value.TryGetInt64(out var parsed)
+            ? parsed
+            : 0;
+
+    private static int ReadInt32(JsonElement element, string name)
+        => (int)ReadInt64(element, name);
+
+    private static double ReadDouble(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value)
+           && value.ValueKind == JsonValueKind.Number
+           && value.TryGetDouble(out var parsed)
+            ? parsed
+            : 0;
+}
 
 /// <summary>回访补录请求。applicantIdCard 由服务端从主表同源带出，不接受前端传入。</summary>
 public sealed record ApplicationVisitCreateRequest(

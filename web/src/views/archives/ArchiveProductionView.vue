@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  CircleCheck,
   Document,
   InfoFilled,
   Monitor,
@@ -23,6 +24,7 @@ import type {
   PrintJobListItem,
   PrintJobMode,
 } from '@/api/archivePrint'
+import { completeApplication } from '@/api/applicationForm'
 import { getApplication } from '@/api/applications'
 import { getErrorMessage } from '@/api/http'
 import { listPrinters } from '@/api/printers'
@@ -33,7 +35,12 @@ import NcStatusDot from '@/components/NcStatusDot.vue'
 import ArchiveApplicationPanel from './ArchiveApplicationPanel.vue'
 import PrintJobPanel from './PrintJobPanel.vue'
 import { maskIdCard } from '@/views/applications/format'
-import type { ApplicationDetail, ApplicationListItem } from '@/types/application'
+import { resolveApplicationStatus } from '@/views/applications/status'
+import type {
+  ApplicationDetail,
+  ApplicationListItem,
+  ApplicationStatus,
+} from '@/types/application'
 import type { PrinterBinding } from '@/types/api'
 
 const route = useRoute()
@@ -240,6 +247,82 @@ async function loadPreselectedApplication(): Promise<void> {
   }
 }
 
+/* ── 完成归档 ─────────────────────────────────────────────────── */
+
+const ARCHIVED_STEP = 6
+const completing = ref(false)
+const completeError = ref('')
+
+/** 归档前置说明：未选申请、已归档或状态不在 Draft/Submitted 时禁用按钮。 */
+const completionBlockedReason = computed(() => {
+  const application = selectedApplication.value
+  if (!application) return '请先在左侧选择一条申请'
+  if (application.currentStep >= ARCHIVED_STEP) return '该申请已完成归档，不能重复归档'
+  if (application.status === 'Approved') return '该申请已审批归档，不能重复归档'
+  if (application.status === 'Completed') return '该申请已完成，不能重复归档'
+  if (application.status === 'Stopped') return '该申请已终止，不能完成归档'
+  if (application.status !== 'Draft' && application.status !== 'Submitted') {
+    const label = resolveApplicationStatus(application.status, application.statusText).label
+    return `当前状态「${label}」不支持完成归档`
+  }
+  return ''
+})
+const canCompleteArchive = computed(
+  () => Boolean(selectedApplication.value) && !completionBlockedReason.value,
+)
+
+async function handleCompleteArchive(): Promise<void> {
+  if (completing.value) return
+
+  const application = selectedApplication.value
+  if (!application) {
+    ElMessage.warning('请先在左侧选择一条申请')
+    return
+  }
+  if (completionBlockedReason.value) {
+    ElMessage.warning(completionBlockedReason.value)
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      '完成归档后本次办理结束，状态将变为已审批并归档。',
+      '完成归档',
+      { type: 'warning', confirmButtonText: '完成归档', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  completing.value = true
+  completeError.value = ''
+  try {
+    const result = await completeApplication(application.id)
+    const fallbackStatus = (result.status || 'Approved') as ApplicationStatus
+    ElMessage.success('已完成归档，本次办理结束')
+
+    // 优先重新拉取详情，确保列表与状态文案同源；失败时用接口返回值兜底。
+    try {
+      const detail = await getApplication(application.id)
+      selectedApplication.value = detailToListItem(detail)
+    } catch {
+      selectedApplication.value = {
+        ...application,
+        status: fallbackStatus,
+        statusText: resolveApplicationStatus(fallbackStatus).label,
+        currentStep: result.currentStep || ARCHIVED_STEP,
+      }
+    }
+
+    void applicationPanelRef.value?.reload()
+  } catch (error) {
+    completeError.value = getErrorMessage(error, '完成归档失败')
+    ElMessage.error(completeError.value)
+  } finally {
+    completing.value = false
+  }
+}
+
 /* ── 模板选择 ─────────────────────────────────────────────────── */
 
 function selectAllTemplates(): void {
@@ -430,6 +513,17 @@ onBeforeUnmount(() => {
       <template #actions>
         <el-button :icon="Refresh" :loading="jobsLoading" @click="refreshAll">刷新</el-button>
         <el-button :icon="Printer" @click="goPrinters">打印机绑定</el-button>
+        <el-button
+          class="archive-complete"
+          type="primary"
+          :icon="CircleCheck"
+          :loading="completing"
+          :disabled="!canCompleteArchive"
+          :title="canCompleteArchive ? '完成本次办理并归档' : completionBlockedReason"
+          @click="handleCompleteArchive"
+        >
+          完成归档
+        </el-button>
       </template>
     </NcPageHeader>
 
@@ -437,6 +531,20 @@ onBeforeUnmount(() => {
       <el-icon><InfoFilled /></el-icon>
       <span>Web 端不生成 PDF，预览/打印由已绑定的 PC 打印代理执行。</span>
     </div>
+
+    <div v-if="selectedApplication && completionBlockedReason" class="complete-note">
+      <el-icon><InfoFilled /></el-icon>
+      <span>{{ completionBlockedReason }}</span>
+    </div>
+
+    <el-alert
+      v-if="completeError"
+      class="panel-error"
+      type="error"
+      :title="completeError"
+      show-icon
+      @close="completeError = ''"
+    />
 
     <div class="summary">
       <NcStat
@@ -724,6 +832,27 @@ onBeforeUnmount(() => {
   flex: none;
   margin-top: 2px;
   color: var(--nc-amber);
+}
+
+/* ── 完成归档前置说明 ─────────────────────────────────────────── */
+.complete-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 14px;
+  border: 1px solid var(--nc-line);
+  border-left: 3px solid var(--nc-muted);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-2);
+  color: var(--nc-muted-2);
+  font-size: var(--nc-text-sm);
+  line-height: 1.65;
+}
+
+.complete-note .el-icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--nc-muted);
 }
 
 /* ── 概要 ─────────────────────────────────────────────────────── */
@@ -1043,6 +1172,24 @@ onBeforeUnmount(() => {
 
   .print-actions {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* 三个头部动作按两列排布，「完成归档」独占一行，避免窄屏挤压。 */
+  .archive-production :deep(.nc-page-header__actions) {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .archive-production :deep(.nc-page-header__actions .el-button) {
+    width: 100%;
+    min-width: 0;
+    margin-left: 0;
+    flex: none;
+  }
+
+  .archive-complete {
+    grid-column: 1 / -1;
   }
 }
 </style>

@@ -5,7 +5,6 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, Delete, Document, FolderOpened, Refresh } from '@element-plus/icons-vue'
 import {
   classifyApplication,
-  completeApplication,
   createApplicationForm,
   deleteApplication,
   getApplicationForm,
@@ -44,7 +43,7 @@ const loading = ref(false)
 const loadError = ref('')
 const saving = ref(false)
 const classifying = ref(false)
-const completing = ref(false)
+const submitting = ref(false)
 const actionError = ref('')
 
 let loadTicket = 0
@@ -161,8 +160,8 @@ function moveToEditRoute(id: number): void {
   void router.replace(`/applications/${id}/edit`)
 }
 
-/** 保存草稿，返回最新表单 id。 */
-async function persist(): Promise<number> {
+/** 保存草稿，返回最新表单 id；updateRoute=false 时由调用方接管跳转。 */
+async function persist(options: { updateRoute?: boolean } = {}): Promise<number> {
   if (!formReady.value) {
     throw new Error('表单尚未加载完成，请刷新后重试')
   }
@@ -182,7 +181,7 @@ async function persist(): Promise<number> {
     form.value.statusText = '草稿'
   }
 
-  if (creating) moveToEditRoute(form.value.id)
+  if (creating && options.updateRoute !== false) moveToEditRoute(form.value.id)
   return form.value.id
 }
 
@@ -227,7 +226,7 @@ function nextStep(): void {
 
 /** 先保存再分类认定，兼容接口返回完整表单或仅 classification。 */
 async function handleClassify(): Promise<void> {
-  if (isViewMode.value || classifying.value || completing.value) return
+  if (isViewMode.value || classifying.value || submitting.value) return
   classifying.value = true
   actionError.value = ''
   try {
@@ -250,41 +249,30 @@ async function handleClassify(): Promise<void> {
   }
 }
 
-/** 先保存再完成认定，成功后回到工作流列表。 */
-async function handleComplete(): Promise<void> {
-  if (isViewMode.value || completing.value || classifying.value) return
+/** 提交（旧版语义）：仅保存草稿，随后进入档案制作，由档案制作页完成归档。 */
+async function handleGoArchive(): Promise<void> {
+  if (isViewMode.value || submitting.value || classifying.value) return
 
-  try {
-    await ElMessageBox.confirm(
-      '完成认定后将生成档案并结束本次办理，是否继续？',
-      '完成认定',
-      {
-        type: 'warning',
-        confirmButtonText: '完成认定',
-        cancelButtonText: '取消',
-      },
-    )
-  } catch {
+  if (!hasClassification.value) {
+    ElMessage.warning('请先完成分类判定')
     return
   }
 
-  completing.value = true
+  submitting.value = true
   actionError.value = ''
   try {
-    await persist()
-    if (form.value.id <= 0) throw new Error('保存后未取得申请编号，无法完成认定')
-
-    const result = await completeApplication(form.value.id)
-    if (result.status) form.value.status = result.status
-    form.value.statusText = '已完结'
-    if (result.currentStep) form.value.currentStep = result.currentStep
-    ElMessage.success('认定完成，档案已生成')
-    await router.push('/applications')
+    await persist({ updateRoute: false })
+    if (form.value.id <= 0) throw new Error('保存后未取得申请编号，无法进入档案制作')
+    ElMessage.success('已保存，正在进入档案制作')
+    await router.push({
+      path: '/archives/production',
+      query: { applicationId: String(form.value.id) },
+    })
   } catch (error) {
-    actionError.value = getErrorMessage(error, '完成认定失败')
+    actionError.value = getErrorMessage(error, '保存申请失败')
     ElMessage.error(actionError.value)
   } finally {
-    completing.value = false
+    submitting.value = false
   }
 }
 
@@ -437,7 +425,7 @@ onMounted(() => {
 
     <!-- 回访记录独立区：旧版位于五步卡之后、内容区之前，所有步骤可见；新申请不显示 -->
     <section v-if="form.id > 0" class="form-visit" aria-label="回访记录">
-      <VisitRecords :form="form" :busy="saving || classifying || completing" />
+      <VisitRecords :form="form" :busy="saving || classifying || submitting" />
     </section>
 
     <!-- 内容区：左侧当前步骤 + 右侧 320px 来源数据栏 -->
@@ -484,19 +472,18 @@ onMounted(() => {
           <Step3Economy
             v-else-if="currentStep === 3"
             :form="form"
-            :busy="saving || classifying || completing"
+            :busy="saving || classifying || submitting"
           />
           <Step4Survey
             v-else-if="currentStep === 4"
             :form="form"
-            :busy="saving || classifying || completing"
+            :busy="saving || classifying || submitting"
           />
           <Step5Classification
             v-else
             :form="form"
-            :busy="saving || classifying || completing"
+            :busy="saving || classifying || submitting"
             @classify="handleClassify"
-            @complete="handleComplete"
           />
         </template>
       </section>
@@ -541,7 +528,7 @@ onMounted(() => {
         <el-button
           v-if="!isViewMode"
           :loading="saving"
-          :disabled="classifying || completing || !formReady"
+          :disabled="classifying || submitting || !formReady"
           @click="saveDraft"
         >
           保存草稿
@@ -550,7 +537,7 @@ onMounted(() => {
       <div class="form-actions__cell">
         <el-button
           v-if="currentStep > 1"
-          :disabled="saving || classifying || completing"
+          :disabled="saving || classifying || submitting"
           @click="prevStep"
         >
           ← 上一步
@@ -560,7 +547,7 @@ onMounted(() => {
         <el-button
           v-if="currentStep < 5"
           type="primary"
-          :disabled="saving || classifying || completing"
+          :disabled="saving || classifying || submitting"
           @click="nextStep"
         >
           下一步 →
@@ -576,10 +563,10 @@ onMounted(() => {
         <el-button
           v-if="currentStep >= 5 && !isViewMode"
           class="action-submit"
-          :loading="completing"
-          :disabled="saving || classifying || !hasClassification"
-          :title="hasClassification ? undefined : '请先完成分类判定'"
-          @click="handleComplete"
+          :loading="submitting"
+          :disabled="saving || classifying || !formReady || !hasClassification"
+          :title="hasClassification ? '保存并进入档案制作' : '请先完成分类判定'"
+          @click="handleGoArchive"
         >
           提交
         </el-button>

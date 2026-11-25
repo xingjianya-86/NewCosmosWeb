@@ -159,7 +159,13 @@ public sealed class ApplicationFormService(
         }
         ApplyHeadMemberToApplication(application, members);
         ApplyEconomy(application, request.Economy, familySize, alimonyAnnual, totals);
-        ApplyEconomicDetailsTotals(application, request.EconomicDetails, request.Economy, familySize);
+        var landTotalsResult = await ApplyEconomicDetailsTotalsAsync(
+            application, request.EconomicDetails, familySize, request.Members, null, ct);
+        if (landTotalsResult.IsFailure)
+        {
+            return Result.Failure<ApplicationFormSaveResult>(
+                landTotalsResult.ErrorCode, landTotalsResult.Message);
+        }
 
         if (string.IsNullOrWhiteSpace(application.ApplicantName)
             || string.IsNullOrWhiteSpace(application.ApplicantIdCard))
@@ -294,7 +300,13 @@ public sealed class ApplicationFormService(
             ? CalculateIncome(economy, familySize, alimonyAnnual)
             : null;
         ApplyEconomy(application, request.Economy, familySize, alimonyAnnual, totals);
-        ApplyEconomicDetailsTotals(application, request.EconomicDetails, request.Economy, familySize);
+        var landTotalsResult = await ApplyEconomicDetailsTotalsAsync(
+            application, request.EconomicDetails, familySize, request.Members, applicationId, ct);
+        if (landTotalsResult.IsFailure)
+        {
+            return Result.Failure<ApplicationFormSaveResult>(
+                landTotalsResult.ErrorCode, landTotalsResult.Message);
+        }
 
         if (string.IsNullOrWhiteSpace(application.ApplicantName)
             || string.IsNullOrWhiteSpace(application.ApplicantIdCard))
@@ -782,8 +794,8 @@ public sealed class ApplicationFormService(
     }
 
     /// <summary>
-    /// 经济明细整批重写。表单暂无土地确权组，先读取旧组再原样回写，
-    /// 避免 SaveAllAsync 的“全删全插”把确权记录/共有人清空。
+    /// 经济明细整批重写。土地确权组随请求整包重写（SaveAllAsync 先插新组再删旧组）；
+    /// 请求未携带该块（null）时沿用库内已保存的组，兼容旧客户端。
     /// </summary>
     private async Task<Result> SaveEconomicDetailsAsync(
         long applicationId,
@@ -791,13 +803,39 @@ public sealed class ApplicationFormService(
         IReadOnlyDictionary<long, long> memberIdMap,
         CancellationToken ct)
     {
-        var existingResult = await economicDetails.LoadAllAsync(applicationId, ct);
-        if (existingResult.IsFailure)
+        // 只有请求明确未携带土地组时才需要读库回填；携带（含空数组）时直接以请求为准。
+        var landGroups = dto.LandConfirmationGroups;
+        if (landGroups is null)
         {
-            return Result.Failure(existingResult.ErrorCode!, existingResult.Message!);
+            var existingResult = await economicDetails.LoadAllAsync(applicationId, ct);
+            if (existingResult.IsFailure)
+            {
+                return Result.Failure(existingResult.ErrorCode!, existingResult.Message!);
+            }
+
+            landGroups = existingResult.Value.LandConfirmationGroups ?? [];
         }
 
-        var landGroups = existingResult.Value.LandConfirmationGroups ?? [];
+        // 过滤空组并重排组号；土地状态缺失时按旧版默认“存活享有”。
+        var groupsToSave = new List<LandConfirmationGroup>(landGroups.Count);
+        foreach (var group in landGroups)
+        {
+            if (group is null)
+            {
+                continue;
+            }
+
+            group.GroupId = groupsToSave.Count + 1;
+            foreach (var person in group.Persons)
+            {
+                if (string.IsNullOrWhiteSpace(person.LandStatus))
+                {
+                    person.LandStatus = LandStatusConstants.LIVING_ENTITLED;
+                }
+            }
+
+            groupsToSave.Add(group);
+        }
 
         // 明细行统一归到当前申请；成员行全删全插换了 id，明细的 member_id 同步迁移。
         long MapMember(long memberId)
@@ -864,7 +902,7 @@ public sealed class ApplicationFormService(
             dto.Machineries ?? [],
             dto.FinancialAssets ?? [],
             dto.LandRegistrations ?? [],
-            landGroups,
+            groupsToSave,
             ct);
 
         return saveResult.IsFailure
@@ -1694,31 +1732,81 @@ public sealed class ApplicationFormService(
 
     /// <summary>
     /// 明细口径覆盖主表汇总：工资/经营/财产/转移/其他/补贴/刚性支出取明细求和，
-    /// 赡养与土地年值仍取本次 economy（未传则沿用主表现有值），再按 Core 公式重算年/月/人均。
-    /// 13 个明细列表全空时不重算，避免把用户手填的 economy 汇总清零。
+    /// 土地年值改为从土地确权归户表按旧版口径现算（不再采信前端 economy.LandIncome），
+    /// 赡养费仍取本次保存的主表派生值，最后按 Core 公式重算年/月/人均。
+    /// 未携带 economicDetails 时整块跳过（保留原值）；携带但明细为空时只保留土地口径，
+    /// 其余分项沿用主表现值，避免把历史手填汇总清零。
     /// </summary>
-    private void ApplyEconomicDetailsTotals(
+    private async Task<Result> ApplyEconomicDetailsTotalsAsync(
         ApplicationEntity application,
         ApplicationFormEconomicDetailsDto? details,
-        ApplicationFormEconomyDto? economy,
-        int familySize)
+        int familySize,
+        IReadOnlyList<ApplicationFormMemberDto>? requestMembers,
+        long? applicationId,
+        CancellationToken ct)
     {
-        if (details is null || !HasAnyEconomicDetail(details))
+        if (details is null)
         {
-            return;
+            return Result.Success();
         }
 
-        var workIncome = incomeCalculation.CalculateLaborIncome(details.LaborIncomes ?? []);
-        var businessIncome = incomeCalculation.CalculateBusinessNetIncome(details.BusinessIncomes ?? []);
-        var propertyIncome = (details.PropertyIncomes ?? []).Sum(x => x.Amount);
-        var transferIncome = (details.TransferIncomes ?? []).Sum(x => x.TotalAmount);
-        var otherIncome = (details.OtherIncomes ?? []).Sum(x => x.Amount);
-        var subsidyIncome = incomeCalculation.CalculateSubsidyIncome(details.Subsidies ?? []);
-        var rigidExpenditure = incomeCalculation.CalculateRigidExpenditure(
-            details.RigidExpenditures ?? []);
+        // 土地确权组：旧客户端未携带（null）时沿用库内已保存的组，避免把土地收入误清为 0；
+        // 携带时（含空数组）以本次请求为准。
+        List<LandConfirmationGroup>? landGroups = details.LandConfirmationGroups;
+        if (landGroups is null && applicationId is > 0)
+        {
+            var existingResult = await economicDetails.LoadAllAsync(applicationId.Value, ct);
+            if (existingResult.IsFailure)
+            {
+                return Result.Failure(existingResult.ErrorCode!, existingResult.Message!);
+            }
 
-        var alimonyAnnual = application.AlimonyIncome;
-        var landIncome = economy?.LandIncome ?? application.LandIncomeTotal;
+            landGroups = existingResult.Value.LandConfirmationGroups ?? [];
+        }
+        landGroups ??= [];
+
+        // 家庭姓名集：户主 + 共同生活成员（排除赡养行），与旧版 CalculateLandConfirmationArea 同口径。
+        var familyNamesResult = await ResolveLandFamilyNamesAsync(
+            application, requestMembers, applicationId, ct);
+        if (familyNamesResult.IsFailure)
+        {
+            return Result.Failure(familyNamesResult.ErrorCode!, familyNamesResult.Message!);
+        }
+
+        var hasDetailRows = HasAnyEconomicDetail(details);
+
+        decimal workIncome;
+        decimal businessIncome;
+        decimal propertyIncome;
+        decimal transferIncome;
+        decimal otherIncome;
+        decimal subsidyIncome;
+        decimal rigidExpenditure;
+
+        if (hasDetailRows)
+        {
+            workIncome = incomeCalculation.CalculateLaborIncome(details.LaborIncomes ?? []);
+            businessIncome = incomeCalculation.CalculateBusinessNetIncome(details.BusinessIncomes ?? []);
+            propertyIncome = (details.PropertyIncomes ?? []).Sum(x => x.Amount);
+            transferIncome = (details.TransferIncomes ?? []).Sum(x => x.TotalAmount);
+            otherIncome = (details.OtherIncomes ?? []).Sum(x => x.Amount);
+            subsidyIncome = incomeCalculation.CalculateSubsidyIncome(details.Subsidies ?? []);
+            rigidExpenditure = incomeCalculation.CalculateRigidExpenditure(
+                details.RigidExpenditures ?? []);
+        }
+        else
+        {
+            // 没有其他明细行：沿用 ApplyEconomy 刚写入的分项，只替换土地口径。
+            workIncome = application.WorkIncomeTotal;
+            businessIncome = application.BusinessIncomeTotal;
+            propertyIncome = application.PropertyIncomeTotal;
+            transferIncome = application.TransferIncomeTotal;
+            otherIncome = application.OtherIncomeTotal;
+            subsidyIncome = application.SubsidyTotal;
+            rigidExpenditure = application.RigidExpenditure;
+        }
+
+        var land = CalculateLandConfirmationTotals(landGroups, familyNamesResult.Value);
 
         var totalAnnual = incomeCalculation.CalculateAnnualFamilyIncome(
             workIncome,
@@ -1726,8 +1814,8 @@ public sealed class ApplicationFormService(
             propertyIncome,
             transferIncome,
             otherIncome,
-            alimonyAnnual,
-            landIncome,
+            application.AlimonyIncome,
+            land.Income,
             subsidyIncome,
             rigidExpenditure);
 
@@ -1739,10 +1827,155 @@ public sealed class ApplicationFormService(
         application.SubsidyTotal = subsidyIncome;
         application.RigidExpenditure = rigidExpenditure;
 
+        // 土地年值/面积与旧版 Step3 汇总同源：份额折算后的家庭口径。
+        application.LandIncomeTotal = land.Income;
+        application.FamilyLandArea = land.FamilyArea;
+        application.SelfFarmedLandArea = land.SelfFarmedArea;
+        application.SubleasedLandArea = land.SubleasedArea;
+        application.ContractedLandArea = land.ContractedArea;
+
         application.TotalAnnualIncome = totalAnnual;
         application.TotalFamilyIncome = incomeCalculation.MonthlyFromAnnual(totalAnnual);
         application.PerCapitaAnnualIncome = incomeCalculation.CalculatePerCapitaAnnual(totalAnnual, familySize);
         application.PerCapitaIncome = incomeCalculation.PerCapitaMonthly(totalAnnual, familySize);
+
+        return Result.Success();
+    }
+
+    /// <summary>
+    /// 家庭姓名集：主表申请人 + 共同生活成员；本次请求带 members 时优先用请求，否则读库。
+    /// 赡养/抚养/扶养人不属于本户共同生活成员，不参与土地份额折算。
+    /// </summary>
+    private async Task<Result<HashSet<string>>> ResolveLandFamilyNamesAsync(
+        ApplicationEntity application,
+        IReadOnlyList<ApplicationFormMemberDto>? requestMembers,
+        long? applicationId,
+        CancellationToken ct)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        AddName(application.ApplicantName);
+
+        if (requestMembers is { Count: > 0 })
+        {
+            foreach (var member in requestMembers)
+            {
+                var category = MemberCategoryHelper.Normalize(
+                    member.MemberCategory, member.IsApplicant, member.Relation);
+                if (string.Equals(category, MemberCategoryConstants.SUPPORT, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                AddName(member.Name);
+            }
+
+            return Result.Success(names);
+        }
+
+        if (applicationId is > 0)
+        {
+            var storedMembers = await familyMembers.GetByApplicationIdAsync(applicationId.Value, ct);
+            if (storedMembers.IsFailure)
+            {
+                return Result.Failure<HashSet<string>>(
+                    storedMembers.ErrorCode!, storedMembers.Message!);
+            }
+
+            foreach (var member in storedMembers.Value ?? [])
+            {
+                if (IsSupportMember(member))
+                {
+                    continue;
+                }
+
+                AddName(member.Name);
+            }
+        }
+
+        return Result.Success(names);
+
+        void AddName(string? value)
+        {
+            var trimmed = (value ?? string.Empty).Trim();
+            if (trimmed.Length > 0)
+            {
+                names.Add(trimmed);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 土地确权汇总（旧版 CalculateLandConfirmationArea 的等价实现）：
+    /// 组内份额走 <see cref="LandShareCalculator.ComputeEffectiveShares"/>（死亡继承份额转移），
+    /// 家庭占比 = 本户有效份额 ÷ 全组有效份额；土地收入 = Σ 组内土地价值 × 家庭占比，
+    /// 逐组舍入到分后求和，最终再舍入到分。没有组时全部为 0。
+    /// </summary>
+    private static LandConfirmationTotals CalculateLandConfirmationTotals(
+        IReadOnlyCollection<LandConfirmationGroup> groups,
+        IReadOnlySet<string> familyNames)
+    {
+        decimal totalArea = 0m;
+        decimal totalShares = 0m;
+        decimal familyArea;
+        decimal familyShares = 0m;
+        decimal selfFarmedArea = 0m;
+        decimal subleasedArea = 0m;
+        decimal contractedArea = 0m;
+        decimal familyIncome = 0m;
+
+        foreach (var group in groups)
+        {
+            var groupArea = (decimal)group.TotalArea;
+            var groupShares = (decimal)group.TotalShares;
+            totalArea += groupArea;
+            totalShares += groupShares;
+
+            var effectiveShares = LandShareCalculator.ComputeEffectiveShares(group);
+            decimal groupFamilyShares = 0m;
+            foreach (var (name, shares) in effectiveShares)
+            {
+                if (familyNames.Contains(name))
+                {
+                    familyShares += shares;
+                    groupFamilyShares += shares;
+                }
+            }
+
+            var familyRatio = groupShares > 0 ? groupFamilyShares / groupShares : 0m;
+
+            decimal groupIncome = 0m;
+            foreach (var record in group.Records)
+            {
+                groupIncome += record.LandValue;
+                switch (record.LandUsage)
+                {
+                    case DictionaryConstants.LandUsage.SELF_FARM:
+                        selfFarmedArea += record.LandArea;
+                        break;
+                    case DictionaryConstants.LandUsage.SUBLEASE:
+                        subleasedArea += record.LandArea;
+                        break;
+                    case DictionaryConstants.LandUsage.CONTRACT:
+                        contractedArea += record.LandArea;
+                        break;
+                }
+            }
+
+            familyIncome += Math.Round(groupIncome * familyRatio, 2);
+        }
+
+        familyArea = totalShares > 0
+            ? Math.Round(totalArea / totalShares * familyShares, 2)
+            : 0m;
+
+        var familyRatioAll = totalShares > 0 ? familyShares / totalShares : 0m;
+
+        return new LandConfirmationTotals(
+            Math.Round(familyIncome, 2),
+            familyArea,
+            Math.Round(selfFarmedArea * familyRatioAll, 2),
+            Math.Round(subleasedArea * familyRatioAll, 2),
+            Math.Round(contractedArea * familyRatioAll, 2));
     }
 
     private static bool HasAnyEconomicDetail(ApplicationFormEconomicDetailsDto details)
@@ -1758,7 +1991,8 @@ public sealed class ApplicationFormService(
            || (details.Vehicles?.Count ?? 0) > 0
            || (details.Machineries?.Count ?? 0) > 0
            || (details.FinancialAssets?.Count ?? 0) > 0
-           || (details.LandRegistrations?.Count ?? 0) > 0;
+           || (details.LandRegistrations?.Count ?? 0) > 0
+           || (details.LandConfirmationGroups?.Count ?? 0) > 0;
 
     // ───────────────────────────── 成员/赡养人映射 ─────────────────────────────
 
@@ -2289,7 +2523,9 @@ public sealed class ApplicationFormService(
             data.Vehicles,
             data.Machineries,
             data.FinancialAssets,
-            data.LandRegistrations);
+            data.LandRegistrations,
+            // 无数据时返回空数组，前端可直接 map/编辑，不出现 null。
+            data.LandConfirmationGroups ?? []);
 
     private static ApplicationFormClassificationDto ToClassificationDto(ApplicationEntity app)
     {
@@ -2317,6 +2553,14 @@ public sealed class ApplicationFormService(
         decimal TotalFamilyIncome,
         decimal PerCapitaAnnualIncome,
         decimal PerCapitaIncome);
+
+    /// <summary>土地确权汇总结果：Income/面积均为家庭份额折算后的年度口径。</summary>
+    private sealed record LandConfirmationTotals(
+        decimal Income,
+        decimal FamilyArea,
+        decimal SelfFarmedArea,
+        decimal SubleasedArea,
+        decimal ContractedArea);
 
     private static bool IsDraft(string? status)
         => string.Equals(status, ApplicationStatusCodes.DRAFT, StringComparison.OrdinalIgnoreCase);
