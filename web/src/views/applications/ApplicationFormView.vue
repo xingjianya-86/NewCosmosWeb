@@ -18,6 +18,7 @@ import Step2Members from './form/Step2Members.vue'
 import Step3Economy from './form/Step3Economy.vue'
 import Step4Survey from './form/Step4Survey.vue'
 import Step5Classification from './form/Step5Classification.vue'
+import VisitRecords from './form/VisitRecords.vue'
 import { cloneForm, createHeadMember, normalizeForm } from './form/formModel'
 import { createEmptyForm, type ApplicationFormModel } from './form/types'
 import { validateBasic } from './form/validation'
@@ -91,6 +92,15 @@ const canDelete = computed(
     form.value.id > 0 &&
     !isViewMode.value &&
     (form.value.status === 'Draft' || !form.value.status),
+)
+
+/** 提交前置：必须已有分类判定结果。 */
+const hasClassification = computed(
+  () =>
+    Boolean(
+      (form.value.classification.classificationResult ?? '').trim() ||
+        (form.value.classification.classificationText ?? '').trim(),
+    ),
 )
 
 /** 已完成的步骤可回看；向前切换要求第 1 步基本信息通过校验。 */
@@ -425,6 +435,11 @@ onMounted(() => {
       </div>
     </section>
 
+    <!-- 回访记录独立区：旧版位于五步卡之后、内容区之前，所有步骤可见；新申请不显示 -->
+    <section v-if="form.id > 0" class="form-visit" aria-label="回访记录">
+      <VisitRecords :form="form" :busy="saving || classifying || completing" />
+    </section>
+
     <!-- 内容区：左侧当前步骤 + 右侧 320px 来源数据栏 -->
     <div class="form-body">
       <section class="form-main" aria-live="polite">
@@ -464,7 +479,7 @@ onMounted(() => {
         </div>
 
         <template v-else>
-          <Step1Basic v-if="currentStep === 1" :form="form" />
+          <Step1Basic v-if="currentStep === 1" :form="form" @reload="reload" />
           <Step2Members v-else-if="currentStep === 2" :form="form" />
           <Step3Economy
             v-else-if="currentStep === 3"
@@ -552,11 +567,18 @@ onMounted(() => {
         </el-button>
       </div>
       <div class="form-actions__cell form-actions__cell--submit">
+        <span
+          v-if="currentStep >= 5 && !isViewMode && !hasClassification"
+          class="submit-hint"
+        >
+          请先完成分类判定
+        </span>
         <el-button
           v-if="currentStep >= 5 && !isViewMode"
           class="action-submit"
           :loading="completing"
-          :disabled="saving || classifying"
+          :disabled="saving || classifying || !hasClassification"
+          :title="hasClassification ? undefined : '请先完成分类判定'"
           @click="handleComplete"
         >
           提交
@@ -791,6 +813,11 @@ onMounted(() => {
   background-color: var(--nc-seal);
 }
 
+/* ── 回访记录区（五步卡之后、内容区之前） ─────────────────────── */
+.form-visit {
+  padding: 12px 16px 0;
+}
+
 /* ── 内容区 ───────────────────────────────────────────────────── */
 .form-body {
   display: grid;
@@ -924,6 +951,18 @@ onMounted(() => {
   margin-left: 0;
 }
 
+.form-actions__cell--submit {
+  flex-wrap: wrap;
+}
+
+.submit-hint {
+  flex: 1 1 100%;
+  color: var(--nc-amber-dark);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
 .form-actions :deep(.action-abandon) {
   border-color: rgba(127, 35, 27, 0.45);
   color: var(--nc-seal-dark);
@@ -998,6 +1037,10 @@ onMounted(() => {
 
   .form-steps {
     padding: 12px;
+  }
+
+  .form-visit {
+    padding: 12px 12px 0;
   }
 
   .form-main {

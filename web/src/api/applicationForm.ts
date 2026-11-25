@@ -86,3 +86,20 @@ export function deleteApplication(id: number | string): Promise<void> {
     .delete(`/applications/${encodeURIComponent(String(id))}`)
     .then(() => undefined)
 }
+
+/** 修改申请日期返回：新申请编号与联动后的入户调查日期（未联动时为 null）。 */
+export interface ChangeApplicationDateResult {
+  applicationNo: string
+  surveyDate: string | null
+}
+
+/** 修改申请日期（仅草稿；后端同改编号日期段与创建时间）。 */
+export function changeApplicationDate(
+  id: number | string,
+  newDate: string,
+): Promise<ChangeApplicationDateResult> {
+  const url = `/applications/${encodeURIComponent(String(id))}/application-date`
+  return apiHttp
+    .post<ChangeApplicationDateResult>(url, { newDate })
+    .then((response) => response.data)
+}

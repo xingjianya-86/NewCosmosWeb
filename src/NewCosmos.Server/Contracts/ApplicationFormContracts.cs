@@ -82,7 +82,18 @@ public sealed record ApplicationFormMemberDto(
     bool IsSingleRescue,
     string SelfCareAbility);
 
-/// <summary>赡养/抚养/扶养义务人（Step3）。</summary>
+/// <summary>
+/// 赡养/抚养/扶养义务人（Step3）。
+/// <para>
+/// 新增字段一律放在末尾并带默认值，保持旧客户端（只传前 9 个字段）反序列化兼容。
+/// </para>
+/// <para>
+/// 口径：AnnualSupportFee 为只读派生值，服务端按
+/// <c>round(MonthlySupportFee × SupportMonths × FamilySize, 2)</c> 重算并忽略前端传值；
+/// FamilySize 是**申请表家庭人口**（含户主，年费乘数，只读展示），不是赡养人自家人口——
+/// 后者落在 nc_biz_family_members.family_size，服务端沿用旧值、不在表单编辑。
+/// </para>
+/// </summary>
 public sealed record ApplicationFormSupporterDto(
     long Id,
     string Name,
@@ -92,7 +103,13 @@ public sealed record ApplicationFormSupporterDto(
     int? Age,
     decimal? AnnualSupportFee,
     decimal? MonthlySupportFee,
-    bool IsSupportAbility);
+    bool IsSupportAbility,
+    string? PersonType = null,
+    decimal? MonthlyIncomeCapacity = null,
+    int? SupportMonths = null,
+    int? FamilySize = null,
+    string? Phone = null,
+    string? Address = null);
 
 /// <summary>
 /// 家庭经济收入（Step4）。月项：work/business/property/transfer/other/rigidExpenditure；

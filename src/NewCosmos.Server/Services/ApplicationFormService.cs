@@ -98,6 +98,13 @@ public sealed class ApplicationFormService(
                 economicDetailsResult.ErrorCode!, economicDetailsResult.Message!);
         }
 
+        // 赡养行由 supporters 块承载，members 只返回户主 + 共同生活成员，避免前端重复展示。
+        var members = (membersResult.Value ?? [])
+            .Where(m => !IsSupportMember(m))
+            .ToList();
+        // 年赡养费乘数 = 申请表家庭人口；主表 family_size 尚未回填时按成员行现算。
+        var familySize = ResolveApplicationFamilySize(app.FamilySize, members);
+
         var dto = new ApplicationFormDto(
             app.Id,
             app.ApplicationNo ?? string.Empty,
@@ -105,12 +112,10 @@ public sealed class ApplicationFormService(
             ApplicationQueryService.ToStatusText(app.Status),
             app.CurrentStep,
             ToBasicDto(app),
-            // 赡养行由 supporters 块承载，members 只返回户主 + 共同生活成员，避免前端重复展示。
-            (membersResult.Value ?? [])
-                .Where(m => !IsSupportMember(m))
-                .Select(ToMemberDto)
+            members.Select(ToMemberDto).ToList(),
+            (supportersResult.Value ?? [])
+                .Select(supporter => ToSupporterDto(supporter, familySize))
                 .ToList(),
-            (supportersResult.Value ?? []).Select(ToSupporterDto).ToList(),
             ToEconomyDto(app),
             ToSurveyDto(surveyResult.Value),
             ToClassificationDto(app),
@@ -131,7 +136,10 @@ public sealed class ApplicationFormService(
     {
         var members = request.Members ?? [];
         var familySize = ResolveFamilySize(members);
-        var totals = CalculateIncome(request.Economy, familySize);
+        var alimonyAnnual = request.Supporters is { } createSupporters
+            ? ResolveAlimonyAnnual(createSupporters, familySize)
+            : 0m;
+        var totals = CalculateIncome(request.Economy, familySize, alimonyAnnual);
 
         var application = new ApplicationEntity();
         if (request.Basic is { } basic)
@@ -139,7 +147,7 @@ public sealed class ApplicationFormService(
             ApplyBasic(application, basic);
         }
         ApplyHeadMemberToApplication(application, members);
-        ApplyEconomy(application, request.Economy, familySize, totals);
+        ApplyEconomy(application, request.Economy, familySize, alimonyAnnual, totals);
         ApplyEconomicDetailsTotals(application, request.EconomicDetails, request.Economy, familySize);
 
         if (string.IsNullOrWhiteSpace(application.ApplicantName)
@@ -181,7 +189,7 @@ public sealed class ApplicationFormService(
                 return ToFailure(touchResult);
             }
 
-            var related = await SaveRelatedAsync(createdId, request, operatorName, token);
+            var related = await SaveRelatedAsync(createdId, request, familySize, operatorName, token);
             if (related.IsFailure)
             {
                 return related;
@@ -252,10 +260,28 @@ public sealed class ApplicationFormService(
         var familySize = request.Members is { } memberList
             ? ResolveFamilySize(memberList)
             : application.FamilySize;
+        // 未携带成员块且主表 family_size 为空（历史/外部建档）时，从已落库成员行补算，
+        // 避免赡养年费乘数退化成 1。
+        if (familySize <= 0)
+        {
+            var storedMembers = await familyMembers.GetByApplicationIdAsync(applicationId, ct);
+            if (storedMembers.IsFailure)
+            {
+                return Result.Failure<ApplicationFormSaveResult>(
+                    storedMembers.ErrorCode!, storedMembers.Message!);
+            }
+
+            var shared = (storedMembers.Value ?? []).Where(m => !IsSupportMember(m)).ToList();
+            familySize = ResolveApplicationFamilySize(0, shared);
+        }
+        // 赡养收入只由 supporters 块派生；未传 supporters 时沿用主表现值。
+        var alimonyAnnual = request.Supporters is { } updateSupporters
+            ? ResolveAlimonyAnnual(updateSupporters, familySize)
+            : application.AlimonyIncome;
         var totals = request.Economy is { } economy
-            ? CalculateIncome(economy, familySize)
+            ? CalculateIncome(economy, familySize, alimonyAnnual)
             : null;
-        ApplyEconomy(application, request.Economy, familySize, totals);
+        ApplyEconomy(application, request.Economy, familySize, alimonyAnnual, totals);
         ApplyEconomicDetailsTotals(application, request.EconomicDetails, request.Economy, familySize);
 
         if (string.IsNullOrWhiteSpace(application.ApplicantName)
@@ -282,7 +308,7 @@ public sealed class ApplicationFormService(
                 return updateResult;
             }
 
-            return await SaveRelatedAsync(applicationId, request, operatorName, token);
+            return await SaveRelatedAsync(applicationId, request, familySize, operatorName, token);
         }, ct);
 
         if (saveResult.IsFailure)
@@ -679,6 +705,7 @@ public sealed class ApplicationFormService(
     private async Task<Result> SaveRelatedAsync(
         long applicationId,
         ApplicationFormSaveRequest request,
+        int familySize,
         string operatorName,
         CancellationToken ct)
     {
@@ -703,7 +730,8 @@ public sealed class ApplicationFormService(
 
         if (request.Supporters is { } supporterDtos)
         {
-            var saveSupporters = await SaveSupportersAsync(applicationId, supporterDtos, ct);
+            var saveSupporters = await SaveSupportersAsync(
+                applicationId, supporterDtos, familySize, ct);
             if (saveSupporters.IsFailure)
             {
                 return saveSupporters;
@@ -1011,9 +1039,16 @@ public sealed class ApplicationFormService(
         return Result.Success(idMap);
     }
 
+    /// <summary>
+    /// 保存赡养/抚养/扶养义务人。年赡养费是只读派生值：
+    /// <c>round(月费 × 月数 × 申请表家庭人口, 2)</c>，前端传来的 annualSupportFee 一律忽略；
+    /// 月数落在 nc_biz_family_members.support_months（supporter 行，member_category='Support'），
+    /// 家庭人口乘数取申请表 family_size（由成员行解析），赡养人自家人口 family_size 列沿用旧值。
+    /// </summary>
     private async Task<Result> SaveSupportersAsync(
         long applicationId,
         List<ApplicationFormSupporterDto> supporterDtos,
+        int familySize,
         CancellationToken ct)
     {
         var existingResult = await supporters.GetByApplicationIdAsync(applicationId, ct);
@@ -1033,6 +1068,20 @@ public sealed class ApplicationFormService(
             }
         }
 
+        // 部分保存（只传 supporters、不带 members）时 familySize 可能为 0：从已落库成员行补算。
+        if (familySize <= 0)
+        {
+            var membersResult = await familyMembers.GetByApplicationIdAsync(applicationId, ct);
+            if (membersResult.IsFailure)
+            {
+                return Result.Failure(membersResult.ErrorCode!, membersResult.Message!);
+            }
+
+            var shared = (membersResult.Value ?? []).Where(m => !IsSupportMember(m)).ToList();
+            familySize = ResolveApplicationFamilySize(0, shared);
+        }
+
+        var multiplier = familySize > 0 ? familySize : 1;
         var list = new List<Supporter>(supporterDtos.Count);
 
         foreach (var dto in supporterDtos)
@@ -1044,6 +1093,18 @@ public sealed class ApplicationFormService(
                 id = byCard.Id;
             }
 
+            Supporter? existing = null;
+            if (id > 0)
+            {
+                existingById.TryGetValue(id, out existing);
+            }
+
+            // 月数：本次有值优先；否则沿用旧行；旧行也没有则按旧版默认 12。
+            var months = dto.SupportMonths is > 0
+                ? dto.SupportMonths.Value
+                : existing is { SupportMonths: > 0 } ? existing.SupportMonths : 12;
+            var monthly = ResolveMonthlySupportFee(dto);
+
             var supporter = new Supporter
             {
                 Id = id,
@@ -1053,24 +1114,21 @@ public sealed class ApplicationFormService(
                 Relationship = ToCoreRelationship(dto.Relation),
                 Gender = NormalizeGender(dto.Gender),
                 Age = dto.Age,
-                MonthlySupportFee = dto.MonthlySupportFee ?? 0m,
+                MonthlySupportFee = monthly,
                 IsSupportAbility = dto.IsSupportAbility,
-                SupportMonths = 12,
+                SupportMonths = months,
                 SupporterFamilySize = 1
             };
 
-            if (supporter.Id > 0 && existingById.TryGetValue(supporter.Id, out var existing))
+            if (existing is not null)
             {
-                // 表单未建模的赡养人字段（人员类型、月数、自家人口、地址、收入能力等）沿用旧值。
-                supporter.PersonType = existing.PersonType;
-                supporter.SupportMonths = existing.SupportMonths > 0 ? existing.SupportMonths : 12;
+                // 表单未建模的赡养人字段（地址、自家人口、收入能力等）沿用旧值；
+                // 本次显式传入的新增字段优先（GET 回传同一份快照，等价于原样保留）。
                 supporter.SupporterFamilySize = existing.SupporterFamilySize > 0
                     ? existing.SupporterFamilySize
                     : 1;
-                supporter.MonthlyIncomeCapacity = existing.MonthlyIncomeCapacity;
                 supporter.AnnualIncome = existing.AnnualIncome;
                 supporter.Ethnicity = existing.Ethnicity;
-                supporter.Phone = existing.Phone;
                 supporter.HukouType = existing.HukouType;
                 supporter.MaritalStatus = existing.MaritalStatus;
                 supporter.EducationLevel = existing.EducationLevel;
@@ -1085,15 +1143,46 @@ public sealed class ApplicationFormService(
                 supporter.HomeDistrict = existing.HomeDistrict;
                 supporter.HomeTown = existing.HomeTown;
                 supporter.HomeVillage = existing.HomeVillage;
-                supporter.HomeAddress = existing.HomeAddress;
                 supporter.HukouProvince = existing.HukouProvince;
                 supporter.HukouCity = existing.HukouCity;
                 supporter.HukouDistrict = existing.HukouDistrict;
                 supporter.HukouTown = existing.HukouTown;
             }
 
-            // 最后赋值年赡养费：避免 ObservableObject 的月费/月数/人数联动把请求值覆盖。
-            supporter.AnnualSupportFee = dto.AnnualSupportFee ?? 0m;
+            if (!string.IsNullOrWhiteSpace(dto.PersonType))
+            {
+                supporter.PersonType = dto.PersonType.Trim();
+            }
+            else if (existing is not null)
+            {
+                supporter.PersonType = existing.PersonType;
+            }
+
+            if (!string.IsNullOrWhiteSpace(dto.Phone))
+            {
+                supporter.Phone = dto.Phone.Trim();
+            }
+            else if (existing is not null)
+            {
+                supporter.Phone = existing.Phone;
+            }
+
+            if (!string.IsNullOrWhiteSpace(dto.Address))
+            {
+                supporter.HomeAddress = dto.Address.Trim();
+            }
+            else if (existing is not null)
+            {
+                supporter.HomeAddress = existing.HomeAddress;
+            }
+
+            supporter.MonthlyIncomeCapacity = dto.MonthlyIncomeCapacity
+                ?? existing?.MonthlyIncomeCapacity
+                ?? 0m;
+
+            // 年费最后赋值：避免 ObservableObject 的月费/月数/人数联动覆盖本次公式结果。
+            supporter.CalcFamilySize = multiplier;
+            supporter.AnnualSupportFee = CalculateAnnualSupportFee(monthly, months, multiplier);
             list.Add(supporter);
         }
 
@@ -1283,9 +1372,12 @@ public sealed class ApplicationFormService(
         ApplicationEntity application,
         ApplicationFormEconomyDto? economy,
         int familySize,
+        decimal alimonyAnnual,
         IncomeTotals? totals)
     {
         application.FamilySize = familySize;
+        // 赡养年值只认 supporters 派生值（旧版口径），前端 economy.AlimonyIncome 一律忽略。
+        application.AlimonyIncome = alimonyAnnual;
 
         if (economy is null || totals is null)
         {
@@ -1297,7 +1389,6 @@ public sealed class ApplicationFormService(
         application.PropertyIncomeTotal = economy.PropertyIncome ?? 0m;
         application.TransferIncomeTotal = economy.TransferIncome ?? 0m;
         application.OtherIncomeTotal = economy.OtherIncome ?? 0m;
-        application.AlimonyIncome = economy.AlimonyIncome ?? 0m;
         application.LandIncomeTotal = economy.LandIncome ?? 0m;
         application.SubsidyTotal = economy.SubsidyTotal ?? 0m;
         application.RigidExpenditure = economy.RigidExpenditure ?? 0m;
@@ -1313,7 +1404,10 @@ public sealed class ApplicationFormService(
         application.PerCapitaIncome = totals.PerCapitaIncome;
     }
 
-    private IncomeTotals CalculateIncome(ApplicationFormEconomyDto? economy, int familySize)
+    private IncomeTotals CalculateIncome(
+        ApplicationFormEconomyDto? economy,
+        int familySize,
+        decimal alimonyAnnual)
     {
         if (economy is null)
         {
@@ -1326,7 +1420,7 @@ public sealed class ApplicationFormService(
             economy.PropertyIncome ?? 0m,
             economy.TransferIncome ?? 0m,
             economy.OtherIncome ?? 0m,
-            economy.AlimonyIncome ?? 0m,
+            alimonyAnnual,
             economy.LandIncome ?? 0m,
             economy.SubsidyTotal ?? 0m,
             economy.RigidExpenditure ?? 0m);
@@ -1363,7 +1457,7 @@ public sealed class ApplicationFormService(
         var rigidExpenditure = incomeCalculation.CalculateRigidExpenditure(
             details.RigidExpenditures ?? []);
 
-        var alimonyAnnual = economy?.AlimonyIncome ?? application.AlimonyIncome;
+        var alimonyAnnual = application.AlimonyIncome;
         var landIncome = economy?.LandIncome ?? application.LandIncomeTotal;
 
         var totalAnnual = incomeCalculation.CalculateAnnualFamilyIncome(
@@ -1447,8 +1541,23 @@ public sealed class ApplicationFormService(
             member.IsSingleRescue,
             member.SelfCareAbility ?? string.Empty);
 
-    private static ApplicationFormSupporterDto ToSupporterDto(Supporter supporter)
-        => new(
+    /// <summary>
+    /// 赡养人回填。年费 = 月费 × 月数 × 申请表家庭人口（familySize 参数）；
+    /// 旧数据年费 &gt; 0、月费 = 0（且仍有赡养能力）时按旧版回退月费 = 年费 / 12、月数 = 12，
+    /// 避免打开卡片就显示 0 导致保存后赡养收入被清零。
+    /// </summary>
+    private static ApplicationFormSupporterDto ToSupporterDto(Supporter supporter, int familySize)
+    {
+        var monthly = supporter.MonthlySupportFee;
+        var months = supporter.SupportMonths > 0 ? supporter.SupportMonths : 12;
+
+        if (supporter.IsSupportAbility && monthly <= 0 && supporter.AnnualSupportFee > 0)
+        {
+            monthly = Math.Round(supporter.AnnualSupportFee / 12m, 2);
+            months = 12;
+        }
+
+        return new ApplicationFormSupporterDto(
             supporter.Id,
             supporter.Name ?? string.Empty,
             supporter.IdCard ?? string.Empty,
@@ -1456,8 +1565,15 @@ public sealed class ApplicationFormService(
             supporter.Gender ?? string.Empty,
             supporter.Age,
             supporter.AnnualSupportFee,
-            supporter.MonthlySupportFee,
-            supporter.IsSupportAbility);
+            monthly,
+            supporter.IsSupportAbility,
+            supporter.PersonType ?? string.Empty,
+            supporter.MonthlyIncomeCapacity,
+            months,
+            familySize > 0 ? familySize : 1,
+            supporter.Phone ?? string.Empty,
+            supporter.HomeAddress ?? string.Empty);
+    }
 
     private static FamilyMemberCreateRequest ToMemberCreateRequest(
         long applicationId,
@@ -1802,6 +1918,101 @@ public sealed class ApplicationFormService(
         }
 
         return hasHouseholdHead ? sharedCount : sharedCount + 1;
+    }
+
+    /// <summary>
+    /// 年赡养费口径复用 Core <see cref="Supporter"/> 的联动公式：
+    /// 月费 × 月数 × 申请表家庭人口（CalcFamilySize），结果舍入到分。
+    /// </summary>
+    private static decimal CalculateAnnualSupportFee(decimal monthlySupportFee, int supportMonths, int familySize)
+    {
+        var months = supportMonths > 0 ? supportMonths : 12;
+        var size = familySize > 0 ? familySize : 1;
+        var supporter = new Supporter
+        {
+            MonthlySupportFee = monthlySupportFee,
+            SupportMonths = months,
+            SupporterFamilySize = size,
+            CalcFamilySize = size
+        };
+        return supporter.AnnualSupportFee;
+    }
+
+    /// <summary>
+    /// 月赡养费：以本次请求为准；旧客户端只传年费时按旧版回退 月费 = 年费 / 12。
+    /// </summary>
+    private static decimal ResolveMonthlySupportFee(ApplicationFormSupporterDto dto)
+    {
+        if (dto.MonthlySupportFee is { } monthly)
+        {
+            return monthly > 0 ? monthly : 0m;
+        }
+
+        if (dto.AnnualSupportFee is { } annual && annual > 0)
+        {
+            return Math.Round(annual / 12m, 2);
+        }
+
+        return 0m;
+    }
+
+    /// <summary>
+    /// 赡养年收入 = Σ(有赡养能力者的年赡养费)，逐笔年费先舍入、再求和（legacy
+    /// IncomeCalculationService.CalculateAlimonyAnnual 口径）。前端 economy.AlimonyIncome 不参与。
+    /// </summary>
+    private static decimal ResolveAlimonyAnnual(
+        IEnumerable<ApplicationFormSupporterDto>? supporterDtos,
+        int familySize)
+    {
+        if (supporterDtos is null)
+        {
+            return 0m;
+        }
+
+        var multiplier = familySize > 0 ? familySize : 1;
+        decimal total = 0m;
+        foreach (var dto in supporterDtos)
+        {
+            if (!dto.IsSupportAbility)
+            {
+                continue;
+            }
+
+            var months = dto.SupportMonths is > 0 ? dto.SupportMonths.Value : 12;
+            total += CalculateAnnualSupportFee(ResolveMonthlySupportFee(dto), months, multiplier);
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// 申请表家庭人口（含户主）：主表 family_size 已有值优先；否则按共同生活成员行现算，
+    /// 无户主行时 +1（与前端 Step2「共同生活成员数 + 1」同口径）。
+    /// </summary>
+    private static int ResolveApplicationFamilySize(
+        int storedFamilySize,
+        IReadOnlyCollection<FamilyMember> members)
+    {
+        if (storedFamilySize > 0)
+        {
+            return storedFamilySize;
+        }
+
+        if (members.Count == 0)
+        {
+            return 1;
+        }
+
+        var hasHouseholdHead = members.Any(member =>
+            member.IsHouseholdHead
+            || member.IsApplicant
+            || string.Equals(
+                MemberCategoryHelper.Normalize(
+                    member.MemberCategory, member.IsApplicant, member.RelationshipToHead),
+                MemberCategoryConstants.HOUSEHOLD_HEAD,
+                StringComparison.OrdinalIgnoreCase));
+
+        return hasHouseholdHead ? members.Count : members.Count + 1;
     }
 
     private static string ComposeHukouAddress(ApplicationFormBasicDto basic)

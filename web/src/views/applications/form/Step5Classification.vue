@@ -1,21 +1,44 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { MagicStick } from '@element-plus/icons-vue'
 import NcCard from '@/components/NcCard.vue'
 import NcStat from '@/components/NcStat.vue'
 import CaregiverList from './CaregiverList.vue'
-import { formatDate, formatMoney } from '../format'
+import { formatDate } from '../format'
 import type { ApplicationFormModel } from './types'
 
 const props = defineProps<{ form: ApplicationFormModel; busy?: boolean }>()
 
-const emit = defineEmits<{ (e: 'classify'): void; (e: 'complete'): void }>()
+const emit = defineEmits<{ (e: 'classify'): void }>()
 
 const classification = computed(() => props.form.classification)
-const basic = computed(() => props.form.basic)
-const supporters = computed(() => props.form.supporters ?? [])
 
-/** 分类代码 → 中文名称；只展示中文，不显示 RuralSubsistence 等代码。 */
+/**
+ * 服务端 classification 契约目前只覆盖判定结果与金额；能力鉴定、判定明细、
+ * 分类施保明细、渐退开始日期/原保障金额尚无字段。这里按可选字段只读读取，
+ * 有值才展示，没有值统一显示“—”，不伪造数据。
+ */
+interface ClassificationExtras {
+  originalGuaranteeAmount?: number | null
+  gracePeriodStartDate?: string | null
+  determinationDetails?: string[] | null
+  classifiedSubsidyTypes?: string | null
+  classifiedSubsidyCount?: number | null
+  classifiedSubsidyPerPerson?: number | null
+  capabilityEating?: boolean | null
+  capabilityDressing?: boolean | null
+  capabilityGettingInOutOfBed?: boolean | null
+  capabilityUsingToilet?: boolean | null
+  capabilityIndoorWalking?: boolean | null
+  capabilityBathing?: boolean | null
+  capabilityCompletedItems?: number | null
+  capabilitySelfCareLevel?: string | null
+}
+
+const extras = computed(
+  () => props.form.classification as unknown as ClassificationExtras,
+)
+
+/** 分类代码 → 中文名称；服务端 classificationText 优先，未命中保留原值。 */
 const CLASSIFICATION_NAMES: Record<string, string> = {
   RuralSubsistence: '最低生活保障对象',
   UrbanSubsistence: '最低生活保障对象',
@@ -44,78 +67,201 @@ const CLASSIFICATION_NAMES: Record<string, string> = {
 function classificationName(value: string | null | undefined): string {
   const text = (value ?? '').trim()
   if (!text) return ''
-  const mapped = CLASSIFICATION_NAMES[text]
-  if (mapped) return mapped
-  return /[\u4e00-\u9fa5]/.test(text) ? text : ''
+  return CLASSIFICATION_NAMES[text] ?? text
 }
 
-const hasResult = computed(() =>
-  Boolean(
-    classification.value.classificationResult.trim() ||
-      classification.value.classificationText.trim(),
+const hasResult = computed(
+  () =>
+    Boolean(
+      (classification.value.classificationResult ?? '').trim() ||
+        (classification.value.classificationText ?? '').trim(),
+    ) || classification.value.isEligible,
+)
+
+const classificationLabel = computed(() => {
+  const label =
+    classificationName(classification.value.classificationText) ||
+    classificationName(classification.value.classificationResult)
+  return label || '未识别分类'
+})
+
+const eligibilityLabel = computed(() =>
+  classification.value.isEligible ? '符合' : '不符合',
+)
+
+/** 特困判定：分类代码或中文名包含“特困 / Destitute”。 */
+const isDestitute = computed(() =>
+  /特困|destitute/i.test(
+    `${classification.value.classificationResult ?? ''} ${
+      classification.value.classificationText ?? ''
+    }`,
   ),
 )
 
-const classificationLabel = computed(
-  () =>
-    classificationName(classification.value.classificationText) ||
-    classificationName(classification.value.classificationResult) ||
-    '尚未分类认定',
-)
-
-const eligibilityLabel = computed(() => {
-  if (!hasResult.value) return '—'
-  return classification.value.isEligible ? '符合' : '不符合'
+const amountFormatter = new Intl.NumberFormat('zh-CN', {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 0,
 })
-
-const graceStatus = computed(() => {
-  if (!hasResult.value) return '—'
-  return classification.value.isInGracePeriod ? '是' : '否'
-})
-
-const graceMonths = computed(() => {
-  const months = classification.value.gracePeriodMonths
-  return months == null ? '—' : `${months} 个月`
-})
-
-const graceEndDate = computed(() => formatDate(classification.value.gracePeriodEndDate))
 
 function amountText(value: number | null | undefined): string {
-  return hasResult.value ? formatMoney(value) : '—'
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—'
+  return `${amountFormatter.format(value)} 元`
 }
+
+const graceMonthsText = computed(() => {
+  const months = classification.value.gracePeriodMonths
+  return months === null || months === undefined ? '—' : `${months} 个月`
+})
+
+const graceOriginalAmountText = computed(() =>
+  amountText(extras.value.originalGuaranteeAmount),
+)
+
+const graceStartDateText = computed(() =>
+  extras.value.gracePeriodStartDate
+    ? formatDate(extras.value.gracePeriodStartDate)
+    : '—',
+)
+
+const graceEndDateText = computed(() =>
+  formatDate(classification.value.gracePeriodEndDate),
+)
+
+/** 旧版口径：剩余 N 天（至 yyyy-MM-dd）/ 已结束（yyyy-MM-dd）/ 渐退期中。 */
+function dateOnly(value: string): Date | null {
+  const matched = /^(\d{4})-(\d{2})-(\d{2})/.exec(value)
+  if (matched) {
+    return new Date(Number(matched[1]), Number(matched[2]) - 1, Number(matched[3]))
+  }
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+const graceStatusText = computed(() => {
+  if (!classification.value.isInGracePeriod) return '—'
+  const endDate = dateOnly(classification.value.gracePeriodEndDate)
+  if (!endDate) return '渐退期中'
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const daysLeft = Math.round((endDate.getTime() - today.getTime()) / 86_400_000)
+  return daysLeft >= 0
+    ? `剩余 ${daysLeft} 天（至 ${formatDate(classification.value.gracePeriodEndDate)}）`
+    : `已结束（${formatDate(classification.value.gracePeriodEndDate)}）`
+})
+
+const classifiedSubsidy = computed(() => {
+  const count = extras.value.classifiedSubsidyCount
+  return {
+    types: extras.value.classifiedSubsidyTypes?.trim() || '—',
+    count: count === null || count === undefined ? '—' : `${count} 人`,
+    perPerson: amountText(extras.value.classifiedSubsidyPerPerson),
+  }
+})
+
+const determinationDetails = computed<string[]>(() => {
+  const value = extras.value.determinationDetails
+  if (!Array.isArray(value)) return []
+  return value.filter(
+    (item): item is string => typeof item === 'string' && item.trim() !== '',
+  )
+})
+
+function capabilityText(value: boolean | null | undefined): string {
+  if (value === true) return '✓ 能'
+  if (value === false) return '✗ 不能'
+  return '—'
+}
+
+const capabilityItems = computed(() => [
+  { label: '进食', value: capabilityText(extras.value.capabilityEating) },
+  { label: '穿衣', value: capabilityText(extras.value.capabilityDressing) },
+  {
+    label: '上下床',
+    value: capabilityText(extras.value.capabilityGettingInOutOfBed),
+  },
+  { label: '如厕', value: capabilityText(extras.value.capabilityUsingToilet) },
+  {
+    label: '室内行走',
+    value: capabilityText(extras.value.capabilityIndoorWalking),
+  },
+  { label: '洗澡', value: capabilityText(extras.value.capabilityBathing) },
+])
+
+const capabilityCompletedText = computed(() => {
+  const count = extras.value.capabilityCompletedItems
+  return count === null || count === undefined ? '—' : `${count}/6 项`
+})
+
+const capabilityLevelText = computed(
+  () => extras.value.capabilitySelfCareLevel?.trim() || '—',
+)
 </script>
 
 <template>
   <div class="step-classification">
-    <NcCard title="分类认定">
+    <!-- 卡1：分类判定 -->
+    <NcCard title="🔍 分类判定">
+      <template #actions>
+        <el-button
+          v-if="hasResult"
+          :loading="busy"
+          :disabled="busy"
+          @click="emit('classify')"
+        >
+          重新判定
+        </el-button>
+        <el-button
+          v-else
+          type="primary"
+          :loading="busy"
+          :disabled="busy"
+          @click="emit('classify')"
+        >
+          执行判定
+        </el-button>
+      </template>
+    </NcCard>
+
+    <!-- 卡2：特困供养信息（仅特困分类显示） -->
+    <NcCard v-if="isDestitute" title="🏠 特困供养信息">
       <dl class="detail-grid">
+        <div class="detail-item">
+          <dt>供养方式</dt>
+          <dd class="is-empty">—</dd>
+        </div>
+        <div class="detail-item">
+          <dt>供养机构</dt>
+          <dd class="is-empty">—</dd>
+        </div>
+        <div class="detail-item detail-item--wide">
+          <dt>机构详情</dt>
+          <dd class="is-empty">—</dd>
+        </div>
+      </dl>
+
+      <div class="section-divider" />
+
+      <CaregiverList :form="form" :busy="busy" />
+    </NcCard>
+
+    <!-- 卡3：判定结果（仅已判定显示） -->
+    <NcCard v-if="hasResult" title="📊 判定结果">
+      <dl class="detail-grid">
+        <div class="detail-item">
+          <dt>分类结果</dt>
+          <dd class="detail-value detail-value--name">{{ classificationLabel }}</dd>
+        </div>
         <div class="detail-item">
           <dt>是否符合</dt>
           <dd
             class="detail-value"
-            :class="{
-              'is-eligible': hasResult && classification.isEligible,
-              'is-ineligible': hasResult && !classification.isEligible,
-            }"
+            :class="classification.isEligible ? 'is-eligible' : 'is-ineligible'"
           >
             {{ eligibilityLabel }}
           </dd>
         </div>
-
-        <div class="detail-item">
-          <dt>分类</dt>
-          <dd class="detail-value detail-value--name">{{ classificationLabel }}</dd>
-        </div>
-
-        <div class="detail-item detail-item--wide">
-          <dt>判定依据</dt>
-          <dd :class="{ 'is-empty': !classification.determinationBasis }">
-            {{ classification.determinationBasis || '—' }}
-          </dd>
-        </div>
-
         <div
-          v-if="hasResult && !classification.isEligible"
+          v-if="!classification.isEligible"
           class="detail-item detail-item--wide"
         >
           <dt>不符合原因</dt>
@@ -123,112 +269,160 @@ function amountText(value: number | null | undefined): string {
             {{ classification.ineligibleReason || '—' }}
           </dd>
         </div>
+      </dl>
 
+      <!-- 保障金额子卡 -->
+      <section class="amount-card">
+        <h3 class="sub-title">💰 保障金额</h3>
+        <div class="amount-grid">
+          <NcStat
+            label="月保障金额"
+            :value="amountText(classification.householdMonthlyGuaranteeAmount)"
+            tone="ink"
+            compact
+          />
+          <NcStat
+            label="照料护理费"
+            :value="amountText(classification.caregiverSubsidyAmount)"
+            tone="amber"
+            compact
+          />
+          <NcStat
+            label="分类施保"
+            :value="amountText(classification.classifiedSubsidyAmount)"
+            tone="pine"
+            compact
+          />
+          <NcStat
+            label="合计保障"
+            :value="amountText(classification.totalGuaranteeAmount)"
+            tone="seal"
+            compact
+          />
+        </div>
+      </section>
+
+      <!-- 分类施保详情：服务端未提供时全部显示“—” -->
+      <section class="subsidy-detail">
+        <h3 class="sub-title">分类施保详情</h3>
+        <dl class="detail-grid">
+          <div class="detail-item">
+            <dt>符合条件类型</dt>
+            <dd :class="{ 'is-empty': classifiedSubsidy.types === '—' }">
+              {{ classifiedSubsidy.types }}
+            </dd>
+          </div>
+          <div class="detail-item">
+            <dt>符合条件人数</dt>
+            <dd :class="{ 'is-empty': classifiedSubsidy.count === '—' }">
+              {{ classifiedSubsidy.count }}
+            </dd>
+          </div>
+          <div class="detail-item detail-item--wide">
+            <dt>每人标准</dt>
+            <dd :class="{ 'is-empty': classifiedSubsidy.perPerson === '—' }">
+              {{ classifiedSubsidy.perPerson }}
+            </dd>
+          </div>
+        </dl>
+      </section>
+    </NcCard>
+
+    <!-- 卡4：渐退期（仅渐退期内显示） -->
+    <NcCard
+      v-if="classification.isInGracePeriod"
+      title="🔄 渐退期"
+    >
+      <dl class="detail-grid">
+        <div class="detail-item">
+          <dt>渐退期月数</dt>
+          <dd class="detail-value">{{ graceMonthsText }}</dd>
+        </div>
+        <div class="detail-item">
+          <dt>原保障金额</dt>
+          <dd
+            class="detail-value"
+            :class="{ 'is-empty': graceOriginalAmountText === '—' }"
+          >
+            {{ graceOriginalAmountText }}
+          </dd>
+        </div>
+        <div class="detail-item">
+          <dt>渐退开始</dt>
+          <dd :class="{ 'is-empty': graceStartDateText === '—' }">
+            {{ graceStartDateText }}
+          </dd>
+        </div>
+        <div class="detail-item">
+          <dt>渐退结束</dt>
+          <dd :class="{ 'is-empty': graceEndDateText === '—' }">
+            {{ graceEndDateText }}
+          </dd>
+        </div>
         <div class="detail-item detail-item--wide">
-          <dt>渐退期</dt>
-          <dd class="grace-inline">
-            <span>是否：<strong>{{ graceStatus }}</strong></span>
-            <span>月数：<strong>{{ graceMonths }}</strong></span>
-            <span>结束日期：<strong>{{ graceEndDate }}</strong></span>
+          <dt>状态</dt>
+          <dd class="grace-status">{{ graceStatusText }}</dd>
+        </div>
+      </dl>
+    </NcCard>
+
+    <!-- 卡5：判定依据（仅已判定显示） -->
+    <NcCard v-if="hasResult" title="📋 判定依据">
+      <dl class="detail-grid">
+        <div class="detail-item detail-item--wide">
+          <dt>判定依据</dt>
+          <dd
+            class="basis-text"
+            :class="{ 'is-empty': !classification.determinationBasis }"
+          >
+            {{ classification.determinationBasis || '—' }}
           </dd>
         </div>
       </dl>
 
-      <template #footer>
-        <div class="result-actions">
-          <el-button :icon="MagicStick" :loading="busy" @click="emit('classify')">
-            {{ hasResult ? '重新认定' : '分类认定' }}
-          </el-button>
-        </div>
-      </template>
-    </NcCard>
+      <div class="section-divider" />
 
-    <NcCard title="保障金额">
-      <div class="amount-grid">
-        <NcStat
-          label="月保障金"
-          :value="amountText(classification.householdMonthlyGuaranteeAmount)"
-          hint="元 / 月"
-          tone="ink"
-          compact
-        />
-        <NcStat
-          label="分类施保"
-          :value="amountText(classification.classifiedSubsidyAmount)"
-          hint="元 / 月"
-          tone="amber"
-          compact
-        />
-        <NcStat
-          label="护理补贴"
-          :value="amountText(classification.caregiverSubsidyAmount)"
-          hint="元 / 月"
-          tone="pine"
-          compact
-        />
-        <NcStat
-          label="合计"
-          :value="amountText(classification.totalGuaranteeAmount)"
-          hint="元 / 月"
-          tone="seal"
-          compact
-        />
-      </div>
-    </NcCard>
-
-    <NcCard title="赡养 / 抚养 / 扶养人">
-      <el-empty
-        v-if="supporters.length === 0"
-        class="supporter-empty"
-        description="暂无赡养 / 抚养 / 扶养人"
-        :image-size="64"
-      />
-
-      <ul v-else class="supporter-list">
+      <h3 class="sub-title">判定明细</h3>
+      <ul v-if="determinationDetails.length > 0" class="detail-list">
         <li
-          v-for="(supporter, index) in supporters"
-          :key="supporter.id || index"
-          class="supporter-item"
+          v-for="(detail, index) in determinationDetails"
+          :key="`${index}-${detail}`"
         >
-          <div class="supporter-head">
-            <span class="supporter-index">赡养人 {{ index + 1 }}</span>
-            <strong class="supporter-name">{{ supporter.name || '未填写姓名' }}</strong>
-            <span class="supporter-relation">{{ supporter.relation || '—' }}</span>
-          </div>
-
-          <dl class="supporter-meta">
-            <div>
-              <dt>年赡养费</dt>
-              <dd>{{ formatMoney(supporter.annualSupportFee) }} 元</dd>
-            </div>
-            <div>
-              <dt>月赡养费</dt>
-              <dd>{{ formatMoney(supporter.monthlySupportFee) }} 元</dd>
-            </div>
-            <div>
-              <dt>赡养能力</dt>
-              <dd>{{ supporter.isSupportAbility ? '有' : '无' }}</dd>
-            </div>
-          </dl>
+          {{ detail }}
         </li>
       </ul>
+      <p v-else class="empty-detail">暂无判定明细</p>
     </NcCard>
 
-    <CaregiverList :form="form" :busy="busy" />
+    <!-- 卡6：能力鉴定（仅特困显示） -->
+    <NcCard v-if="isDestitute" title="📋 能力鉴定">
+      <div class="capability-grid">
+        <div
+          v-for="item in capabilityItems"
+          :key="item.label"
+          class="capability-item"
+        >
+          <span>{{ item.label }}</span>
+          <strong :class="{ 'is-empty': item.value === '—' }">
+            {{ item.value }}
+          </strong>
+        </div>
+      </div>
 
-    <NcCard title="银行发放信息">
-      <dl class="bank-grid">
-        <div class="detail-item">
-          <dt>开户行</dt>
-          <dd :class="{ 'is-empty': !basic.bankName }">{{ basic.bankName || '—' }}</dd>
+      <div class="capability-summary">
+        <div class="capability-summary__item">
+          <span>能完成项目数</span>
+          <strong :class="{ 'is-empty': capabilityCompletedText === '—' }">
+            {{ capabilityCompletedText }}
+          </strong>
         </div>
-        <div class="detail-item">
-          <dt>银行卡号</dt>
-          <dd class="mono" :class="{ 'is-empty': !basic.bankAccount }">
-            {{ basic.bankAccount || '—' }}
-          </dd>
+        <div class="capability-summary__item">
+          <span>自理能力等级</span>
+          <strong :class="{ 'is-empty': capabilityLevelText === '—' }">
+            {{ capabilityLevelText }}
+          </strong>
         </div>
-      </dl>
+      </div>
     </NcCard>
   </div>
 </template>
@@ -241,8 +435,7 @@ function amountText(value: number | null | undefined): string {
   min-width: 0;
 }
 
-.detail-grid,
-.bank-grid {
+.detail-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px 24px;
@@ -293,128 +486,148 @@ function amountText(value: number | null | undefined): string {
   color: var(--nc-pine-dark);
 }
 
-.detail-item dd.detail-value.is-ineligible {
-  color: var(--nc-seal-dark);
-}
-
+.detail-item dd.detail-value.is-ineligible,
 .detail-item dd.is-ineligible {
   color: var(--nc-seal-dark);
 }
 
-.grace-inline {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 22px;
+.section-divider {
+  height: 1px;
+  margin: 16px 0;
+  background-color: var(--nc-line-faint);
 }
 
-.grace-inline strong {
-  color: var(--nc-ink);
-  font-weight: 600;
+.sub-title {
+  margin: 0 0 10px;
+  color: var(--nc-ink-2);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-sm);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.amount-card {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--nc-line);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-soft);
 }
 
 .amount-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 
-.supporter-empty {
-  padding: 4px 0;
+.subsidy-detail {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--nc-line);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-soft);
 }
 
-.supporter-list {
+.basis-text {
+  white-space: pre-wrap;
+}
+
+.grace-status {
+  color: var(--nc-amber-dark, var(--nc-ink-2));
+  font-weight: 600;
+}
+
+.detail-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.supporter-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr);
-  align-items: center;
-  gap: 10px 18px;
-  padding: 11px 13px;
+.detail-list li {
+  padding: 8px 12px;
   border: 1px solid var(--nc-line);
-  border-left: 3px solid var(--nc-amber);
+  border-radius: var(--nc-radius-xs);
   background-color: var(--nc-paper-soft);
+  color: var(--nc-ink-2);
+  font-size: 13px;
+  line-height: 1.7;
 }
 
-.supporter-head {
+.empty-detail {
+  margin: 0;
+  color: var(--nc-disabled);
+  font-size: 13px;
+}
+
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.capability-item {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--nc-line-faint);
+  border-radius: var(--nc-radius-xs);
+  background-color: var(--nc-paper-soft);
+  color: var(--nc-ink-2);
+  font-size: 13px;
 }
 
-.supporter-index {
+.capability-item strong {
+  color: var(--nc-ink);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.capability-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.capability-summary__item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--nc-line-faint);
+  border-radius: var(--nc-radius-xs);
+  background-color: var(--nc-paper-2);
+}
+
+.capability-summary__item span {
   color: var(--nc-muted);
   font-size: var(--nc-text-xs);
 }
 
-.supporter-name {
+.capability-summary__item strong {
   color: var(--nc-ink);
-  font-family: var(--nc-font-serif);
   font-size: var(--nc-text-md);
   font-weight: 700;
 }
 
-.supporter-relation {
-  padding: 1px 7px;
-  border: 1px solid var(--nc-line);
-  background-color: var(--nc-paper-3);
-  color: var(--nc-ink-2);
-  font-size: var(--nc-text-xs);
-  font-weight: 600;
-  line-height: 1.6;
-  white-space: nowrap;
-}
-
-.supporter-meta {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px 14px;
-  margin: 0;
-}
-
-.supporter-meta dt {
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-}
-
-.supporter-meta dd {
-  margin: 2px 0 0;
-  color: var(--nc-ink-2);
-  font-size: 13px;
-  font-weight: 600;
-  word-break: break-word;
-}
-
-.mono {
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-sm);
-  letter-spacing: 0.02em;
-}
-
-.result-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
+.is-empty {
+  color: var(--nc-disabled);
 }
 
 @media (max-width: 1099px) {
-  .supporter-item {
-    grid-template-columns: minmax(0, 1fr);
+  .amount-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 767px) {
-  .detail-grid,
-  .bank-grid {
+  .detail-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
   }
@@ -423,20 +636,10 @@ function amountText(value: number | null | undefined): string {
     grid-column: auto;
   }
 
-  .amount-grid {
+  .amount-grid,
+  .capability-grid,
+  .capability-summary {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .supporter-meta {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .result-actions {
-    align-items: stretch;
-  }
-
-  .result-actions .el-button {
-    flex: 1 1 auto;
   }
 }
 </style>

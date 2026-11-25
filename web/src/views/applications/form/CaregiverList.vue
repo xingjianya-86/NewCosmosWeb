@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Plus } from '@element-plus/icons-vue'
+import { Delete } from '@element-plus/icons-vue'
 import NcCard from '@/components/NcCard.vue'
 import {
+  EDUCATION_LEVEL_OPTIONS,
   EMPLOYMENT_STATUS_OPTIONS,
   ETHNICITY_OPTIONS,
-  GENDER_OPTIONS,
   HEALTH_STATUS_OPTIONS,
-  HUKOU_TYPE_OPTIONS,
-  SUPPORT_RELATION_OPTIONS,
+  MARITAL_STATUS_OPTIONS,
+  POLITICAL_STATUS_OPTIONS,
+  RELATION_OPTIONS,
+  type SelectOption,
 } from './options'
 import type { ApplicationFormCaregiver, ApplicationFormModel } from './types'
 import { getIdCardError, normalizeIdCard, parseIdCard } from './validation'
@@ -18,31 +20,56 @@ const props = defineProps<{ form: ApplicationFormModel; busy?: boolean }>()
 
 const caregivers = computed<ApplicationFormCaregiver[]>(() => props.form.caregivers ?? [])
 
-const MARITAL_STATUS_OPTIONS = [
-  { label: '未婚', value: '未婚' },
-  { label: '已婚', value: '已婚' },
-  { label: '离异', value: '离异' },
-  { label: '丧偶', value: '丧偶' },
-]
+/** 旧数据可能存英文关系 key（Head/Son/Spouse…），仅做只读显示映射，不改后端数据。 */
+const RELATION_KEY_LABELS: Record<string, string> = {
+  Head: '户主',
+  Spouse: '配偶',
+  Husband: '配偶',
+  Wife: '配偶',
+  Son: '子女',
+  Daughter: '子女',
+  Child: '子女',
+  Grandchild: '孙子女',
+  Parent: '父母',
+  Father: '父母',
+  Mother: '父母',
+  Grandparent: '祖父母',
+  Sibling: '兄弟姐妹',
+  Brother: '兄弟姐妹',
+  Sister: '兄弟姐妹',
+  Other: '其他',
+}
 
-const EDUCATION_LEVEL_OPTIONS = [
-  { label: '文盲', value: '文盲' },
-  { label: '小学', value: '小学' },
-  { label: '初中', value: '初中' },
-  { label: '高中', value: '高中' },
-  { label: '中专', value: '中专' },
-  { label: '大专', value: '大专' },
-  { label: '本科', value: '本科' },
-  { label: '研究生', value: '研究生' },
-]
+const relationKeyLabelsLower = Object.fromEntries(
+  Object.entries(RELATION_KEY_LABELS).map(([key, label]) => [key.toLowerCase(), label]),
+)
 
-const POLITICAL_STATUS_OPTIONS = [
-  { label: '群众', value: '群众' },
-  { label: '中共党员', value: '中共党员' },
-  { label: '共青团员', value: '共青团员' },
-  { label: '民主党派', value: '民主党派' },
-  { label: '其他', value: '其他' },
-]
+function relationDisplay(value: string | null | undefined): string {
+  const text = (value ?? '').trim()
+  if (!text) return ''
+  return RELATION_KEY_LABELS[text] ?? relationKeyLabelsLower[text.toLowerCase()] ?? text
+}
+
+/**
+ * 关系下拉与家庭成员保持一致；若回显值是英文 key，补一个中文 label 的临时选项，
+ * 避免 el-select 直接显示 “Head/Son” 这类代码。
+ */
+function relationOptions(caregiver: ApplicationFormCaregiver): SelectOption[] {
+  const current = (caregiver.relationship ?? '').trim()
+  if (!current) return RELATION_OPTIONS
+  if (RELATION_OPTIONS.some((item) => item.value === current)) return RELATION_OPTIONS
+  return [...RELATION_OPTIONS, { label: relationDisplay(current), value: current }]
+}
+
+/** 性别 + 年龄合并为只读展示，由身份证号自动带出。 */
+function genderAgeDisplay(caregiver: ApplicationFormCaregiver): string {
+  const parts: string[] = []
+  if (caregiver.gender) parts.push(caregiver.gender)
+  if (caregiver.age !== null && caregiver.age !== undefined) {
+    parts.push(`${caregiver.age} 岁`)
+  }
+  return parts.length > 0 ? parts.join(' ') : '—'
+}
 
 /* 行 key：避免新增/删除时复用错误的输入框。 */
 let keySeed = 0
@@ -127,26 +154,27 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
 </script>
 
 <template>
-  <NcCard title="照料人">
+  <NcCard title="🤝 照料人信息">
     <template #actions>
-      <span class="caregiver-count">{{ caregivers.length }} 人</span>
-      <el-button type="primary" :icon="Plus" :disabled="busy" @click="addCaregiver">
-        新增照料人
+      <el-button type="primary" :disabled="busy" @click="addCaregiver">
+        + 照料人
       </el-button>
     </template>
 
-    <el-empty v-if="caregivers.length === 0" description="暂无照料人">
-      <el-button type="primary" :icon="Plus" :disabled="busy" @click="addCaregiver">
-        新增照料人
-      </el-button>
-    </el-empty>
+    <el-empty
+      v-if="caregivers.length === 0"
+      description="暂无照料人，点击右上角“+ 照料人”添加"
+      :image-size="64"
+    />
 
     <div v-else class="caregiver-list">
       <article v-for="(caregiver, index) in caregivers" :key="rowKey(caregiver)" class="caregiver-card">
         <header class="caregiver-card__head">
           <div class="caregiver-card__title">
             <span class="caregiver-index">照料人 {{ index + 1 }}</span>
-            <span v-if="caregiver.relationship" class="badge">{{ caregiver.relationship }}</span>
+            <span v-if="caregiver.relationship" class="badge">
+              {{ relationDisplay(caregiver.relationship) }}
+            </span>
             <strong class="caregiver-name">{{ caregiver.name || '未命名照料人' }}</strong>
           </div>
           <el-button
@@ -174,7 +202,7 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
               :disabled="busy"
             >
               <el-option
-                v-for="item in SUPPORT_RELATION_OPTIONS"
+                v-for="item in relationOptions(caregiver)"
                 :key="item.value"
                 :label="item.label"
                 :value="item.value"
@@ -206,27 +234,11 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
           </label>
 
           <label class="field">
-            <span class="field__label">性别</span>
-            <el-select v-model="caregiver.gender" clearable placeholder="身份证自动带出" :disabled="busy">
-              <el-option
-                v-for="item in GENDER_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-          </label>
-
-          <label class="field">
-            <span class="field__label">年龄</span>
-            <el-input-number
-              :model-value="caregiver.age"
-              :min="0"
-              :max="130"
-              :controls="false"
-              placeholder="岁"
-              :disabled="busy"
-              @update:model-value="caregiver.age = $event ?? null"
+            <span class="field__label">性别+年龄</span>
+            <el-input
+              :model-value="genderAgeDisplay(caregiver)"
+              readonly
+              placeholder="身份证自动带出"
             />
           </label>
 
@@ -258,8 +270,6 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
             <el-select
               v-model="caregiver.maritalStatus"
               filterable
-              allow-create
-              default-first-option
               clearable
               :disabled="busy"
             >
@@ -273,24 +283,10 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
           </label>
 
           <label class="field">
-            <span class="field__label">户口性质</span>
-            <el-select v-model="caregiver.hukouType" :disabled="busy">
-              <el-option
-                v-for="item in HUKOU_TYPE_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-          </label>
-
-          <label class="field">
             <span class="field__label">文化程度</span>
             <el-select
               v-model="caregiver.educationLevel"
               filterable
-              allow-create
-              default-first-option
               clearable
               :disabled="busy"
             >
@@ -308,8 +304,6 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
             <el-select
               v-model="caregiver.politicalStatus"
               filterable
-              allow-create
-              default-first-option
               clearable
               :disabled="busy"
             >
@@ -386,17 +380,6 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
           </label>
 
           <label class="field">
-            <span class="field__label">职务</span>
-            <el-input
-              v-model="caregiver.position"
-              maxlength="60"
-              placeholder="职务 / 岗位"
-              clearable
-              :disabled="busy"
-            />
-          </label>
-
-          <label class="field">
             <span class="field__label">开户行</span>
             <el-input
               v-model="caregiver.bankName"
@@ -435,12 +418,6 @@ function handleIdCardBlur(caregiver: ApplicationFormCaregiver): void {
 </template>
 
 <style scoped>
-.caregiver-count {
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-  white-space: nowrap;
-}
-
 .caregiver-list {
   display: flex;
   flex-direction: column;

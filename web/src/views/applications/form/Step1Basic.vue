@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, h, ref, watch } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { changeApplicationDate } from '@/api/applicationForm'
+import { getErrorMessage } from '@/api/http'
 import NcCard from '@/components/NcCard.vue'
 import {
-  APPLICATION_REASON_OPTIONS,
   DISABILITY_LEVEL_OPTIONS,
   DISABILITY_TYPE_OPTIONS,
   EDUCATION_LEVEL_OPTIONS,
@@ -20,8 +22,108 @@ const props = defineProps<{
   form: ApplicationFormModel
 }>()
 
+const emit = defineEmits<{ reload: [] }>()
+
 const formRef = ref<FormInstance>()
 const basic = computed(() => props.form.basic)
+
+/**
+ * 申请日期（只读）：编号日期段是权威来源（旧版 ArchiveAnchorHelper 同口径），
+ * 新档尚未生成编号时与旧版一致显示今天。
+ */
+const applicationDateText = computed(() => {
+  const match = /^SA(\d{8})/.exec(props.form.applicationNo ?? '')
+  if (match) {
+    const value = match[1]
+    return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`
+  }
+  const today = new Date()
+  const month = String(today.getMonth() + 1).padStart(2, '0')
+  const day = String(today.getDate()).padStart(2, '0')
+  return `${today.getFullYear()}-${month}-${day}`
+})
+
+const dateDialogVisible = ref(false)
+const newApplicationDate = ref('')
+const changingDate = ref(false)
+
+/** 旧版改期上限为今天（更早的下限由 Core 校验：不早于当年 1 月 1 日）。 */
+function isFutureDate(date: Date): boolean {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return date.getTime() > today.getTime()
+}
+
+function openChangeDate(): void {
+  if (props.form.id <= 0) {
+    void ElMessageBox.alert('请先保存草稿生成申请编号，再修改申请日期', '提示', {
+      confirmButtonText: '确定',
+    }).catch(() => {})
+    return
+  }
+  newApplicationDate.value = applicationDateText.value
+  dateDialogVisible.value = true
+}
+
+function confirmDateSelection(): void {
+  if (!newApplicationDate.value) {
+    ElMessage.warning('请选择申请日期')
+    return
+  }
+  if (newApplicationDate.value === applicationDateText.value) {
+    dateDialogVisible.value = false
+    return
+  }
+  dateDialogVisible.value = false
+  void applyApplicationDate(newApplicationDate.value)
+}
+
+/** 旧版改期：二次确认后调 Core（同改编号日期段与 created_at），成功回写并刷新表单。 */
+async function applyApplicationDate(nextDate: string): Promise<void> {
+  const previous = applicationDateText.value
+  const confirmMessage = h(
+    'div',
+    { style: 'white-space: pre-line; line-height: 1.7;' },
+    [
+      `申请日期：${previous} → ${nextDate}`,
+      '',
+      '修改后将改变该档案的公示窗口、卷号与文书上的申请日期（批次顺延提示随之重算）；已打印的文书不受影响，需重新出文书才会更新。',
+      '',
+      '注意：批次按入户调查日期锚定——若入户日期超出新窗口，系统会自动把它同步到「新申请日 ~ 会议日」之间，否则批次不变。',
+    ].join('\n'),
+  )
+
+  try {
+    await ElMessageBox.confirm(confirmMessage, '确认修改申请日期', {
+      type: 'warning',
+      confirmButtonText: '确认修改',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+
+  changingDate.value = true
+  try {
+    const result = await changeApplicationDate(props.form.id, nextDate)
+    if (result.applicationNo) props.form.applicationNo = result.applicationNo
+
+    // 改期同事务联动入户调查日期时，同步回写当前表单（旧版行为）。
+    const syncedSurvey = result.surveyDate ? String(result.surveyDate).slice(0, 10) : ''
+    if (syncedSurvey) props.form.survey.surveyDate = syncedSurvey
+
+    ElMessage.success(
+      syncedSurvey
+        ? `申请日期已改为 ${nextDate}，编号 ${result.applicationNo}；入户调查日期已同步为 ${syncedSurvey}`
+        : `申请日期已改为 ${nextDate}，编号 ${result.applicationNo}`,
+    )
+    emit('reload')
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '修改申请日期失败'))
+  } finally {
+    changingDate.value = false
+  }
+}
 
 const idCardInfo = computed(() => parseIdCard(basic.value.applicantIdCard))
 const ageDisplay = computed(() =>
@@ -70,6 +172,14 @@ defineExpose({ validate })
 
 <template>
   <div class="step-basic">
+    <NcCard padding="sm">
+      <div class="application-date">
+        <span class="application-date__label">申请日期</span>
+        <strong class="application-date__value">{{ applicationDateText }}</strong>
+        <el-button size="small" :loading="changingDate" @click="openChangeDate">修改</el-button>
+      </div>
+    </NcCard>
+
     <NcCard title="户籍所在地" subtitle="（限本单位管辖范围）">
       <div class="field-grid">
         <label class="field">
@@ -91,10 +201,6 @@ defineExpose({ validate })
         <label class="field">
           <span class="field__label">村社区</span>
           <el-input v-model="basic.hukouVillage" placeholder="请选择或输入村社区" />
-        </label>
-        <label class="field field--full">
-          <span class="field__label">详细地址</span>
-          <el-input v-model="basic.hukouDetailAddress" placeholder="请输入详细地址（如：XX路XX号）" />
         </label>
       </div>
     </NcCard>
@@ -372,51 +478,23 @@ defineExpose({ validate })
       </div>
     </NcCard>
 
-    <NcCard title="其他信息">
-      <div class="field-grid">
-        <label class="field">
-          <span class="field__label">申请原因</span>
-          <el-select
-            v-model="basic.applicationReason"
-            filterable
-            allow-create
-            default-first-option
-            placeholder="请选择或输入申请原因"
-          >
-            <el-option
-              v-for="item in APPLICATION_REASON_OPTIONS"
-              :key="item.value"
-              :label="item.label"
-              :value="item.value"
-            />
-          </el-select>
-        </label>
-
-        <label class="field field--full">
-          <span class="field__label">原因说明</span>
-          <el-input
-            v-model="basic.applicationReasonDetail"
-            type="textarea"
-            :rows="3"
-            maxlength="1000"
-            show-word-limit
-            placeholder="请具体说明家庭困难情形"
-          />
-        </label>
-
-        <label class="field field--full">
-          <span class="field__label">备注</span>
-          <el-input
-            v-model="basic.remark"
-            type="textarea"
-            :rows="2"
-            maxlength="500"
-            show-word-limit
-            placeholder="其他需要说明的情况"
-          />
-        </label>
-      </div>
-    </NcCard>
+    <el-dialog v-model="dateDialogVisible" title="修改申请日期" width="380px" append-to-body>
+      <el-date-picker
+        v-model="newApplicationDate"
+        type="date"
+        format="YYYY-MM-DD"
+        value-format="YYYY-MM-DD"
+        placeholder="选择申请日期"
+        :disabled-date="isFutureDate"
+        class="application-date__picker"
+      />
+      <template #footer>
+        <el-button @click="dateDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="changingDate" @click="confirmDateSelection">
+          确认
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -425,6 +503,32 @@ defineExpose({ validate })
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.application-date {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.application-date__label {
+  color: var(--nc-ink-2);
+  font-size: var(--nc-text-sm);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.application-date__value {
+  color: var(--nc-ink);
+  font-family: var(--nc-font-mono);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.application-date__picker {
+  width: 100%;
 }
 
 .basic-form :deep(.el-form-item) {

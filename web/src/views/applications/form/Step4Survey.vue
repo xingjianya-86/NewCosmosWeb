@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import NcCard from '@/components/NcCard.vue'
-import VisitRecords from './VisitRecords.vue'
-import { APPLICATION_REASON_OPTIONS, RELATION_OPTIONS } from './options'
+import { APPLICATION_REASON_OPTIONS } from './options'
 import type { ApplicationFormModel } from './types'
 
 const props = defineProps<{ form: ApplicationFormModel; busy?: boolean }>()
@@ -10,14 +9,16 @@ const props = defineProps<{ form: ApplicationFormModel; busy?: boolean }>()
 const survey = computed(() => props.form.survey)
 
 const reasonOptions = APPLICATION_REASON_OPTIONS
-const relationOptions = RELATION_OPTIONS
 
+/** 旧版入户调查结论严格三项（ApplicationFormViewModel.cs:763）。 */
 const surveyConclusionOptions = [
   { label: '属实', value: '属实' },
-  { label: '基本属实', value: '基本属实' },
   { label: '不属实', value: '不属实' },
-  { label: '无法调查', value: '无法调查' },
+  { label: '部分属实', value: '部分属实' },
 ]
+
+/** 旧版字数统计文案：已输入: n/500 字。 */
+const reasonDetailLength = computed(() => survey.value.applicationReasonDetail?.length ?? 0)
 
 function setSurveyDate(value: string | number | Date | null): void {
   props.form.survey.surveyDate = value == null ? '' : String(value)
@@ -26,7 +27,8 @@ function setSurveyDate(value: string | number | Date | null): void {
 
 <template>
   <div class="step-survey">
-    <NcCard title="调查信息">
+    <!-- 调查基本信息：调查日期 / 调查员 / 所属机构 / 受访人（只读） -->
+    <NcCard title="📋 调查基本信息">
       <div class="field-grid">
         <div class="field">
           <label class="field-label" for="survey-date">调查日期</label>
@@ -69,62 +71,14 @@ function setSurveyDate(value: string | number | Date | null): void {
         </div>
 
         <div class="field">
-          <label class="field-label" for="survey-respondent-name">被调查人</label>
-          <el-input
-            id="survey-respondent-name"
-            v-model="survey.respondentName"
-            class="nc-control"
-            maxlength="40"
-            placeholder="被调查人姓名"
-            :disabled="busy"
-          />
-        </div>
-
-        <div class="field">
-          <label class="field-label" for="survey-respondent-relation">关系</label>
-          <el-select
-            id="survey-respondent-relation"
-            v-model="survey.respondentRelation"
-            class="nc-control"
-            filterable
-            allow-create
-            default-first-option
-            clearable
-            placeholder="选择或填写关系"
-            :disabled="busy"
-            aria-label="关系"
-          >
-            <el-option
-              v-for="item in relationOptions"
-              :key="item.value"
-              :label="item.label"
-              :value="item.value"
-            />
-          </el-select>
-        </div>
-
-        <div class="field">
-          <label class="field-label" for="survey-conclusion">调查结论</label>
-          <el-select
-            id="survey-conclusion"
-            v-model="survey.surveyConclusion"
-            class="nc-control"
-            placeholder="选择调查结论"
-            :disabled="busy"
-            aria-label="调查结论"
-          >
-            <el-option
-              v-for="item in surveyConclusionOptions"
-              :key="item.value"
-              :label="item.label"
-              :value="item.value"
-            />
-          </el-select>
+          <span class="field-label">受访人</span>
+          <div class="static-value">{{ form.basic.applicantName || '—' }}</div>
         </div>
       </div>
     </NcCard>
 
-    <NcCard title="申请原因">
+    <!-- 申请原因：申请理由 / 原因详情 -->
+    <NcCard title="📝 申请原因">
       <div class="field-grid">
         <div class="field">
           <label class="field-label" for="survey-reason">申请理由</label>
@@ -154,32 +108,52 @@ function setSurveyDate(value: string | number | Date | null): void {
             type="textarea"
             :rows="5"
             maxlength="500"
-            show-word-limit
             resize="vertical"
             placeholder="选择申请理由后自动填充模板，可编辑修改..."
+            :disabled="busy"
+          />
+          <div class="word-count">已输入: {{ reasonDetailLength }}/500 字</div>
+        </div>
+      </div>
+    </NcCard>
+
+    <!-- 调查结论：结论 / 备注 -->
+    <NcCard title="✅ 调查结论">
+      <div class="field-grid">
+        <div class="field">
+          <label class="field-label" for="survey-conclusion">结论</label>
+          <el-select
+            id="survey-conclusion"
+            v-model="survey.surveyConclusion"
+            class="nc-control"
+            placeholder="选择调查结论"
+            :disabled="busy"
+            aria-label="调查结论"
+          >
+            <el-option
+              v-for="item in surveyConclusionOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </div>
+
+        <div class="field field--full">
+          <label class="field-label" for="survey-notes">备注</label>
+          <el-input
+            id="survey-notes"
+            v-model="survey.surveyNotes"
+            class="nc-control"
+            type="textarea"
+            :rows="3"
+            resize="vertical"
+            placeholder="补充说明（选填）"
             :disabled="busy"
           />
         </div>
       </div>
     </NcCard>
-
-    <NcCard title="调查记录">
-      <div class="field">
-        <label class="field-label" for="survey-notes">备注</label>
-        <el-input
-          id="survey-notes"
-          v-model="survey.surveyNotes"
-          class="nc-control"
-          type="textarea"
-          :rows="4"
-          resize="vertical"
-          placeholder="补充说明（选填）"
-          :disabled="busy"
-        />
-      </div>
-    </NcCard>
-
-    <VisitRecords :form="form" :busy="busy" />
   </div>
 </template>
 
@@ -214,6 +188,23 @@ function setSurveyDate(value: string | number | Date | null): void {
   font-weight: 600;
   letter-spacing: 0.02em;
   line-height: 1.45;
+}
+
+.static-value {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  color: var(--nc-ink);
+  font-size: 15px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.word-count {
+  align-self: flex-end;
+  color: var(--nc-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .nc-control {

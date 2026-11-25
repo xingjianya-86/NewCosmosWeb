@@ -3,6 +3,7 @@ import { computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Plus } from '@element-plus/icons-vue'
 import NcCard from '@/components/NcCard.vue'
+import { formatMoney } from '../format'
 import { createMember, createSupporter } from './formModel'
 import {
   DISABILITY_LEVEL_OPTIONS,
@@ -32,8 +33,109 @@ const props = defineProps<{
   form: ApplicationFormModel
 }>()
 
+/**
+ * 赡养卡新增字段（supportMonths/familySize）由后端 DTO 末尾追加，
+ * 共享 types.ts 不在本次改动范围，这里做局部扩展读取。
+ */
+type SupporterRow = ApplicationFormSupporter & {
+  supportMonths?: number | null
+  familySize?: number | null
+  personType?: string | null
+  monthlyIncomeCapacity?: number | null
+  phone?: string | null
+  address?: string | null
+}
+
 const members = computed(() => props.form.members)
-const supporters = computed(() => props.form.supporters)
+const supporters = computed(() => props.form.supporters as SupporterRow[])
+
+/**
+ * 申请表家庭人口（含户主，年赡养费乘数）：
+ * 优先使用表单上已有的 familySize；否则按共同生活成员数计算，无户主行时 +1。
+ * 后端 form.members 已排除赡养行，户主 + 共同生活成员都在其中。
+ */
+const householdFamilySize = computed(() => {
+  const declared = (props.form as ApplicationFormModel & { familySize?: number | null }).familySize
+  if (typeof declared === 'number' && Number.isFinite(declared) && declared > 0) {
+    return Math.trunc(declared)
+  }
+
+  const list = members.value
+  if (list.length === 0) return 1
+  const hasHouseholdHead = list.some((item) => item.isHouseholdHead || item.isApplicant)
+  return hasHouseholdHead ? list.length : list.length + 1
+})
+
+/** 月数缺省 12（旧版默认口径）。 */
+function supportMonthsOf(supporter: SupporterRow): number {
+  const value = Number(supporter.supportMonths)
+  return Number.isFinite(value) && value > 0 ? Math.trunc(value) : 12
+}
+
+/** 年赡养费只读派生：round(月费 × 月数 × 申请表家庭人口, 2)，与 legacy Supporter 同口径。 */
+function annualSupportFeeOf(supporter: SupporterRow): number {
+  const monthly = Number(supporter.monthlySupportFee ?? 0)
+  if (!Number.isFinite(monthly) || monthly <= 0) return 0
+  return Math.round(monthly * supportMonthsOf(supporter) * householdFamilySize.value * 100) / 100
+}
+
+/** 记录关闭赡养能力前的月费，重新打开时恢复（不覆盖用户重填值）。 */
+const supportFeeBackup = new WeakMap<object, number>()
+
+function syncSupporterFees(supporter: SupporterRow): void {
+  // 旧数据兼容：没有月数字段且年费>0、月费=0 → 月费=round(年费/12,2)、月数=12。
+  if (!(Number(supporter.supportMonths) > 0)) {
+    if (
+      Number(supporter.monthlySupportFee ?? 0) <= 0
+      && Number(supporter.annualSupportFee ?? 0) > 0
+    ) {
+      supporter.monthlySupportFee =
+        Math.round((Number(supporter.annualSupportFee) / 12) * 100) / 100
+    }
+    supporter.supportMonths = 12
+  }
+
+  const annual = annualSupportFeeOf(supporter)
+  if (supporter.annualSupportFee !== annual) supporter.annualSupportFee = annual
+}
+
+function handleMonthlySupportFeeChange(
+  supporter: SupporterRow,
+  value: number | null | undefined,
+): void {
+  supporter.monthlySupportFee = value ?? null
+  syncSupporterFees(supporter)
+}
+
+function handleSupportMonthsChange(
+  supporter: SupporterRow,
+  value: number | null | undefined,
+): void {
+  supporter.supportMonths = value !== null && value !== undefined && value > 0 ? Math.trunc(value) : 12
+  syncSupporterFees(supporter)
+}
+
+function handleSupportAbilityChange(
+  supporter: SupporterRow,
+  value: boolean | string | number,
+): void {
+  const enabled = value === true
+  supporter.isSupportAbility = enabled
+
+  if (enabled) {
+    if (Number(supporter.monthlySupportFee ?? 0) <= 0) {
+      const backup = supportFeeBackup.get(supporter)
+      if (backup !== undefined) supporter.monthlySupportFee = backup
+    }
+    supportFeeBackup.delete(supporter)
+  } else {
+    const monthly = Number(supporter.monthlySupportFee ?? 0)
+    if (monthly > 0) supportFeeBackup.set(supporter, monthly)
+    supporter.monthlySupportFee = 0
+  }
+
+  syncSupporterFees(supporter)
+}
 
 /** 户主（申请人）信息只在第 1 步维护，旧版共同生活成员列表排除户主。 */
 const visibleMembers = computed(() =>
@@ -203,21 +305,14 @@ async function removeSupporter(supporter: ApplicationFormSupporter): Promise<voi
   if (index >= 0) supporters.value.splice(index, 1)
 }
 
-function handleAnnualSupportChange(
-  supporter: ApplicationFormSupporter,
-  value: number | null | undefined,
-): void {
-  if (value === null || value === undefined || !Number.isFinite(value)) return
-  supporter.monthlySupportFee = Math.round((value / 12) * 100) / 100
-}
-
-function handleMonthlySupportChange(
-  supporter: ApplicationFormSupporter,
-  value: number | null | undefined,
-): void {
-  if (value === null || value === undefined || !Number.isFinite(value)) return
-  supporter.annualSupportFee = Math.round(value * 12 * 100) / 100
-}
+/** 月费/月数/家庭人口任一变化都重算年费；外部换表单（加载/分类回填）也走同一入口。 */
+watch(
+  [supporters, householdFamilySize],
+  () => {
+    for (const supporter of supporters.value) syncSupporterFees(supporter)
+  },
+  { deep: true, immediate: true },
+)
 
 watch(
   () => [props.form.basic.applicantName, props.form.basic.applicantIdCard],
@@ -734,19 +829,6 @@ onMounted(() => {
             <h4 class="member-section__title">赡养费用</h4>
             <div class="supporter-grid">
               <label class="field">
-                <span class="field__label">年赡养费（元）</span>
-                <el-input-number
-                  :model-value="supporter.annualSupportFee"
-                  :min="0"
-                  :precision="2"
-                  :controls="false"
-                  placeholder="0.00"
-                  @update:model-value="supporter.annualSupportFee = $event ?? null"
-                  @change="handleAnnualSupportChange(supporter, $event)"
-                />
-              </label>
-
-              <label class="field">
                 <span class="field__label">月赡养费（元）</span>
                 <el-input-number
                   :model-value="supporter.monthlySupportFee"
@@ -754,21 +836,47 @@ onMounted(() => {
                   :precision="2"
                   :controls="false"
                   placeholder="0.00"
-                  @update:model-value="supporter.monthlySupportFee = $event ?? null"
-                  @change="handleMonthlySupportChange(supporter, $event)"
+                  @update:model-value="handleMonthlySupportFeeChange(supporter, $event)"
                 />
+              </label>
+
+              <label class="field">
+                <span class="field__label">月数</span>
+                <el-input-number
+                  :model-value="supportMonthsOf(supporter)"
+                  :min="1"
+                  :max="12"
+                  :precision="0"
+                  :controls="false"
+                  placeholder="12"
+                  @update:model-value="handleSupportMonthsChange(supporter, $event)"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">家庭人口（申请表）</span>
+                <el-input :model-value="String(householdFamilySize)" readonly />
+              </label>
+
+              <label class="field">
+                <span class="field__label">年赡养费（元，自动计算）</span>
+                <el-input :model-value="formatMoney(supporter.annualSupportFee)" readonly />
               </label>
 
               <label class="field field--switch">
                 <span class="field__label">是否有赡养能力</span>
                 <el-switch
-                  v-model="supporter.isSupportAbility"
+                  :model-value="supporter.isSupportAbility"
                   active-text="有"
                   inactive-text="无"
                   inline-prompt
+                  @change="handleSupportAbilityChange(supporter, $event)"
                 />
               </label>
             </div>
+            <p v-if="!supporter.isSupportAbility" class="support-note">
+              无赡养能力：月费已清零，不计入赡养收入；重新打开能力开关会恢复关闭前的月费。
+            </p>
           </section>
         </article>
       </div>
@@ -935,6 +1043,16 @@ onMounted(() => {
   color: var(--nc-seal);
   font-size: var(--nc-text-xs);
   line-height: 1.5;
+}
+
+.support-note {
+  margin: 9px 0 0;
+  padding: 7px 10px;
+  border-left: 2px solid var(--nc-amber);
+  background-color: var(--nc-amber-soft);
+  color: var(--nc-amber-dark);
+  font-size: var(--nc-text-xs);
+  line-height: 1.6;
 }
 
 @media (min-width: 1440px) {

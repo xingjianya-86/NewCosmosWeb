@@ -5,26 +5,25 @@ import { Plus, RefreshRight } from '@element-plus/icons-vue'
 import { apiHttp, getErrorMessage } from '@/api/http'
 import NcCard from '@/components/NcCard.vue'
 import { useMediaQuery } from '@/composables/useMediaQuery'
+import { useAuthStore } from '@/stores/auth'
 import { formatDateTime } from '../format'
 import type { ApplicationFormModel, ApplicationFormVisit } from './types'
 
 const props = defineProps<{ form: ApplicationFormModel; busy?: boolean }>()
 
 const isNarrow = useMediaQuery('(max-width: 767px)')
+const auth = useAuthStore()
 
+/** 回访情况四项（legacy ApplicationFormViewModel.Visit.cs:33，默认“已回访”）。 */
 const VISIT_RESULT_OPTIONS = [
-  { label: '属实', value: '属实' },
-  { label: '基本属实', value: '基本属实' },
-  { label: '不属实', value: '不属实' },
-  { label: '无法调查', value: '无法调查' },
+  { label: '已回访', value: '已回访' },
+  { label: '电话回访', value: '电话回访' },
+  { label: '未联系上', value: '未联系上' },
+  { label: '无需回访', value: '无需回访' },
 ]
 
-/** 历史数据可能存英文枚举，展示时统一转中文。 */
+/** 历史数据可能存旧版英文枚举，展示时统一转中文。 */
 const VISIT_RESULT_NAMES: Record<string, string> = {
-  True: '属实',
-  False: '不属实',
-  BasicTrue: '基本属实',
-  Unknown: '无法调查',
   Visited: '已回访',
   PhoneVisited: '电话回访',
   Unreachable: '未联系上',
@@ -47,12 +46,14 @@ interface VisitDraft {
 }
 
 const submitting = ref(false)
+/** 旧版默认收起补录表单，点“补录回访”再展开。 */
+const showForm = ref(false)
 
 function pad(value: number): string {
   return String(value).padStart(2, '0')
 }
 
-/** 默认走访时间为当前时间，取秒级 ISO 字符串。 */
+/** 默认回访时间为当前时间，取秒级 ISO 字符串。 */
 function nowDateTime(): string {
   const now = new Date()
   return (
@@ -61,10 +62,15 @@ function nowDateTime(): string {
   )
 }
 
+/** 旧版默认经办人取当前用户全名（ApplicationFormViewModel.Visit.cs:27）。 */
+const currentUserName = computed(
+  () => auth.user?.fullName?.trim() || auth.user?.username?.trim() || '',
+)
+
 const draft = reactive<VisitDraft>({
   visitAt: nowDateTime(),
-  visitBy: '',
-  visitResult: '属实',
+  visitBy: currentUserName.value,
+  visitResult: '已回访',
   visitRemark: '',
 })
 
@@ -75,11 +81,20 @@ function timeValue(value: string): number {
   return Number.isNaN(time) ? 0 : time
 }
 
-/** 按走访时间倒序；时间相同按 id 倒序，避免顺序抖动。 */
+/** 按回访时间倒序；时间相同按 id 倒序，避免顺序抖动。 */
 const sortedRecords = computed(() =>
   [...records.value].sort(
     (a, b) => timeValue(b.visitAt) - timeValue(a.visitAt) || b.id - a.id,
   ),
+)
+
+const latestRecord = computed(() => sortedRecords.value[0] ?? null)
+
+/** 旧版回访区标题语义（ApplicationFormViewModel.Visit.cs:57/62）。 */
+const sectionTitle = computed(() =>
+  latestRecord.value
+    ? `已回访 · ${formatDateTime(latestRecord.value.visitAt)}`
+    : '待回访 —— 认定通过后请补录回访情况',
 )
 
 const isNewApplication = computed(() => props.form.id <= 0)
@@ -87,14 +102,14 @@ const canSubmit = computed(() => !isNewApplication.value && !props.busy && !subm
 
 function resetDraft(): void {
   draft.visitAt = nowDateTime()
-  draft.visitBy = ''
-  draft.visitResult = '属实'
+  draft.visitBy = currentUserName.value
+  draft.visitResult = '已回访'
   draft.visitRemark = ''
 }
 
 async function submitVisit(): Promise<void> {
   if (isNewApplication.value) {
-    ElMessage.warning('请先保存草稿，再添加走访记录')
+    ElMessage.warning('请先保存申请后再补录回访')
     return
   }
   if (props.busy || submitting.value) return
@@ -105,15 +120,15 @@ async function submitVisit(): Promise<void> {
   const visitRemark = draft.visitRemark.trim()
 
   if (!visitAt) {
-    ElMessage.warning('请选择走访时间')
+    ElMessage.warning('请选择回访时间')
     return
   }
   if (!visitBy) {
-    ElMessage.warning('请填写走访人')
+    ElMessage.warning('请填写回访经办人员')
     return
   }
   if (!visitResult) {
-    ElMessage.warning('请选择走访结果')
+    ElMessage.warning('请选择回访情况')
     return
   }
 
@@ -131,9 +146,10 @@ async function submitVisit(): Promise<void> {
       ...payload,
     })
     resetDraft()
-    ElMessage.success('走访记录已添加')
+    showForm.value = false
+    ElMessage.success('回访已补录')
   } catch (error) {
-    ElMessage.error(getErrorMessage(error, '走访记录添加失败'))
+    ElMessage.error(getErrorMessage(error, '回访补录失败'))
   } finally {
     submitting.value = false
   }
@@ -141,48 +157,53 @@ async function submitVisit(): Promise<void> {
 </script>
 
 <template>
-  <NcCard title="走访记录">
+  <NcCard
+    v-if="!isNewApplication"
+    :title="sectionTitle"
+    class="visit-section"
+    :class="{ 'is-pending': !latestRecord }"
+  >
     <template #actions>
-      <span class="record-count">{{ sortedRecords.length }} 条</span>
+      <div class="visit-actions">
+        <span class="record-count">共 {{ sortedRecords.length }} 条</span>
+        <el-button
+          size="small"
+          :icon="showForm ? undefined : Plus"
+          @click="showForm = !showForm"
+        >
+          {{ showForm ? '收起' : '补录回访' }}
+        </el-button>
+      </div>
     </template>
 
-    <el-alert
-      v-if="isNewApplication"
-      class="visit-tip"
-      type="info"
-      :closable="false"
-      show-icon
-      title="新申请需先保存草稿，生成申请编号后才能添加走访记录。"
-    />
-
-    <h3 class="visit-section__title">走访历史</h3>
+    <h3 class="visit-section__title">回访历史</h3>
 
     <el-empty
       v-if="sortedRecords.length === 0"
       class="visit-empty"
-      description="暂无走访记录"
+      description="暂无回访记录"
       :image-size="68"
     />
 
     <template v-else>
       <el-table v-if="!isNarrow" :data="sortedRecords" row-key="id" class="visit-table">
-        <el-table-column label="走访时间" min-width="158">
+        <el-table-column label="回访时间" min-width="158">
           <template #default="{ row }">
             <span class="mono">{{ formatDateTime(row.visitAt) }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="走访人" min-width="108">
+        <el-table-column label="回访经办人员" min-width="128">
           <template #default="{ row }">{{ row.visitBy || '—' }}</template>
         </el-table-column>
 
-        <el-table-column label="走访结果" width="108">
+        <el-table-column label="回访情况" width="118">
           <template #default="{ row }">
             <span class="visit-result">{{ visitResultText(row.visitResult) }}</span>
           </template>
         </el-table-column>
 
-        <el-table-column label="备注" min-width="200">
+        <el-table-column label="回访备注" min-width="200">
           <template #default="{ row }">
             <span :class="{ 'is-empty': !row.visitRemark }">{{ row.visitRemark || '—' }}</span>
           </template>
@@ -196,7 +217,7 @@ async function submitVisit(): Promise<void> {
             <span class="visit-result">{{ visitResultText(record.visitResult) }}</span>
           </div>
           <div class="visit-card__row">
-            <span>走访人</span>
+            <span>回访经办人员</span>
             <strong>{{ record.visitBy || '—' }}</strong>
           </div>
           <p class="visit-card__remark" :class="{ 'is-empty': !record.visitRemark }">
@@ -206,15 +227,12 @@ async function submitVisit(): Promise<void> {
       </ul>
     </template>
 
-    <div class="visit-form">
-      <h3 class="visit-section__title">新增走访</h3>
+    <div v-if="showForm" class="visit-form">
+      <h3 class="visit-section__title">补录回访</h3>
 
       <div class="field-grid">
         <div class="field">
-          <label class="field-label" for="visit-at">
-            <span class="required-mark" aria-hidden="true">*</span>
-            走访时间
-          </label>
+          <label class="field-label" for="visit-at">回访时间</label>
           <el-date-picker
             id="visit-at"
             v-model="draft.visitAt"
@@ -222,39 +240,33 @@ async function submitVisit(): Promise<void> {
             type="datetime"
             format="YYYY-MM-DD HH:mm"
             value-format="YYYY-MM-DDTHH:mm:ss"
-            placeholder="选择走访时间"
+            placeholder="选择回访时间"
             :disabled="busy || submitting"
-            aria-label="走访时间"
+            aria-label="回访时间"
           />
         </div>
 
         <div class="field">
-          <label class="field-label" for="visit-by">
-            <span class="required-mark" aria-hidden="true">*</span>
-            走访人
-          </label>
+          <label class="field-label" for="visit-by">回访经办人员</label>
           <el-input
             id="visit-by"
             v-model="draft.visitBy"
             class="nc-control"
             maxlength="40"
-            placeholder="填写走访人姓名"
+            placeholder="填写回访经办人员姓名"
             :disabled="busy || submitting"
           />
         </div>
 
         <div class="field">
-          <label class="field-label" for="visit-result">
-            <span class="required-mark" aria-hidden="true">*</span>
-            走访结果
-          </label>
+          <label class="field-label" for="visit-result">回访情况</label>
           <el-select
             id="visit-result"
             v-model="draft.visitResult"
             class="nc-control"
-            placeholder="选择走访结果"
+            placeholder="选择回访情况"
             :disabled="busy || submitting"
-            aria-label="走访结果"
+            aria-label="回访情况"
           >
             <el-option
               v-for="item in VISIT_RESULT_OPTIONS"
@@ -265,18 +277,13 @@ async function submitVisit(): Promise<void> {
           </el-select>
         </div>
 
-        <div class="field field--full">
-          <label class="field-label" for="visit-remark">备注</label>
+        <div class="field">
+          <label class="field-label" for="visit-remark">回访备注</label>
           <el-input
             id="visit-remark"
             v-model="draft.visitRemark"
             class="nc-control"
-            type="textarea"
-            :rows="3"
-            maxlength="500"
-            show-word-limit
-            resize="vertical"
-            placeholder="记录走访情况、见证人及需要说明的事项"
+            placeholder="回访备注（可选）"
             :disabled="busy || submitting"
           />
         </div>
@@ -290,7 +297,7 @@ async function submitVisit(): Promise<void> {
           :disabled="!canSubmit"
           @click="submitVisit"
         >
-          保存走访
+          保存回访
         </el-button>
         <el-button :icon="RefreshRight" :disabled="busy || submitting" @click="resetDraft">
           重置
@@ -307,8 +314,14 @@ async function submitVisit(): Promise<void> {
   white-space: nowrap;
 }
 
-.visit-tip {
-  margin-bottom: 12px;
+.visit-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.visit-section.is-pending :deep(.nc-card__title) {
+  color: var(--nc-amber-dark);
 }
 
 .visit-section__title {
@@ -440,22 +453,12 @@ async function submitVisit(): Promise<void> {
   min-width: 0;
 }
 
-.field--full {
-  grid-column: 1 / -1;
-}
-
 .field-label {
   color: var(--nc-ink-2);
   font-size: var(--nc-text-sm);
   font-weight: 600;
   letter-spacing: 0.02em;
   line-height: 1.45;
-}
-
-.required-mark {
-  margin-right: 3px;
-  color: var(--nc-seal);
-  font-weight: 700;
 }
 
 .nc-control {
@@ -475,20 +478,6 @@ async function submitVisit(): Promise<void> {
 .nc-control :deep(.el-input__inner) {
   color: var(--nc-ink);
   font-size: 13px;
-}
-
-.nc-control :deep(.el-textarea__inner) {
-  border-radius: var(--nc-radius-xs);
-  background-color: var(--nc-paper-soft);
-  box-shadow: 0 0 0 1px var(--nc-line) inset;
-  color: var(--nc-ink);
-  font-family: var(--nc-font-sans);
-  font-size: 13px;
-  line-height: 1.7;
-}
-
-.nc-control :deep(.el-textarea__inner:focus) {
-  box-shadow: 0 0 0 1px var(--nc-seal) inset;
 }
 
 .nc-control :deep(.el-select__wrapper) {
@@ -513,10 +502,6 @@ async function submitVisit(): Promise<void> {
   .field-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
-  }
-
-  .field--full {
-    grid-column: auto;
   }
 
   .visit-actions {

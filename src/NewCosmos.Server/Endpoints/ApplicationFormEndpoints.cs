@@ -1,8 +1,10 @@
+using System.Globalization;
 using NewCosmos.Constants;
 using NewCosmos.Models.Results;
 using NewCosmos.Server.Contracts;
 using NewCosmos.Server.Infrastructure;
 using NewCosmos.Server.Services;
+using NewCosmos.Services.Domain.SocialAssistance;
 using NewCosmos.Services.UserManagement;
 
 namespace NewCosmos.Server.Endpoints;
@@ -20,6 +22,7 @@ public static class ApplicationFormEndpoints
         app.MapPost("/api/applications/form", CreateAsync);
         app.MapPut("/api/applications/{id}/form", UpdateAsync);
         app.MapPost("/api/applications/{id}/classify", ClassifyAsync);
+        app.MapPost("/api/applications/{id}/application-date", ChangeApplicationDateAsync);
         app.MapPost("/api/applications/{id}/complete", CompleteAsync);
         app.MapPost("/api/applications/{id}/visits", AddVisitAsync);
         app.MapGet("/api/applications/{id}/imports/subsidies", GetSubsidyImportsAsync);
@@ -152,6 +155,80 @@ public static class ApplicationFormEndpoints
         return result.IsFailure
             ? MapResult(context, result)
             : Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// 修改申请日期（旧版 Step1「改期」）：请求体 { "newDate": "yyyy-MM-dd" }。
+    /// 权限沿用表单编辑码；数据范围复用表单读取链路（内部即 LoadInScopeAsync），
+    /// 越权与不存在统一 404。状态闸（仅 Draft 且 current_step&lt;5）、日期上下限、
+    /// 编号重取与审计全部由 Core ChangeApplicationDateAsync 负责，端点不绕过。
+    /// </summary>
+    private static async Task<IResult> ChangeApplicationDateAsync(
+        string id,
+        ApplicationDateChangeRequest? request,
+        HttpContext context,
+        ApplicationFormService forms,
+        IApplicationService applications,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.INCOME_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        if (ParseId(id) is not { } applicationId)
+        {
+            return InvalidId(context);
+        }
+
+        if (request is null)
+        {
+            return InvalidRequest(context, "请求体不能为空");
+        }
+
+        if (!DateTime.TryParseExact(
+                request.NewDate,
+                "yyyy-MM-dd",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var newDate))
+        {
+            return InvalidRequest(context, "申请日期格式无效，应为 yyyy-MM-dd");
+        }
+
+        // 数据范围闸：GetFormAsync 首步即 LoadInScopeAsync（越权与不存在均 404）。
+        var scopeResult = await forms.GetFormAsync(applicationId, user.Id, ct);
+        if (scopeResult.IsFailure)
+        {
+            return MapResult(context, scopeResult);
+        }
+
+        var result = await applications.ChangeApplicationDateAsync(
+            applicationId, newDate, OperatorName(user), ct);
+        if (result.IsFailure)
+        {
+            // 同日序号并发被占用：改为可重试的 409，而不是通用 DB 500。
+            if (result.ErrorCode == ErrorCodes.DB_UNIQUE_VIOLATION)
+            {
+                return ApiErrors.Write(
+                    context,
+                    StatusCodes.Status409Conflict,
+                    "CONFLICT",
+                    result.Message ?? "申请编号撞号，请重试");
+            }
+
+            return MapResult(context, result);
+        }
+
+        return Results.Json(result.Value);
     }
 
     private static async Task<IResult> CompleteAsync(
@@ -367,3 +444,6 @@ public static class ApplicationFormEndpoints
         => ApiErrors.Write(context, StatusCodes.Status401Unauthorized,
             ApiErrorCodes.AuthRequired, "请先登录");
 }
+
+/// <summary>修改申请日期请求体（契约：{ "newDate": "yyyy-MM-dd" }）。</summary>
+public sealed record ApplicationDateChangeRequest(string? NewDate);
