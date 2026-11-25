@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using NewCosmos.Agent.Models;
 using NewCosmos.Constants;
 using NewCosmos.Models.Results;
 using NewCosmos.Services.Core;
@@ -42,7 +43,94 @@ public sealed class TemplateCache
         if (hash is null) return null;
 
         var path = Path.Combine(_root, $"{SanitizeId(templateId)}-{hash}.{NormalizeExtension(fileType)}");
-        return File.Exists(path) && new FileInfo(path).Length > 0 ? path : null;
+        if (!File.Exists(path) || new FileInfo(path).Length == 0) return null;
+
+        Touch(path);
+        return path;
+    }
+
+    /// <summary>
+    /// 最近使用的缓存模板（按最后使用时间倒序，最多 <paramref name="max"/> 条），
+    /// 供 claim 请求上报 cachedTemplates；服务端据此受理缓存清单，
+    /// 实际裁剪以 payload 请求的 cachedTemplateHash 是否与模板 hash 一致为准。
+    /// 目录不存在/无权限时返回空列表，不影响任务轮询。
+    /// </summary>
+    public IReadOnlyList<AgentCachedTemplateRef> GetRecentEntries(int max = AgentJobClaimRequest.MaxCachedTemplates)
+    {
+        if (max <= 0 || !Directory.Exists(_root))
+            return Array.Empty<AgentCachedTemplateRef>();
+
+        try
+        {
+            var entries = new List<(DateTime UsedAt, AgentCachedTemplateRef Entry)>();
+            foreach (var file in new DirectoryInfo(_root).EnumerateFiles("*", SearchOption.TopDirectoryOnly))
+            {
+                if (file.Name.Contains(".tmp-", StringComparison.Ordinal))
+                    continue;
+                if (!TryParseCacheFileName(file.Name, out var entry))
+                    continue;
+
+                entries.Add((file.LastWriteTimeUtc, entry));
+            }
+
+            return entries
+                .OrderByDescending(item => item.UsedAt)
+                .Take(max)
+                .Select(item => item.Entry)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"[TemplateCache] 读取缓存清单失败: {ex.Message}");
+            return Array.Empty<AgentCachedTemplateRef>();
+        }
+    }
+
+    /// <summary>按模板 ID 找最近使用的缓存 hash（同模板多版本时取最近使用）；未缓存返回 null。</summary>
+    public string? FindCachedHash(long? templateId)
+    {
+        if (templateId is not > 0) return null;
+
+        return GetRecentEntries()
+            .FirstOrDefault(entry => entry.TemplateId == templateId.Value)
+            ?.TemplateHash;
+    }
+
+    private static bool TryParseCacheFileName(string fileName, out AgentCachedTemplateRef entry)
+    {
+        entry = new AgentCachedTemplateRef();
+
+        var name = Path.GetFileNameWithoutExtension(fileName);
+        var separator = name.IndexOf('-');
+        if (separator <= 0 || separator >= name.Length - 1) return false;
+
+        if (!long.TryParse(name[..separator], out var templateId) || templateId <= 0) return false;
+
+        var hash = NormalizeHash(name[(separator + 1)..]);
+        if (hash is null) return false;
+
+        var extension = Path.GetExtension(fileName).TrimStart('.').ToLowerInvariant();
+        if (extension is not ("docx" or "xlsx")) return false;
+
+        entry = new AgentCachedTemplateRef { TemplateId = templateId, TemplateHash = hash };
+        return true;
+    }
+
+    /// <summary>命中缓存时刷新最后写入时间，使清理策略接近 LRU（失败不影响任务）。</summary>
+    private static void Touch(string path)
+    {
+        try
+        {
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow);
+        }
+        catch (IOException)
+        {
+            // 文件被占用：忽略
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // 权限不足：忽略
+        }
     }
 
     /// <summary>
@@ -72,6 +160,7 @@ public sealed class TemplateCache
 
         if (File.Exists(path) && new FileInfo(path).Length > 0)
         {
+            Touch(path);
             _logger.Info($"[TemplateCache] 命中缓存: Template={templateId?.ToString() ?? "-"}, Hash={ShortHash(hash)}");
             return (path, true);
         }

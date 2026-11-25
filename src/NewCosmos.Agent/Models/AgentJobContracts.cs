@@ -4,11 +4,29 @@ namespace NewCosmos.Agent.Models;
 
 /// <summary>
 /// POST /api/agent/jobs/claim 请求体。
+/// cachedTemplates 为 Agent 本地模板缓存清单（最近使用优先），服务端用它识别已缓存模板；
+/// 老版本 Agent 不传时服务端按原逻辑下发完整模板字节。
 /// </summary>
 public sealed class AgentJobClaimRequest
 {
     [JsonPropertyName("max")]
     public int Max { get; set; } = 1;
+
+    /// <summary>当前已缓存模板（templateId + templateHash），最多 <see cref="MaxCachedTemplates"/> 条。</summary>
+    [JsonPropertyName("cachedTemplates")]
+    public List<AgentCachedTemplateRef>? CachedTemplates { get; set; }
+
+    public const int MaxCachedTemplates = 64;
+}
+
+/// <summary>Agent 本地已缓存模板标识（claim 上报 / payload 请求用）。</summary>
+public sealed class AgentCachedTemplateRef
+{
+    [JsonPropertyName("templateId")]
+    public long TemplateId { get; set; }
+
+    [JsonPropertyName("templateHash")]
+    public string? TemplateHash { get; set; }
 }
 
 /// <summary>
@@ -45,7 +63,14 @@ public sealed class AgentJob
 /// </summary>
 public sealed class AgentJobPayload
 {
-    public string TemplateFileBase64 { get; set; } = string.Empty;
+    /// <summary>模板字节 Base64；服务端判定 Agent 已缓存同 hash 模板时为空（<see cref="Cached"/>=true）。</summary>
+    public string? TemplateFileBase64 { get; set; }
+
+    /// <summary>
+    /// 服务端是否按 cachedTemplateHash 命中裁剪：true 时不返回 templateFileBase64，
+    /// Agent 直接用本地 <see cref="TemplateCache"/> 中的模板文件。
+    /// </summary>
+    public bool Cached { get; set; }
 
     public string? TemplateFileName { get; set; }
 

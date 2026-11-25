@@ -5,11 +5,7 @@ import { ElMessage } from 'element-plus'
 import { ArrowLeft, Refresh } from '@element-plus/icons-vue'
 import { listAssetTasks } from '@/api/assetVerification'
 import { getErrorMessage } from '@/api/http'
-import {
-  MONTHLY_REPORT_EXPORT_PENDING_MESSAGE,
-  exportMonthlyReport,
-  isMonthlyReportExportPending,
-} from '@/api/assetMonthlyReport'
+import { exportMonthlyReport } from '@/api/assetMonthlyReport'
 import type {
   MonthlyReportExportScope,
   MonthlyReportPeriod,
@@ -321,18 +317,14 @@ async function handleExport(
 
   exporting.value = true
   try {
-    await exportMonthlyReport({
+    const result = await exportMonthlyReport({
       period: current,
       scope,
       status,
       onlyCurrentStatusPersons: onlyCurrentStatusPersons.value,
     })
-    ElMessage.success(`已开始导出${label}`)
+    ElMessage.success(`已导出${label}：${result.fileName}`)
   } catch (error) {
-    if (isMonthlyReportExportPending(error)) {
-      ElMessage.warning(`${MONTHLY_REPORT_EXPORT_PENDING_MESSAGE}，暂不能下载文件`)
-      return
-    }
     ElMessage.error(getErrorMessage(error, `导出${label}失败`))
   } finally {
     exporting.value = false
@@ -449,6 +441,7 @@ onMounted(() => {
         <el-button
           type="primary"
           :loading="exporting"
+          :disabled="exporting"
           @click="handleExport('period', '0', '已提交申请')"
         >
           已提交申请
@@ -456,25 +449,39 @@ onMounted(() => {
         <el-button
           type="primary"
           :loading="exporting"
+          :disabled="exporting"
           @click="handleExport('period', '1', '有报告未建档')"
         >
           有报告未建档
         </el-button>
-        <el-button type="primary" :loading="exporting" @click="handleExport('period', null, '全部导出')">
+        <el-button
+          type="primary"
+          :loading="exporting"
+          :disabled="exporting"
+          @click="handleExport('period', null, '全部导出')"
+        >
           全部导出
         </el-button>
       </div>
 
       <div class="export-actions export-actions--secondary">
-        <el-button :loading="exporting" @click="handleExport('period', '2', '已建档')">
+        <el-button
+          :loading="exporting"
+          :disabled="exporting"
+          @click="handleExport('period', '2', '已建档')"
+        >
           导出已建档
         </el-button>
-        <el-button :loading="exporting" @click="handleExport('period', '3', '不予认定')">
+        <el-button
+          :loading="exporting"
+          :disabled="exporting"
+          @click="handleExport('period', '3', '不予认定')"
+        >
           导出不予认定
         </el-button>
       </div>
 
-      <p class="export-note">导出接口待接入：按钮暂不生成文件。</p>
+      <p class="export-note">导出为 xlsx 文件；默认展开同户全部成员，勾选后仅导出状态匹配人员。</p>
     </NcCard>
 
     <NcCard title="全局导出">
@@ -490,6 +497,7 @@ onMounted(() => {
         <el-button
           type="primary"
           :loading="exporting"
+          :disabled="exporting"
           @click="handleExport('all', '0', '全部已提交申请人员')"
         >
           导出全部已提交申请人员
@@ -497,13 +505,14 @@ onMounted(() => {
         <el-button
           type="primary"
           :loading="exporting"
+          :disabled="exporting"
           @click="handleExport('all', '1', '全部有报告未建档人员')"
         >
           导出全部有报告未建档人员
         </el-button>
       </div>
 
-      <p class="export-note">导出接口待接入：按钮暂不生成文件。</p>
+      <p class="export-note">全局导出口径：指定状态、全部月份；默认展开整户。</p>
     </NcCard>
   </div>
 </template>

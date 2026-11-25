@@ -50,6 +50,15 @@ public sealed class JobTaskExecutor : IJobTaskExecutor
         var templatePath = _templates.TryGetPath(job.TemplateId, payload.TemplateHash, fileType);
         if (templatePath is null)
         {
+            if (payload.Cached)
+            {
+                // 服务端按上报 hash 裁掉了模板字节，但本地缓存已被清理：本次按失败处理；
+                // 用户重试时缓存清单不再包含该文件，服务端会重新下发完整模板。
+                throw new BusinessException(
+                    "JOB_TEMPLATE_CACHE_MISS",
+                    "服务端判定模板已缓存，但本地缓存文件缺失，请重试任务");
+            }
+
             if (string.IsNullOrWhiteSpace(payload.TemplateFileBase64))
             {
                 throw new BusinessException(

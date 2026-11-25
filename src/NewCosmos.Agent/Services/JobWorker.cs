@@ -15,12 +15,14 @@ public interface IAgentJobClient
         string serverBaseUrl,
         string deviceKey,
         int max,
+        IReadOnlyList<AgentCachedTemplateRef>? cachedTemplates = null,
         CancellationToken ct = default);
 
     Task<AgentJobPayload> GetPayloadAsync(
         string serverBaseUrl,
         string deviceKey,
         long jobId,
+        string? cachedTemplateHash = null,
         CancellationToken ct = default);
 
     Task CompleteAsync(
@@ -65,6 +67,7 @@ public sealed class JobWorker : IJobWorker
 
     private readonly IAgentJobClient _client;
     private readonly IJobTaskExecutor _executor;
+    private readonly TemplateCache? _templates;
     private readonly ILoggerService _logger;
     private readonly string _serverBaseUrl;
     private readonly string _deviceKey;
@@ -76,10 +79,12 @@ public sealed class JobWorker : IJobWorker
         ILoggerService logger,
         string serverBaseUrl,
         string deviceKey,
-        TimeSpan pollInterval)
+        TimeSpan pollInterval,
+        TemplateCache? templates = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _executor = executor ?? throw new ArgumentNullException(nameof(executor));
+        _templates = templates;
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _serverBaseUrl = serverBaseUrl ?? string.Empty;
         _deviceKey = deviceKey ?? string.Empty;
@@ -106,7 +111,12 @@ public sealed class JobWorker : IJobWorker
             try
             {
                 var jobs = await _client
-                    .ClaimAsync(_serverBaseUrl, _deviceKey, MaxJobsPerClaim, ct)
+                    .ClaimAsync(
+                        _serverBaseUrl,
+                        _deviceKey,
+                        MaxJobsPerClaim,
+                        _templates?.GetRecentEntries(),
+                        ct)
                     .ConfigureAwait(false);
 
                 foreach (var job in jobs)
@@ -183,8 +193,14 @@ public sealed class JobWorker : IJobWorker
         var startedAt = DateTime.UtcNow;
         try
         {
+            // payload 带上本地缓存 hash：服务端命中时不重复下发模板 Base64（老服务端忽略该参数）。
             var payload = await _client
-                .GetPayloadAsync(_serverBaseUrl, _deviceKey, job.Id, ct)
+                .GetPayloadAsync(
+                    _serverBaseUrl,
+                    _deviceKey,
+                    job.Id,
+                    _templates?.FindCachedHash(job.TemplateId),
+                    ct)
                 .ConfigureAwait(false);
 
             var warning = await _executor.ExecuteAsync(job, payload, ct).ConfigureAwait(false);

@@ -1,10 +1,16 @@
 /**
- * 核对月报表（含周报）类型与预留导出接口。
+ * 核对月报表（含周报）类型与导出接口。
  *
- * 现状：Server 端只有 summary / tasks / monthly 只读查询，尚无月报导出端点。
- * 因此这里只定义调用契约，exportMonthlyReport 不请求任何不存在的路径。
- * 后端提供导出接口后，仅需在此处替换实现，页面无需改动。
+ * 后端端点：GET /api/asset-verification/monthly/export
+ * - 月报传 year + month（后端按 A 线核查周期 [上月11日, 本月11日) 过滤）；
+ * - 周报传 weekStart + weekEnd（结束日含当天）；
+ * - 全局导出传 allMonths=true（不限月份）；
+ * - status 为空表示全部状态，onlyCurrent=true 表示不展开整户。
  */
+
+import { API_PREFIX } from './http'
+import { getStoredSessionId } from './session'
+import { getDeviceId } from '@/utils/device'
 
 export type MonthlyReportPeriodMode = 'monthly' | 'weekly'
 
@@ -47,35 +53,123 @@ export interface MonthlyReportExportRequest {
   onlyCurrentStatusPersons: boolean
 }
 
-/** 后端接入后返回可下载的文件信息。 */
+/** 导出完成后返回浏览器实际保存的文件名。 */
 export interface MonthlyReportExportResult {
   fileName: string
-  downloadUrl: string
 }
 
-export const MONTHLY_REPORT_EXPORT_PENDING_MESSAGE = '导出接口待接入'
+const EXPORT_PATH = `${API_PREFIX}/asset-verification/monthly/export`
 
-/** 导出端点尚未接入时抛出，页面据此给出“导出接口待接入”提示而不是伪造下载。 */
-export class MonthlyReportExportPendingError extends Error {
-  constructor(message: string = MONTHLY_REPORT_EXPORT_PENDING_MESSAGE) {
-    super(message)
-    this.name = 'MonthlyReportExportPendingError'
+function pad(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+function defaultFileName(request: MonthlyReportExportRequest): string {
+  if (request.scope === 'all') return '核对月报表_全部月份.xlsx'
+
+  const { period } = request
+  if (period.mode === 'weekly') {
+    const label = period.label.replace(/[\\/:*?"<>|]/g, '_')
+    return `核对周报表_${label}.xlsx`
   }
+
+  return `核对月报表_${period.year}-${pad(period.month)}.xlsx`
 }
 
-export function isMonthlyReportExportPending(
-  error: unknown,
-): error is MonthlyReportExportPendingError {
-  return error instanceof MonthlyReportExportPendingError
+/** 解析 Content-Disposition：优先 filename*（RFC 5987），其次 filename。 */
+function parseFileName(header: string | null): string | null {
+  if (!header) return null
+
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header)
+  if (encoded?.[1]) {
+    try {
+      return decodeURIComponent(encoded[1].trim().replace(/^"|"$/g, ''))
+    } catch {
+      // 编码异常时回退普通 filename
+    }
+  }
+
+  const plain = /filename="?([^";]+)"?/i.exec(header)
+  return plain?.[1]?.trim() || null
+}
+
+async function readErrorMessage(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { message?: unknown } | null
+    if (body && typeof body.message === 'string' && body.message.trim()) {
+      return body.message.trim()
+    }
+  } catch {
+    // 非 JSON 错误体，使用状态码兜底
+  }
+
+  return response.status === 401
+    ? '登录状态已失效，请重新登录'
+    : response.status === 403
+      ? '没有权限导出核对月报表'
+      : `导出失败（HTTP ${response.status}）`
+}
+
+function saveBlob(blob: Blob, fileName: string): void {
+  const objectUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = objectUrl
+  anchor.download = fileName
+  anchor.style.display = 'none'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
 }
 
 /**
- * 预留：按周期 / 全局导出核查人员名册。
+ * 按周期 / 全局导出核查人员名册（xlsx）。
  *
- * 当前后端没有对应端点，调用直接抛出 Pending 错误，不发起 HTTP 请求、不生成文件。
+ * 使用 fetch 以便携带认证头并直接拿到文件流；失败时抛出带后端 message 的 Error，
+ * 页面用 getErrorMessage 展示即可。
  */
 export async function exportMonthlyReport(
-  _request: MonthlyReportExportRequest,
+  request: MonthlyReportExportRequest,
 ): Promise<MonthlyReportExportResult> {
-  throw new MonthlyReportExportPendingError()
+  const params = new URLSearchParams()
+
+  if (request.scope === 'all') {
+    params.set('allMonths', 'true')
+  } else if (request.period.mode === 'weekly') {
+    params.set('weekStart', request.period.startDate)
+    params.set('weekEnd', request.period.endDate)
+  } else {
+    params.set('year', String(request.period.year))
+    params.set('month', String(request.period.month))
+  }
+
+  if (request.status) {
+    params.set('status', request.status)
+  }
+  params.set('onlyCurrent', request.onlyCurrentStatusPersons ? 'true' : 'false')
+
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'X-NC-Device': getDeviceId(),
+  }
+  const sessionId = getStoredSessionId()
+  if (sessionId) {
+    headers.Authorization = `Bearer ${sessionId}`
+  }
+
+  const response = await fetch(`${EXPORT_PATH}?${params.toString()}`, {
+    method: 'GET',
+    headers,
+  })
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response))
+  }
+
+  const blob = await response.blob()
+  const fileName =
+    parseFileName(response.headers.get('Content-Disposition')) ?? defaultFileName(request)
+
+  saveBlob(blob, fileName)
+  return { fileName }
 }

@@ -57,7 +57,8 @@ public static class WorkerRunner
             logger,
             settings.ServerBaseUrl,
             deviceKey,
-            TimeSpan.FromSeconds(settings.JobPollSeconds));
+            TimeSpan.FromSeconds(settings.JobPollSeconds),
+            templates);
 
         AgentConsole.Info($"任务目录: {settings.PrintJobsDirectory}");
         AgentConsole.Info($"模板缓存: {templates.Root}（≥200MB 自动清理最旧）");

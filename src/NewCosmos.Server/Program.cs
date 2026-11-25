@@ -172,6 +172,8 @@ app.MapApplicationFormEndpoints();
 app.MapSpecialApprovalEndpoints();
 app.MapElderlyEndpoints();
 app.MapAssetVerificationEndpoints();
+app.MapAssetMonthlyAuditEndpoints();
+app.MapAssetMonthlyReportEndpoints();
 app.MapSystemEndpoints();
 app.MapRegionEndpoints();
 

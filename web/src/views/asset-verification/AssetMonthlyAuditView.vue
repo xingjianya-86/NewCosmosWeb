@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Document,
   FolderOpened,
@@ -11,8 +12,19 @@ import {
 } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
 import {
+  ASSET_PHOTO_CATEGORY_OPTIONS,
+  fetchCheckReportContent,
   getMonthlyAuditOverview,
+  listCheckPhotos,
+  listCheckReports,
   listMonthlyAuditTasks,
+  photoCategoryText,
+  photoDataUrl,
+  rejectAssetCheck,
+  uploadCheckPhoto,
+  uploadCheckReport,
+  type AssetCheckPhoto,
+  type AssetReportVersion,
   type MonthlyAuditOverview,
 } from '@/api/assetMonthlyAudit'
 import type { AssetCheckStatus, AssetTaskListItem } from '@/types/assetVerification'
@@ -59,6 +71,43 @@ const activeTaskId = ref<number | null>(null)
 let overviewTicket = 0
 let listTicket = 0
 
+/* ── 核查照片 ─────────────────────────────────────────────────── */
+const photoDialogVisible = ref(false)
+const photoDialogTask = ref<AssetTaskListItem | null>(null)
+const photos = ref<AssetCheckPhoto[]>([])
+const photosLoading = ref(false)
+const photosError = ref('')
+const photoUploading = ref(false)
+const photoCategory = ref('PERSON_PHOTO')
+const photoInputRef = ref<HTMLInputElement | null>(null)
+let photoTicket = 0
+
+/* ── 报告上传 / 版本 / 预览 ───────────────────────────────────── */
+const reportInputRef = ref<HTMLInputElement | null>(null)
+const reportUploading = ref(false)
+const reports = ref<AssetReportVersion[]>([])
+const reportsLoading = ref(false)
+const reportsError = ref('')
+const activeReportId = ref<number | null>(null)
+const previewLoading = ref(false)
+const previewError = ref('')
+const previewKind = ref<'none' | 'pdf' | 'image'>('none')
+const previewUrl = ref('')
+let reportsTicket = 0
+let previewTicket = 0
+
+/* ── 批量上传 ─────────────────────────────────────────────────── */
+const batchInputRef = ref<HTMLInputElement | null>(null)
+const batchRunning = ref(false)
+const batchTotal = ref(0)
+const batchDone = ref(0)
+const batchFailed = ref(0)
+const batchMessage = ref('')
+let batchAbort: AbortController | null = null
+let batchStopRequested = false
+
+const rejectingId = ref<number | null>(null)
+
 const pageLoading = computed(() => listLoading.value || overviewLoading.value)
 const hasFilters = computed(() => keyword.value.trim().length > 0 || status.value !== '')
 const displayTotalPages = computed(() => Math.max(totalPages.value, 1))
@@ -99,6 +148,35 @@ const listSubtitle = computed(() => {
 const emptyDescription = computed(() =>
   hasFilters.value ? '没有找到匹配的待核对人员' : `${monthLabel.value}暂无待核对人员`,
 )
+
+const activeReport = computed(
+  () => reports.value.find((report) => report.id === activeReportId.value) ?? null,
+)
+
+const previewSubtitle = computed(() => {
+  if (!selectedTask.value) return '选中待核对人员后查看其核查报告'
+  if (reportsLoading.value) return '正在读取报告版本…'
+  if (!activeReport.value) return '该人员暂无报告文件'
+  const current = activeReport.value.isCurrent ? ' · 当前版本' : ''
+  return `v${activeReport.value.version} · ${textOrDash(activeReport.value.fileName)}${current}`
+})
+
+const photoSubject = computed(() => {
+  const task = photoDialogTask.value
+  if (!task) return ''
+  return `${textOrDash(task.archiveName)} · ${textOrDash(task.idCardMasked)}`
+})
+
+const batchProgress = computed(() => {
+  const finished = batchDone.value + batchFailed.value
+  if (batchTotal.value <= 0) return 0
+  return Math.min(100, Math.round((finished / batchTotal.value) * 100))
+})
+
+const batchSummary = computed(() => {
+  if (batchTotal.value === 0) return '尚未选择文件夹'
+  return `已上传 ${batchDone.value} / ${batchTotal.value} · 失败 ${batchFailed.value}`
+})
 
 function pad(value: number): string {
   return String(value).padStart(2, '0')
@@ -216,6 +294,357 @@ function openDetail(item: AssetTaskListItem): void {
   drawerVisible.value = true
 }
 
+function formatBytes(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) return '—'
+  if (size < 1024) return `${Math.round(size)} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
+}
+
+function isReportFile(file: File): boolean {
+  if (file.type === 'application/pdf') return true
+  if (file.type === 'image/jpeg' || file.type === 'image/png' || file.type === 'image/webp') {
+    return true
+  }
+  return /\.(pdf|jpe?g|jpe|png|webp)$/i.test(file.name)
+}
+
+/* ── 照片对话框 ───────────────────────────────────────────────── */
+
+async function loadPhotos(): Promise<void> {
+  const task = photoDialogTask.value
+  if (!task) return
+
+  const ticket = ++photoTicket
+  photosLoading.value = true
+  photosError.value = ''
+
+  try {
+    const list = await listCheckPhotos(task.id)
+    if (ticket !== photoTicket) return
+    photos.value = list
+  } catch (error) {
+    if (ticket !== photoTicket) return
+    photos.value = []
+    photosError.value = getErrorMessage(error, '照片列表加载失败')
+  } finally {
+    if (ticket === photoTicket) photosLoading.value = false
+  }
+}
+
+function openPhotoDialog(): void {
+  const task = selectedTask.value
+  if (!task) {
+    ElMessage.warning('请先在人员列表选中一人')
+    return
+  }
+  photoDialogTask.value = task
+  photoCategory.value = 'PERSON_PHOTO'
+  photoDialogVisible.value = true
+  void loadPhotos()
+}
+
+function handlePhotoDialogClosed(): void {
+  photoTicket += 1
+  photos.value = []
+  photosError.value = ''
+  photosLoading.value = false
+  photoUploading.value = false
+  photoDialogTask.value = null
+}
+
+function triggerPhotoPick(): void {
+  if (photoUploading.value || !photoDialogTask.value) return
+  photoInputRef.value?.click()
+}
+
+async function handlePhotoFileChange(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  const task = photoDialogTask.value
+  if (!task) return
+  if (!file.type.startsWith('image/')) {
+    ElMessage.error('请选择图片文件')
+    return
+  }
+
+  photoUploading.value = true
+  try {
+    await uploadCheckPhoto(task.id, file, photoCategory.value)
+    ElMessage.success('照片上传成功')
+    await loadPhotos()
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '照片上传失败'))
+  } finally {
+    photoUploading.value = false
+  }
+}
+
+/* ── 报告版本与预览 ───────────────────────────────────────────── */
+
+function releasePreviewUrl(): void {
+  if (previewUrl.value) {
+    URL.revokeObjectURL(previewUrl.value)
+    previewUrl.value = ''
+  }
+}
+
+function resolvePreviewKind(contentType: string, ...names: string[]): 'pdf' | 'image' | 'none' {
+  const type = (contentType ?? '').toLowerCase()
+  if (type.includes('pdf')) return 'pdf'
+  if (type.startsWith('image/')) return 'image'
+
+  const name = names.find((value) => (value ?? '').trim().length > 0)?.toLowerCase() ?? ''
+  if (name.endsWith('.pdf')) return 'pdf'
+  if (/\.(png|jpe?g|gif|bmp|webp)$/.test(name)) return 'image'
+  return 'none'
+}
+
+async function loadPreview(reportId: number | null): Promise<void> {
+  const ticket = ++previewTicket
+  releasePreviewUrl()
+  previewKind.value = 'none'
+  previewError.value = ''
+  previewLoading.value = false
+
+  if (reportId === null) return
+
+  const report = reports.value.find((item) => item.id === reportId) ?? null
+  previewLoading.value = true
+
+  try {
+    const content = await fetchCheckReportContent(reportId)
+    if (ticket !== previewTicket) return
+
+    const kind = resolvePreviewKind(content.contentType, content.fileName, report?.fileName ?? '')
+    if (kind === 'none') {
+      previewError.value = '该报告文件格式暂不支持在线预览，请下载后查看'
+      return
+    }
+
+    previewUrl.value = URL.createObjectURL(content.blob)
+    previewKind.value = kind
+  } catch (error) {
+    if (ticket !== previewTicket) return
+    if ((error as Error | null)?.name === 'AbortError') return
+    previewError.value = getErrorMessage(error, '报告预览加载失败')
+  } finally {
+    if (ticket === previewTicket) previewLoading.value = false
+  }
+}
+
+async function loadReports(checkId: number): Promise<void> {
+  const ticket = ++reportsTicket
+  reportsLoading.value = true
+  reportsError.value = ''
+
+  try {
+    const list = await listCheckReports(checkId)
+    if (ticket !== reportsTicket) return
+
+    reports.value = list
+    const current = list.find((report) => report.isCurrent) ?? list[0] ?? null
+    activeReportId.value = current?.id ?? null
+    void loadPreview(activeReportId.value)
+  } catch (error) {
+    if (ticket !== reportsTicket) return
+    reports.value = []
+    activeReportId.value = null
+    previewTicket += 1
+    releasePreviewUrl()
+    previewKind.value = 'none'
+    previewError.value = ''
+    previewLoading.value = false
+    reportsError.value = getErrorMessage(error, '报告版本加载失败')
+  } finally {
+    if (ticket === reportsTicket) reportsLoading.value = false
+  }
+}
+
+function selectReportVersion(report: AssetReportVersion): void {
+  if (report.id === activeReportId.value) return
+  activeReportId.value = report.id
+  void loadPreview(report.id)
+}
+
+function triggerReportPick(): void {
+  if (!selectedTask.value) {
+    ElMessage.warning('请先在人员列表选中一人')
+    return
+  }
+  if (reportUploading.value) return
+  reportInputRef.value?.click()
+}
+
+async function handleReportFileChange(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  const task = selectedTask.value
+  if (!task) return
+  if (!isReportFile(file)) {
+    ElMessage.error('请选择 PDF 或图片（jpg/png/webp）格式的报告文件')
+    return
+  }
+
+  reportUploading.value = true
+  try {
+    await uploadCheckReport(task.id, file)
+    ElMessage.success('报告已保存，正在刷新版本')
+    if (selectedTask.value?.id === task.id) {
+      await loadReports(task.id)
+    }
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '报告保存失败'))
+  } finally {
+    reportUploading.value = false
+  }
+}
+
+/* ── 驳回（不予认定） ─────────────────────────────────────────── */
+
+async function handleReject(item: AssetTaskListItem): Promise<void> {
+  if (item.status !== '1' || rejectingId.value !== null) return
+
+  try {
+    await ElMessageBox.confirm(
+      `确认将“${textOrDash(item.archiveName)}”标记为不予认定？此操作不可撤销。`,
+      '驳回确认',
+      {
+        confirmButtonText: '确认驳回',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+
+  rejectingId.value = item.id
+  try {
+    await rejectAssetCheck(item.id)
+    ElMessage.success('已标记为不予认定')
+    if (selectedTask.value?.id === item.id) {
+      selectedTask.value = null
+    }
+    loadAll()
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '驳回失败'))
+  } finally {
+    rejectingId.value = null
+  }
+}
+
+/* ── 批量上传报告 ─────────────────────────────────────────────── */
+
+function triggerBatchPick(): void {
+  if (!selectedTask.value) {
+    ElMessage.warning('请先选中人员，再选择该人员的报告文件夹')
+    return
+  }
+  if (batchRunning.value) return
+  batchInputRef.value?.click()
+}
+
+function cancelBatchUpload(): void {
+  if (!batchRunning.value) return
+  batchStopRequested = true
+  batchMessage.value = '正在取消上传…'
+  batchAbort?.abort()
+}
+
+async function handleBatchFileChange(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (files.length === 0) return
+
+  const task = selectedTask.value
+  if (!task) return
+
+  const validFiles = files.filter(isReportFile)
+  if (validFiles.length === 0) {
+    ElMessage.warning('所选文件夹中没有 PDF 或图片（jpg/png/webp）文件')
+    return
+  }
+
+  batchRunning.value = true
+  batchStopRequested = false
+  batchTotal.value = validFiles.length
+  batchDone.value = 0
+  batchFailed.value = 0
+  batchMessage.value =
+    files.length > validFiles.length
+      ? `已忽略 ${files.length - validFiles.length} 个非 PDF/图片文件`
+      : ''
+
+  const controller = new AbortController()
+  batchAbort = controller
+
+  try {
+    for (const file of validFiles) {
+      if (batchStopRequested) break
+
+      try {
+        await uploadCheckReport(task.id, file, { signal: controller.signal })
+        batchDone.value += 1
+      } catch (error) {
+        if (batchStopRequested || controller.signal.aborted) break
+        batchFailed.value += 1
+        if (!batchMessage.value) {
+          batchMessage.value = `“${file.name}”上传失败：${getErrorMessage(error, '未知错误')}`
+        }
+      }
+    }
+  } finally {
+    batchRunning.value = false
+    batchAbort = null
+
+    if (batchStopRequested) {
+      batchMessage.value = `已取消：成功 ${batchDone.value} 个，失败 ${batchFailed.value} 个`
+      ElMessage.info(batchMessage.value)
+    } else if (batchFailed.value > 0) {
+      batchMessage.value = `批量上传完成：成功 ${batchDone.value} 个，失败 ${batchFailed.value} 个`
+      ElMessage.warning(batchMessage.value)
+    } else {
+      batchMessage.value = `批量上传完成：共 ${batchDone.value} 个`
+      ElMessage.success(batchMessage.value)
+    }
+
+    if (batchDone.value > 0 && selectedTask.value?.id === task.id) {
+      await loadReports(task.id)
+    }
+  }
+}
+
+watch(selectedTask, (task) => {
+  reportsTicket += 1
+  previewTicket += 1
+  reports.value = []
+  reportsError.value = ''
+  reportsLoading.value = false
+  activeReportId.value = null
+  previewError.value = ''
+  previewKind.value = 'none'
+  previewLoading.value = false
+  releasePreviewUrl()
+  batchMessage.value = ''
+
+  if (task) {
+    void loadReports(task.id)
+  }
+})
+
+onBeforeUnmount(() => {
+  releasePreviewUrl()
+  batchAbort?.abort()
+})
+
 onMounted(() => {
   loadAll()
 })
@@ -225,7 +654,7 @@ onMounted(() => {
   <div class="nc-page asset-monthly-page">
     <NcPageHeader
       title="月度审核"
-      description="按月核查资产状况与核对报告。当前开放只读查询：任务名单、状态与详情可用；照片、报告保存/打印、批量上传、PDF 预览与不予认定等待接入。"
+      description="按月核查资产状况与核对报告：任务名单、照片归档、报告保存与版本预览、批量上传与不予认定均已接入；报告打印待开放。"
       kicker="家庭经济状况核对 · 月度审核"
     >
       <template #actions>
@@ -238,7 +667,7 @@ onMounted(() => {
       type="info"
       :closable="false"
       show-icon
-      title="只读模式：报告上传与审核写入尚未开放，相关按钮保留位置并禁用（悬停可见“待接入”）。"
+      title="照片归档、报告保存/版本预览、批量上传与驳回已接入；PDF 报告打印暂未开放（按钮禁用）。"
     />
 
     <div class="audit-layout">
@@ -302,14 +731,30 @@ onMounted(() => {
         <NcCard title="待核对人员" :subtitle="listSubtitle" padding="none" class="people-card">
           <template #actions>
             <span class="count-chip">{{ totalCount }}</span>
-            <span class="pending-wrap" title="待接入">
-              <el-button size="small" :icon="Picture" disabled>照片</el-button>
+            <span :title="selectedTask ? '查看并上传该人员照片' : '请先选中人员'">
+              <el-button
+                size="small"
+                :icon="Picture"
+                :disabled="!selectedTask || photoUploading"
+                @click="openPhotoDialog"
+              >
+                照片
+              </el-button>
             </span>
-            <span class="pending-wrap" title="待接入">
-              <el-button size="small" disabled>保存报告</el-button>
+            <span :title="selectedTask ? '上传新的报告版本' : '请先选中人员'">
+              <el-button
+                size="small"
+                :loading="reportUploading"
+                :disabled="!selectedTask || reportUploading"
+                @click="triggerReportPick"
+              >
+                保存报告
+              </el-button>
             </span>
-            <span class="pending-wrap" title="待接入">
-              <el-button size="small" :icon="Printer" disabled>打印报告</el-button>
+            <span class="pending-wrap" title="PDF 报告打印待接入">
+              <el-button size="small" :icon="Printer" title="PDF 报告打印待接入" disabled>
+                打印报告
+              </el-button>
             </span>
           </template>
 
@@ -396,13 +841,15 @@ onMounted(() => {
                 </div>
 
                 <div class="person-actions">
-                  <span
+                  <el-button
                     v-if="item.status === '1'"
-                    class="pending-wrap"
-                    title="待接入"
+                    size="small"
+                    :loading="rejectingId === item.id"
+                    :disabled="rejectingId !== null"
+                    @click.stop="handleReject(item)"
                   >
-                    <el-button size="small" disabled>不予认定</el-button>
-                  </span>
+                    驳回
+                  </el-button>
                   <el-button link type="primary" @click.stop="openDetail(item)">详情</el-button>
                 </div>
               </article>
@@ -439,49 +886,76 @@ onMounted(() => {
           </template>
         </NcCard>
 
-        <NcCard title="报告上传" subtitle="批量上传核查报告 PDF（待接入）">
+        <NcCard
+          title="报告上传"
+          :subtitle="
+            selectedTask
+              ? `批量上传到：${textOrDash(selectedTask.archiveName)}（${textOrDash(selectedTask.idCardMasked)}）`
+              : '请先在人员列表选中一人，再选择其报告文件夹'
+          "
+        >
           <div class="upload-stats">
             <div class="upload-stat">
-              <span class="upload-label">待上传</span>
-              <strong class="upload-value">—</strong>
-              <span class="card-note">上传统计待接入</span>
+              <span class="upload-label">已上传</span>
+              <strong class="upload-value">{{ batchDone }}</strong>
+              <span class="card-note">本次成功数量</span>
+            </div>
+            <div class="upload-stat upload-stat--total">
+              <span class="upload-label">总数</span>
+              <strong class="upload-value">{{ batchTotal }}</strong>
+              <span class="card-note">本次待上传文件</span>
             </div>
             <div class="upload-stat upload-stat--danger">
               <span class="upload-label">失败</span>
-              <strong class="upload-value">—</strong>
-              <span class="card-note">上传统计待接入</span>
+              <strong class="upload-value">{{ batchFailed }}</strong>
+              <span class="card-note">本次失败数量</span>
             </div>
           </div>
 
-          <span class="pending-wrap pending-block" title="待接入">
-            <el-button type="primary" class="upload-button" :icon="Upload" disabled>
+          <span
+            class="pending-block"
+            :title="selectedTask ? '选择包含报告文件的文件夹' : '请先选中人员'"
+          >
+            <el-button
+              type="primary"
+              class="upload-button"
+              :icon="Upload"
+              :loading="batchRunning"
+              :disabled="!selectedTask || batchRunning"
+              @click="triggerBatchPick"
+            >
               选择文件夹并批量上传
             </el-button>
           </span>
 
           <div class="upload-options">
-            <el-checkbox disabled>包含子文件夹</el-checkbox>
-            <span class="pending-wrap" title="待接入">
-              <el-button size="small" disabled>取消上传</el-button>
+            <span class="card-note">
+              支持 PDF / JPG / PNG / WEBP，子文件夹会一并纳入；逐个上传，不并行。
             </span>
+            <el-button size="small" :disabled="!batchRunning" @click="cancelBatchUpload">
+              取消上传
+            </el-button>
           </div>
 
-          <div class="upload-progress" title="待接入">
+          <div class="upload-progress">
             <div
               class="upload-progress-track"
               role="progressbar"
               aria-label="上传进度"
               aria-valuemin="0"
               aria-valuemax="100"
-              aria-valuenow="0"
+              :aria-valuenow="batchProgress"
             >
-              <span class="upload-progress-fill" />
+              <span class="upload-progress-fill" :style="{ width: `${batchProgress}%` }" />
             </div>
-            <span class="card-note">上传进度待接入</span>
+            <span class="card-note upload-progress-text">
+              {{ batchSummary }} · {{ batchProgress }}%
+            </span>
           </div>
 
-          <p class="card-note upload-footnote">
-            后端尚未提供报告上传、进度与取消接口，按钮与进度条仅保留位置。
+          <p v-if="batchMessage" class="card-note upload-footnote">{{ batchMessage }}</p>
+          <p v-else class="card-note upload-footnote">
+            上传前请确认已选中人员，报告会归属到该人员的核对记录。
           </p>
         </NcCard>
 
@@ -500,41 +974,224 @@ onMounted(() => {
       </div>
 
       <aside class="audit-preview">
-        <NcCard
-          title="报告预览"
-          subtitle="选中待核对人员后查看其核查报告 PDF"
-          class="preview-card"
-        >
+        <NcCard title="报告预览" :subtitle="previewSubtitle" class="preview-card">
           <div v-if="!selectedTask" class="preview-empty">
             <el-icon :size="34"><Document /></el-icon>
-            <p>选择左侧人员后显示 PDF 预览</p>
+            <p>选择左侧人员后显示报告预览</p>
           </div>
 
-          <div v-else class="preview-placeholder">
-            <span class="preview-badge" aria-hidden="true">PDF</span>
-            <strong class="preview-title">
-              {{ textOrDash(selectedTask.archiveName) }} · 核查报告
-            </strong>
-            <p class="preview-note">
-              PDF 预览接口尚未接入，当前无法在页面内查看或打印报告原件。
-            </p>
-            <span class="pending-wrap" title="待接入">
-              <el-button :icon="Printer" disabled>打印旧版本</el-button>
-            </span>
-          </div>
+          <template v-else>
+            <div class="preview-bar">
+              <span class="preview-file">
+                {{ textOrDash(activeReport?.fileName || selectedTask.archiveName) }}
+              </span>
+              <span class="preview-actions">
+                <span v-if="activeReport?.isCurrent" class="preview-current">当前版本</span>
+                <span class="pending-wrap" title="PDF 报告打印待接入">
+                  <el-button size="small" :icon="Printer" title="PDF 报告打印待接入" disabled>
+                    打印报告
+                  </el-button>
+                </span>
+              </span>
+            </div>
+
+            <el-alert
+              v-if="reportsError"
+              class="preview-alert"
+              type="error"
+              :title="reportsError"
+              :closable="false"
+              show-icon
+            >
+              <el-button link type="primary" @click="loadReports(selectedTask.id)">
+                重新加载
+              </el-button>
+            </el-alert>
+
+            <div v-else-if="reportsLoading" class="preview-loading">
+              <el-skeleton :rows="5" animated />
+            </div>
+
+            <div v-else-if="reports.length === 0" class="preview-placeholder">
+              <span class="preview-badge" aria-hidden="true">PDF</span>
+              <strong class="preview-title">该人员暂无报告</strong>
+              <p class="preview-note">
+                可通过“保存报告”上传单个文件，或在下方“报告上传”中批量上传文件夹。
+              </p>
+              <el-button size="small" @click="triggerReportPick">上传报告</el-button>
+            </div>
+
+            <div v-else v-loading="previewLoading" class="preview-stage">
+              <el-alert
+                v-if="previewError"
+                type="error"
+                :title="previewError"
+                :closable="false"
+                show-icon
+              />
+              <iframe
+                v-else-if="previewKind === 'pdf' && previewUrl"
+                :src="previewUrl"
+                class="preview-frame"
+                title="报告 PDF 预览"
+              />
+              <img
+                v-else-if="previewKind === 'image' && previewUrl"
+                :src="previewUrl"
+                class="preview-image"
+                alt="报告图片预览"
+              />
+              <div v-else class="preview-empty preview-empty--inline">
+                <p>选择下方报告版本以预览</p>
+              </div>
+            </div>
+          </template>
         </NcCard>
 
-        <NcCard title="报告版本（只读）" subtitle="查看与打印历史核查报告版本">
-          <div class="versions-empty">暂无报告版本数据（待接入）</div>
+        <NcCard
+          title="报告版本"
+          :subtitle="
+            selectedTask ? `共 ${reports.length} 个版本，点击切换预览` : '选中人员后显示报告版本'
+          "
+        >
+          <div v-if="!selectedTask" class="versions-empty">选中左侧人员后显示报告版本</div>
+          <div v-else-if="reportsLoading" class="versions-empty">正在读取报告版本…</div>
+          <div v-else-if="reportsError" class="versions-empty">{{ reportsError }}</div>
+          <div v-else-if="reports.length === 0" class="versions-empty">该人员暂无报告版本</div>
+
+          <ul v-else class="version-list">
+            <li v-for="report in reports" :key="report.id">
+              <button
+                type="button"
+                class="version-item"
+                :class="{ 'is-active': report.id === activeReportId }"
+                @click="selectReportVersion(report)"
+              >
+                <span class="version-no">v{{ report.version }}</span>
+                <span class="version-main">
+                  <strong class="version-file" :title="report.fileName">
+                    {{ textOrDash(report.fileName) }}
+                  </strong>
+                  <span class="version-meta">
+                    {{ formatDate(report.reportDate) }} · {{ formatBytes(report.size) }}
+                  </span>
+                </span>
+                <span v-if="report.isCurrent" class="version-current">当前</span>
+                <span v-else class="version-history">历史</span>
+              </button>
+            </li>
+          </ul>
+
           <div class="versions-foot">
-            <span class="card-note">版本列表与历史版本预览接口待接入。</span>
-            <span class="pending-wrap" title="待接入">
-              <el-button size="small" :icon="Printer" disabled>打印此版本</el-button>
+            <span class="card-note">预览默认显示当前版本；切换版本会重新读取文件。</span>
+            <span class="pending-wrap" title="PDF 报告打印待接入">
+              <el-button size="small" :icon="Printer" title="PDF 报告打印待接入" disabled>
+                打印此版本
+              </el-button>
             </span>
           </div>
         </NcCard>
       </aside>
     </div>
+
+    <el-dialog
+      v-model="photoDialogVisible"
+      :width="isNarrow ? '94%' : '720px'"
+      title="核查照片"
+      append-to-body
+      class="asset-photo-dialog"
+      @closed="handlePhotoDialogClosed"
+    >
+      <div class="photo-toolbar">
+        <p class="photo-subject">{{ photoSubject || '未选中人员' }}</p>
+        <div class="photo-upload">
+          <el-select
+            v-model="photoCategory"
+            size="small"
+            class="photo-category"
+            :disabled="photoUploading"
+          >
+            <el-option
+              v-for="option in ASSET_PHOTO_CATEGORY_OPTIONS"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+          <el-button
+            type="primary"
+            size="small"
+            :icon="Upload"
+            :loading="photoUploading"
+            :disabled="!photoDialogTask"
+            @click="triggerPhotoPick"
+          >
+            上传照片
+          </el-button>
+        </div>
+      </div>
+
+      <el-alert
+        v-if="photosError"
+        class="photo-alert"
+        type="error"
+        :title="photosError"
+        :closable="false"
+        show-icon
+      >
+        <el-button link type="primary" @click="loadPhotos">重新加载</el-button>
+      </el-alert>
+
+      <div v-loading="photosLoading" class="photo-grid">
+        <figure v-for="photo in photos" :key="photo.id" class="photo-card">
+          <img
+            :src="photoDataUrl(photo)"
+            :alt="photo.name || '核查照片'"
+            class="photo-image"
+            loading="lazy"
+          />
+          <figcaption class="photo-caption">
+            <span class="photo-name" :title="photo.name">{{ textOrDash(photo.name) }}</span>
+            <span class="photo-meta">
+              {{ photoCategoryText(photo.category) }} · {{ formatBytes(photo.size) }}
+            </span>
+          </figcaption>
+        </figure>
+
+        <div v-if="photos.length === 0 && !photosError" class="photo-empty">
+          <el-empty description="该人员暂无照片" :image-size="72" />
+        </div>
+      </div>
+
+      <template #footer>
+        <span class="photo-footnote">照片上传后立即归档，默认分类为“本人照片/证件照”。</span>
+        <el-button @click="photoDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <input
+      ref="photoInputRef"
+      class="hidden-file-input"
+      type="file"
+      accept="image/*"
+      @change="handlePhotoFileChange"
+    />
+    <input
+      ref="reportInputRef"
+      class="hidden-file-input"
+      type="file"
+      accept="application/pdf,image/jpeg,image/png,image/webp"
+      @change="handleReportFileChange"
+    />
+    <input
+      ref="batchInputRef"
+      class="hidden-file-input"
+      type="file"
+      accept="application/pdf,image/jpeg,image/png,image/webp"
+      webkitdirectory
+      multiple
+      @change="handleBatchFileChange"
+    />
 
     <AssetTaskDetailDrawer v-model="drawerVisible" :task-id="activeTaskId" />
   </div>
@@ -826,7 +1483,7 @@ onMounted(() => {
 
 .upload-stats {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -840,6 +1497,11 @@ onMounted(() => {
   border-left: 3px solid var(--nc-amber);
   border-radius: var(--nc-radius-sm);
   background-color: var(--nc-amber-soft);
+}
+
+.upload-stat--total {
+  border-left-color: var(--nc-pine);
+  background-color: var(--nc-pine-soft);
 }
 
 .upload-stat--danger {
@@ -988,6 +1650,80 @@ onMounted(() => {
   line-height: 1.7;
 }
 
+.preview-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.preview-file {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--nc-ink-2);
+  font-family: var(--nc-font-mono);
+  font-size: var(--nc-text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preview-current {
+  padding: 1px 6px;
+  border: 1px solid rgba(58, 104, 74, 0.4);
+  border-radius: var(--nc-radius-xs);
+  background-color: var(--nc-pine-soft);
+  color: var(--nc-ink-2);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.preview-alert {
+  margin-bottom: 10px;
+}
+
+.preview-loading {
+  padding: 12px 4px;
+}
+
+.preview-stage {
+  position: relative;
+  min-height: 320px;
+  overflow: hidden;
+  border: 1px solid var(--nc-line-faint);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-3);
+}
+
+.preview-frame {
+  display: block;
+  width: 100%;
+  height: min(66vh, 640px);
+  min-height: 320px;
+  border: 0;
+  background-color: var(--nc-paper-2);
+}
+
+.preview-image {
+  display: block;
+  width: 100%;
+  max-height: min(66vh, 640px);
+  object-fit: contain;
+  background-color: var(--nc-paper-3);
+}
+
+.preview-empty--inline {
+  min-height: 320px;
+}
+
 .versions-empty {
   padding: 18px 14px;
   border: 1px dashed var(--nc-line);
@@ -1005,6 +1741,217 @@ onMounted(() => {
   justify-content: space-between;
   gap: 10px;
   margin-top: 10px;
+}
+
+.version-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.version-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--nc-line-faint);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-soft);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--nc-transition),
+    background-color var(--nc-transition),
+    box-shadow var(--nc-transition);
+}
+
+.version-item:hover {
+  border-color: var(--nc-line-strong);
+  box-shadow: var(--nc-shadow-xs);
+}
+
+.version-item:focus-visible {
+  outline: 2px solid var(--nc-seal);
+  outline-offset: 1px;
+}
+
+.version-item.is-active {
+  border-color: var(--nc-seal);
+  background-color: var(--nc-paper-2);
+  box-shadow: inset 3px 0 0 var(--nc-seal);
+}
+
+.version-no {
+  flex: none;
+  min-width: 34px;
+  color: var(--nc-seal-dark);
+  font-family: var(--nc-font-mono);
+  font-size: var(--nc-text-xs);
+  font-weight: 700;
+}
+
+.version-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.version-file {
+  overflow: hidden;
+  color: var(--nc-ink);
+  font-size: var(--nc-text-sm);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.version-meta {
+  color: var(--nc-muted);
+  font-family: var(--nc-font-mono);
+  font-size: var(--nc-text-xs);
+}
+
+.version-current {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid rgba(58, 104, 74, 0.4);
+  border-radius: var(--nc-radius-xs);
+  background-color: var(--nc-pine-soft);
+  color: var(--nc-ink-2);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.version-history {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--nc-line-faint);
+  border-radius: var(--nc-radius-xs);
+  background-color: var(--nc-paper-3);
+  color: var(--nc-muted);
+  font-size: 10px;
+}
+
+.upload-progress-text {
+  flex: none;
+  white-space: nowrap;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+/* ── 照片对话框 ──────────────────────────────────────────────── */
+
+.photo-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.photo-subject {
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-md);
+  font-weight: 700;
+}
+
+.photo-upload {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.photo-category {
+  width: 168px;
+}
+
+.photo-alert {
+  margin-bottom: 10px;
+}
+
+.photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  min-height: 160px;
+  max-height: min(56vh, 520px);
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.photo-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--nc-line-faint);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-soft);
+}
+
+.photo-image {
+  display: block;
+  width: 100%;
+  height: 150px;
+  object-fit: cover;
+  background-color: var(--nc-paper-3);
+}
+
+.photo-caption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 7px 9px;
+}
+
+.photo-name {
+  overflow: hidden;
+  color: var(--nc-ink-2);
+  font-size: var(--nc-text-xs);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-meta {
+  color: var(--nc-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.photo-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.photo-footnote {
+  margin-right: auto;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
+}
+
+.asset-photo-dialog :deep(.el-dialog__footer) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
 }
 
 @media (max-width: 1080px) {
@@ -1079,6 +2026,33 @@ onMounted(() => {
   .preview-empty,
   .preview-placeholder {
     min-height: 200px;
+  }
+
+  .preview-stage,
+  .preview-empty--inline {
+    min-height: 240px;
+  }
+
+  .preview-frame {
+    height: 56vh;
+    min-height: 240px;
+  }
+
+  .photo-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .photo-image {
+    height: 118px;
+  }
+
+  .photo-upload {
+    width: 100%;
+  }
+
+  .photo-category {
+    flex: 1 1 auto;
+    width: auto;
   }
 }
 </style>

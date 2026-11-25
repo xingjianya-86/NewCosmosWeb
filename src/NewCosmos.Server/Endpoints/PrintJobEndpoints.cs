@@ -5,6 +5,7 @@ using NewCosmos.Models.Results;
 using NewCosmos.Server.Contracts;
 using NewCosmos.Server.Infrastructure;
 using NewCosmos.Server.Services;
+using NewCosmos.Services.Core;
 using NewCosmos.Services.UserManagement;
 
 namespace NewCosmos.Server.Endpoints;
@@ -455,11 +456,16 @@ public static class PrintJobEndpoints
 
     // ───────────────────────────── Agent ─────────────────────────────
 
-    /// <summary>POST /api/agent/jobs/claim body { max: 1 } -> 任务数组。</summary>
+    /// <summary>
+    /// POST /api/agent/jobs/claim body { max: 1, cachedTemplates: [{ templateId, templateHash }] }
+    /// cachedTemplates 可选：老 Agent 不传时完全兼容，按原逻辑认领。
+    /// 服务端受理并留痕该缓存清单；模板字节的真正裁剪以 payload 请求的 cachedTemplateHash 为准。
+    /// </summary>
     private static async Task<IResult> ClaimJobsAsync(
         AgentClaimRequest? request,
         HttpContext context,
         ArchivePrintQueueService queue,
+        ILoggerService logger,
         CancellationToken ct)
     {
         var (device, error) = await AuthorizeDeviceAsync(context, queue, ct);
@@ -469,6 +475,15 @@ public static class PrintJobEndpoints
         }
 
         var max = Math.Clamp(request?.Max ?? 1, 1, 50);
+        var cachedTemplates = NormalizeCachedTemplates(request?.CachedTemplates);
+        if (cachedTemplates.Count > 0)
+        {
+            // 仅做受理/留痕：真正的裁剪以 payload 请求携带的 cachedTemplateHash 为准，
+            // 避免认领时再读一次模板文件（file_data 较大）。
+            logger.Info(
+                $"[AgentClaim] 设备上报模板缓存 {cachedTemplates.Count} 条: Device={device!.MachineName}, Max={max}");
+        }
+
         var result = await queue.ClaimPendingAsync(max, device!.MachineName, device.Id, ct);
         if (result.IsFailure)
         {
@@ -494,14 +509,17 @@ public static class PrintJobEndpoints
     }
 
     /// <summary>
-    /// GET /api/agent/jobs/{id}/payload
+    /// GET /api/agent/jobs/{id}/payload?cachedTemplateHash=xxx
     /// 下发模板字节（Base64）+ 任务快照。configJson 一并下发，Agent 才能把 FieldKeys 映射到模板占位符。
+    /// cachedTemplateHash 可选：与任务模板 hash 一致时返回 cached=true 且不再下发 templateFileBase64
+    /// （Agent 直接用本地模板缓存）；缺省/不一致/老 Agent 一律按原逻辑下发完整模板。
     /// </summary>
     private static async Task<IResult> GetJobPayloadAsync(
         string id,
         HttpContext context,
         ArchivePrintQueueService queue,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? cachedTemplateHash = null)
     {
         var (device, error) = await AuthorizeDeviceAsync(context, queue, ct);
         if (error is not null)
@@ -567,9 +585,10 @@ public static class PrintJobEndpoints
         var fileName = BuildFileName(template.Name, extension);
         var (tableStartMarker, tableEndMarker) = ReadTableMarkers(template.ConfigJson);
         var templateHash = ResolveTemplateHash(template.FileHash, template.FileData);
+        var cacheHit = IsTemplateCacheHit(cachedTemplateHash, templateHash);
 
         return Results.Json(new AgentJobPayloadResponse(
-            Convert.ToBase64String(template.FileData),
+            cacheHit ? null : Convert.ToBase64String(template.FileData),
             fileName,
             fileType,
             fields,
@@ -584,7 +603,8 @@ public static class PrintJobEndpoints
             tableStartMarker,
             tableEndMarker,
             templateHash,
-            images));
+            images,
+            cacheHit));
     }
 
     /// <summary>POST /api/agent/jobs/{id}/complete（body 可选 { message }：降级打印等警告文案）。</summary>
@@ -791,6 +811,58 @@ public static class PrintJobEndpoints
         if (fileData is not { Length: > 0 }) return null;
 
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fileData)).ToLowerInvariant();
+    }
+
+    /// <summary>claim 上报缓存清单上限（与 Agent 侧一致）。</summary>
+    private const int MaxCachedTemplateRefs = 64;
+
+    /// <summary>清洗 claim 上报的模板缓存清单：丢弃非法 hash、去重、限制条数。</summary>
+    private static List<AgentCachedTemplate> NormalizeCachedTemplates(
+        IReadOnlyList<AgentCachedTemplate>? cachedTemplates)
+    {
+        var result = new List<AgentCachedTemplate>();
+        if (cachedTemplates is not { Count: > 0 }) return result;
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in cachedTemplates)
+        {
+            if (item is null || item.TemplateId <= 0) continue;
+
+            var hash = NormalizeHash(item.TemplateHash);
+            if (hash is null) continue;
+            if (!seen.Add($"{item.TemplateId}:{hash}")) continue;
+
+            result.Add(new AgentCachedTemplate(item.TemplateId, hash));
+            if (result.Count >= MaxCachedTemplateRefs) break;
+        }
+
+        return result;
+    }
+
+    /// <summary>payload 缓存命中判定：Agent 上报 hash 与任务模板 hash 均为合法 SHA256 且完全一致。</summary>
+    private static bool IsTemplateCacheHit(string? agentHash, string? templateHash)
+    {
+        var agent = NormalizeHash(agentHash);
+        var expected = NormalizeHash(templateHash);
+        return agent is not null
+               && expected is not null
+               && string.Equals(agent, expected, StringComparison.Ordinal);
+    }
+
+    /// <summary>规范化 hash（小写、16..128 位十六进制）；非法返回 null。</summary>
+    private static string? NormalizeHash(string? hash)
+    {
+        if (string.IsNullOrWhiteSpace(hash)) return null;
+
+        var trimmed = hash.Trim().ToLowerInvariant();
+        if (trimmed.Length is < 16 or > 128) return null;
+
+        foreach (var c in trimmed)
+        {
+            if (!char.IsAsciiHexDigitLower(c) && !char.IsAsciiDigit(c)) return null;
+        }
+
+        return trimmed;
     }
 
     private static (string FileType, string Extension) ResolveFileType(string? fileType)
@@ -1030,8 +1102,13 @@ public sealed record PrintJobListResponse(
 /// <summary>POST /api/print/jobs/{id}/retry 响应。</summary>
 public sealed record PrintJobRetryResponse(long Id, string Status);
 
-/// <summary>POST /api/agent/jobs/claim 请求体。</summary>
-public sealed record AgentClaimRequest(int? Max);
+/// <summary>POST /api/agent/jobs/claim 请求体。cachedTemplates 可选（老 Agent 不传）。</summary>
+public sealed record AgentClaimRequest(
+    int? Max,
+    IReadOnlyList<AgentCachedTemplate>? CachedTemplates);
+
+/// <summary>Agent 上报的本地已缓存模板（templateId + SHA256）。</summary>
+public sealed record AgentCachedTemplate(long TemplateId, string? TemplateHash);
 
 /// <summary>POST /api/agent/jobs/claim 任务项。</summary>
 public sealed record AgentJobItem(
@@ -1051,9 +1128,12 @@ public sealed record AgentJobItem(
 /// GET /api/agent/jobs/{id}/payload 响应。
 /// templateConfigJson 为附加字段：Agent 用它把 FieldKeys 映射到模板占位符（否则无法正确渲染）。
 /// templateHash + images 供 Agent 本地模板缓存与照片内嵌（images.placeholder 与 config 一致）。
+/// cached=true 表示按 Agent 上报的 cachedTemplateHash 命中缓存，此时 templateFileBase64 为 null。
 /// </summary>
 public sealed record AgentJobPayloadResponse(
-    string TemplateFileBase64,
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? TemplateFileBase64,
     string TemplateFileName,
     string TemplateFileType,
     Dictionary<string, string> Fields,
@@ -1068,7 +1148,8 @@ public sealed record AgentJobPayloadResponse(
     string? TableStartMarker,
     string? TableEndMarker,
     string? TemplateHash,
-    IReadOnlyList<PrintImagePayload> Images);
+    IReadOnlyList<PrintImagePayload> Images,
+    bool Cached);
 
 /// <summary>POST /api/agent/jobs/{id}/fail 请求体。</summary>
 public sealed record AgentFailRequest(string? ErrorMessage);

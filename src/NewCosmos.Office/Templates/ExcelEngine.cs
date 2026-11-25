@@ -1,6 +1,10 @@
+using NewCosmos.Constants;
+using NewCosmos.Helpers;
 using NewCosmos.Models.Options;
 using NewCosmos.Services.Core;
 using OfficeOpenXml;
+using OfficeOpenXml.Drawing;
+using SkiaSharp;
 
 namespace NewCosmos.Services.Templates;
 
@@ -19,6 +23,12 @@ public class ExcelEngine : ITemplateEngine
     private ExcelWorksheet _worksheet = null!;
     private string _tempFilePath = string.Empty;
     private bool _disposed;
+
+    /// <summary>1 像素 = 9525 EMU（96 DPI），EPPlus 图片偏移单位。</summary>
+    private const int EmuPerPixel = 9525;
+
+    /// <summary>Calibri 11 的最大数字宽度（像素），用于列宽字符数近似换算。</summary>
+    private const double MaxDigitWidth = 7.0;
 
     public ExcelEngine(ILoggerService logger, PerformanceOptions perfOptions, StorageOptions storageOptions)
     {
@@ -154,6 +164,252 @@ public class ExcelEngine : ITemplateEngine
                         cell.Style.WrapText = true;
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// 把图片占位符（如 {{PHOTO_APPLICANT}}）替换为内嵌图片：
+    /// 找到含占位符文本的单元格（支持合并区域），清掉占位符文本，再按单元格尺寸等比缩放居中插入图片。
+    /// 支持 JPEG/PNG（WebP 先转 JPEG）；坏图片/不支持格式记 Warn 跳过，不阻断整份文书。
+    /// 说明：EPPlus 的图片锚点按左上单元格 + 像素尺寸定位，图片不会随文本流移动。
+    /// </summary>
+    public void ReplaceImageFields(Dictionary<string, byte[]> images)
+    {
+        if (images == null || images.Count == 0)
+            return;
+
+        if (_worksheet == null)
+            throw new InvalidOperationException("ExcelEngine: 未加载工作表");
+
+        var dimension = _worksheet.Dimension;
+        if (dimension == null) return;
+
+        var pending = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var kvp in images)
+        {
+            if (string.IsNullOrWhiteSpace(kvp.Key) || kvp.Value is not { Length: > 0 })
+                continue;
+            pending[kvp.Key] = kvp.Value;
+        }
+
+        if (pending.Count == 0) return;
+
+        _logger.Info($"[ExcelEngine] 图片占位符插入: {pending.Count} 个");
+
+        var inserted = 0;
+        var pictureIndex = 0;
+
+        for (int row = dimension.Start.Row; row <= dimension.End.Row; row++)
+        {
+            for (int col = dimension.Start.Column; col <= dimension.End.Column; col++)
+            {
+                var cell = _worksheet.Cells[row, col];
+                var cellText = cell.Text;
+                if (string.IsNullOrEmpty(cellText))
+                    continue;
+
+                var placeholder = pending.Keys.FirstOrDefault(
+                    key => cellText.Contains(key, StringComparison.Ordinal));
+                if (placeholder is null)
+                    continue;
+
+                if (!TryPrepareImage(pending[placeholder], placeholder, out var compatible))
+                    continue;
+
+                var (startRow, startCol, endRow, endCol) = ResolveCellRange(row, col);
+                RemovePlaceholderText(cell, cellText, placeholder);
+
+                TryGetImagePixelSize(compatible, out var imageWidth, out var imageHeight);
+
+                try
+                {
+                    using var stream = new MemoryStream(compatible, writable: false);
+                    var picture = _worksheet.Drawings.AddPicture($"ncimg_{++pictureIndex}", stream);
+                    FitPictureToRange(picture, startRow, startCol, endRow, endCol, imageWidth, imageHeight);
+                    inserted++;
+                }
+                catch (Exception ex)
+                {
+                    // 图片插入失败不影响文字字段渲染（与 Word 引擎一致：只 Warn 不抛出）。
+                    _logger.Warn($"[ExcelEngine] 图片占位符 {placeholder} 插入失败: {ex.Message}");
+                }
+            }
+        }
+
+        if (inserted > 0)
+            _logger.Info($"[ExcelEngine] 图片占位符已内嵌: {inserted} 个");
+    }
+
+    /// <summary>校验/转码图片：JPEG/PNG 原样使用；WebP 转 JPEG；其余尝试转 PNG，失败返回 false。</summary>
+    private bool TryPrepareImage(byte[] raw, string placeholder, out byte[] compatible)
+    {
+        compatible = Array.Empty<byte>();
+
+        var format = ImageTranscoder.DetectFormat(raw);
+        if (format is PhotoFormatConstants.Jpeg or PhotoFormatConstants.Png)
+        {
+            compatible = raw;
+            return true;
+        }
+
+        var converted = format == PhotoFormatConstants.WebP
+            ? ImageTranscoder.TryToJpeg(raw, out compatible)
+            : ImageTranscoder.TryToPng(raw, out compatible);
+
+        if (converted && compatible.Length > 0)
+            return true;
+
+        _logger.Warn($"[ExcelEngine] 图片占位符 {placeholder} 跳过: 不支持的图片格式或图片已损坏");
+        return false;
+    }
+
+    /// <summary>清掉单元格中的图片占位符文本；若单元格还有其它文字则保留（与 Word 内联替换语义一致）。</summary>
+    private static void RemovePlaceholderText(ExcelRange cell, string cellText, string placeholder)
+    {
+        var remaining = cellText.Replace(placeholder, string.Empty).Trim();
+        cell.Value = string.IsNullOrEmpty(remaining) ? null : remaining;
+
+        if (remaining.Contains('\n'))
+            cell.Style.WrapText = true;
+    }
+
+    /// <summary>单元格若在合并区域内，返回整个合并区域的起止行列（图片铺满合并框）。</summary>
+    private (int StartRow, int StartCol, int EndRow, int EndCol) ResolveCellRange(int row, int col)
+    {
+        if (_worksheet == null || !_worksheet.Cells[row, col].Merge)
+            return (row, col, row, col);
+
+        foreach (var address in _worksheet.MergedCells)
+        {
+            if (string.IsNullOrWhiteSpace(address))
+                continue;
+
+            var merged = new ExcelAddress(address);
+            if (row >= merged.Start.Row && row <= merged.End.Row
+                && col >= merged.Start.Column && col <= merged.End.Column)
+            {
+                return (merged.Start.Row, merged.Start.Column, merged.End.Row, merged.End.Column);
+            }
+        }
+
+        return (row, col, row, col);
+    }
+
+    /// <summary>图片按单元格/合并区域尺寸等比缩放（不放大）并居中；尺寸读取失败时铺满可用区域。</summary>
+    private void FitPictureToRange(
+        ExcelPicture picture,
+        int startRow,
+        int startCol,
+        int endRow,
+        int endCol,
+        int imageWidth,
+        int imageHeight)
+    {
+        var cellWidth = 0;
+        for (int col = startCol; col <= endCol; col++)
+            cellWidth += ColumnWidthToPixels(col);
+
+        var cellHeight = 0;
+        for (int row = startRow; row <= endRow; row++)
+            cellHeight += RowHeightToPixels(row);
+
+        if (cellWidth <= 0) cellWidth = 96;
+        if (cellHeight <= 0) cellHeight = 96;
+
+        const int padding = 4;
+        var maxWidth = Math.Max(1, cellWidth - padding * 2);
+        var maxHeight = Math.Max(1, cellHeight - padding * 2);
+
+        if (imageWidth <= 0 || imageHeight <= 0)
+        {
+            // Skia 解码失败时退回 EPPlus 自带的元数据（插入瞬间可能尚未解析，仅兜底）。
+            try
+            {
+                var bounds = picture.Image?.Bounds;
+                if (bounds != null)
+                {
+                    imageWidth = (int)Math.Round(bounds.Width);
+                    imageHeight = (int)Math.Round(bounds.Height);
+                }
+            }
+            catch (Exception)
+            {
+                // 元数据读取失败：按铺满单元格处理
+            }
+        }
+
+        var width = maxWidth;
+        var height = maxHeight;
+        if (imageWidth > 0 && imageHeight > 0)
+        {
+            var scale = Math.Min((double)maxWidth / imageWidth, (double)maxHeight / imageHeight);
+            if (scale > 1.0) scale = 1.0; // 不放大：证件照留白比糊图更好
+            width = Math.Max(1, (int)Math.Round(imageWidth * scale));
+            height = Math.Max(1, (int)Math.Round(imageHeight * scale));
+        }
+
+        picture.SetSize(width, height);
+        picture.From.Row = startRow - 1;
+        picture.From.Column = startCol - 1;
+        picture.From.RowOff = Math.Max(0, (cellHeight - height) / 2) * EmuPerPixel;
+        picture.From.ColumnOff = Math.Max(0, (cellWidth - width) / 2) * EmuPerPixel;
+
+        _logger.Debug(
+            $"[ExcelEngine] 图片定位: Cell=({startRow},{startCol})-({endRow},{endCol}), " +
+            $"Box={cellWidth}x{cellHeight}px, Image={width}x{height}px");
+    }
+
+    /// <summary>用 Skia 读取图片固有像素尺寸（EPPlus 插入瞬间的 Bounds 可能尚未解析）。</summary>
+    private static bool TryGetImagePixelSize(byte[] bytes, out int width, out int height)
+    {
+        width = 0;
+        height = 0;
+        try
+        {
+            using var image = SKImage.FromEncodedData(bytes);
+            if (image is null) return false;
+
+            width = image.Width;
+            height = image.Height;
+            return width > 0 && height > 0;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>列宽（字符数）→ 像素：Calibri 11 的最大数字宽约 7px，与 Excel 显示宽度一致。</summary>
+    private int ColumnWidthToPixels(int column)
+    {
+        try
+        {
+            var col = _worksheet.Column(column);
+            if (col.Hidden) return 0;
+
+            var width = col.Width > 0 ? col.Width : 8.43;
+            return Math.Max(0, (int)Math.Round(width * MaxDigitWidth + 5));
+        }
+        catch (Exception)
+        {
+            return 64;
+        }
+    }
+
+    /// <summary>行高（磅）→ 像素（96 DPI）。</summary>
+    private int RowHeightToPixels(int row)
+    {
+        try
+        {
+            var sheetRow = _worksheet.Row(row);
+            if (sheetRow.Hidden) return 0;
+
+            var height = sheetRow.Height > 0 ? sheetRow.Height : 15;
+            return Math.Max(0, (int)Math.Round(height * 96.0 / 72.0));
+        }
+        catch (Exception)
+        {
+            return 20;
         }
     }
 

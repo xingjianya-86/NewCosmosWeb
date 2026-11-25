@@ -15,11 +15,16 @@ public sealed partial class HttpAgentClient
         string serverBaseUrl,
         string deviceKey,
         int max,
+        IReadOnlyList<AgentCachedTemplateRef>? cachedTemplates = null,
         CancellationToken ct = default)
     {
         EnsureDeviceKey(deviceKey);
 
-        var request = new AgentJobClaimRequest { Max = Math.Clamp(max, 1, 10) };
+        var request = new AgentJobClaimRequest
+        {
+            Max = Math.Clamp(max, 1, 10),
+            CachedTemplates = NormalizeCachedTemplates(cachedTemplates)
+        };
         using var message = new HttpRequestMessage(HttpMethod.Post, CombineUrl(serverBaseUrl, JobsPath + "/claim"))
         {
             Content = CreateJsonContent(request)
@@ -40,13 +45,17 @@ public sealed partial class HttpAgentClient
         string serverBaseUrl,
         string deviceKey,
         long jobId,
+        string? cachedTemplateHash = null,
         CancellationToken ct = default)
     {
         EnsureDeviceKey(deviceKey);
 
-        using var message = new HttpRequestMessage(
-            HttpMethod.Get,
-            CombineUrl(serverBaseUrl, $"{JobsPath}/{jobId}/payload"));
+        var path = $"{JobsPath}/{jobId}/payload";
+        var hash = NormalizeHash(cachedTemplateHash);
+        if (hash is not null)
+            path += $"?cachedTemplateHash={Uri.EscapeDataString(hash)}";
+
+        using var message = new HttpRequestMessage(HttpMethod.Get, CombineUrl(serverBaseUrl, path));
         message.Headers.Add("X-NC-Device-Key", deviceKey);
 
         using var response = await _http.SendAsync(message, ct).ConfigureAwait(false);
@@ -115,6 +124,44 @@ public sealed partial class HttpAgentClient
     {
         if (string.IsNullOrWhiteSpace(deviceKey))
             throw new AgentApiException(0, "AGENT_DEVICE_KEY_MISSING", "缺少设备密钥，请先运行 --register");
+    }
+
+    /// <summary>清洗 claim 上报的缓存清单：去重、去非法 hash、限制条数（老服务端忽略该字段）。</summary>
+    private static List<AgentCachedTemplateRef> NormalizeCachedTemplates(
+        IReadOnlyList<AgentCachedTemplateRef>? cachedTemplates)
+    {
+        var result = new List<AgentCachedTemplateRef>();
+        if (cachedTemplates is not { Count: > 0 }) return result;
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in cachedTemplates)
+        {
+            if (item == null || item.TemplateId <= 0) continue;
+
+            var hash = NormalizeHash(item.TemplateHash);
+            if (hash is null) continue;
+            if (!seen.Add($"{item.TemplateId}:{hash}")) continue;
+
+            result.Add(new AgentCachedTemplateRef { TemplateId = item.TemplateId, TemplateHash = hash });
+            if (result.Count >= AgentJobClaimRequest.MaxCachedTemplates) break;
+        }
+
+        return result;
+    }
+
+    private static string? NormalizeHash(string? hash)
+    {
+        if (string.IsNullOrWhiteSpace(hash)) return null;
+
+        var trimmed = hash.Trim().ToLowerInvariant();
+        if (trimmed.Length is < 16 or > 128) return null;
+
+        foreach (var c in trimmed)
+        {
+            if (!char.IsAsciiHexDigitLower(c) && !char.IsAsciiDigit(c)) return null;
+        }
+
+        return trimmed;
     }
 
     internal static string Truncate(string? text, int maxLength)
