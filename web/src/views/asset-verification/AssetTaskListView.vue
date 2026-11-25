@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { Refresh, Search } from '@element-plus/icons-vue'
+import { useRouter } from 'vue-router'
+import { ArrowLeft, Printer, Refresh, Search } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import { listAssetTasks } from '@/api/assetVerification'
+import { useAssetPrintDialog } from '@/api/assetPrint'
 import { getErrorMessage } from '@/api/http'
 import type { AssetCheckStatus, AssetTaskListItem } from '@/types/assetVerification'
 import NcCard from '@/components/NcCard.vue'
@@ -12,6 +15,7 @@ import AssetTaskDetailDrawer from './AssetTaskDetailDrawer.vue'
 import AssetTaskTable from './AssetTaskTable.vue'
 import { ASSET_STATUS_OPTIONS } from './status'
 
+const router = useRouter()
 const isNarrow = useMediaQuery('(max-width: 960px)')
 
 const keyword = ref('')
@@ -28,6 +32,24 @@ const loadError = ref('')
 
 const drawerVisible = ref(false)
 const activeTaskId = ref<number | null>(null)
+
+/* ── 打印授权书 / 核查报告 ─────────────────────────────────────── */
+const printVisible = ref(false)
+const printTaskId = ref<number | null>(null)
+const {
+  templates: printTemplates,
+  templatesLoading: printTemplatesLoading,
+  templatesError: printTemplatesError,
+  submitting: printSubmitting,
+  templateId: printTemplateId,
+  mode: printMode,
+  copies: printCopies,
+  isDuplex: printIsDuplex,
+  canSubmit: printCanSubmit,
+  loadTemplates: loadPrintTemplates,
+  open: openPrintDialog,
+  submit: submitPrintJob,
+} = useAssetPrintDialog()
 
 let requestTicket = 0
 
@@ -116,6 +138,33 @@ function openDetail(item: AssetTaskListItem): void {
   drawerVisible.value = true
 }
 
+async function openPrint(item?: AssetTaskListItem): Promise<void> {
+  if (items.value.length === 0) {
+    ElMessage.warning('暂无可打印的核对任务')
+    return
+  }
+
+  printTaskId.value = item?.id ?? items.value[0]?.id ?? null
+  printVisible.value = true
+  await openPrintDialog()
+}
+
+async function handlePrintSubmit(): Promise<void> {
+  if (printTaskId.value === null) {
+    ElMessage.warning('请选择要打印的核对任务')
+    return
+  }
+
+  try {
+    await submitPrintJob(printTaskId.value)
+    ElMessage.success('已推送到 PC 端')
+    printVisible.value = false
+    await load()
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '推送打印失败'))
+  }
+}
+
 onMounted(() => {
   void load()
 })
@@ -125,10 +174,14 @@ onMounted(() => {
   <div class="nc-page asset-task-page">
     <NcPageHeader
       title="快速经济核对"
-      description="只读查询家庭经济状况核对任务、报告状态与同批次家庭成员。"
-      kicker="家庭经济状况核对 · 任务查询"
+      description="查看快速经济核对任务、报告状态与同批次家庭成员。"
+      kicker="家庭经济状况核对 · 快速核对任务"
     >
       <template #actions>
+        <el-button :icon="ArrowLeft" @click="router.push('/asset-verification/new')">
+          返回快速经济核对
+        </el-button>
+        <el-button :icon="Printer" @click="openPrint()">打印授权书 / 核查报告</el-button>
         <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
       </template>
     </NcPageHeader>
@@ -242,6 +295,81 @@ onMounted(() => {
       </template>
     </NcCard>
 
+    <el-dialog
+      v-model="printVisible"
+      :width="isNarrow ? '94%' : '520px'"
+      title="打印授权书 / 核查报告"
+      append-to-body
+      class="asset-print-dialog"
+    >
+      <el-form label-position="top" class="print-form">
+        <el-form-item label="核对任务">
+          <el-select v-model="printTaskId" filterable placeholder="选择要打印的核对任务">
+            <el-option
+              v-for="item in items"
+              :key="item.id"
+              :label="`${item.archiveName || '未命名'}（${item.batchId || '无批次号'}）`"
+              :value="item.id"
+            />
+          </el-select>
+        </el-form-item>
+
+        <el-form-item label="打印模板">
+          <el-select
+            v-model="printTemplateId"
+            :loading="printTemplatesLoading"
+            :disabled="printTemplatesLoading"
+            placeholder="选择模板"
+          >
+            <el-option
+              v-for="template in printTemplates"
+              :key="template.id"
+              :label="template.name"
+              :value="template.id"
+            />
+          </el-select>
+          <p v-if="printTemplatesError" class="form-hint is-error">
+            {{ printTemplatesError }}
+            <el-button link type="primary" @click="loadPrintTemplates(true)">重试</el-button>
+          </p>
+          <p v-else-if="!printTemplatesLoading && printTemplates.length === 0" class="form-hint">
+            当前业务域暂无可用的打印模板
+          </p>
+        </el-form-item>
+
+        <el-form-item label="输出方式">
+          <el-radio-group v-model="printMode">
+            <el-radio-button value="preview">预览</el-radio-button>
+            <el-radio-button value="print">打印</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+
+        <div class="print-options">
+          <el-form-item label="份数">
+            <el-input-number v-model="printCopies" :min="1" :max="99" />
+          </el-form-item>
+          <el-form-item label="单双面">
+            <el-radio-group v-model="printIsDuplex">
+              <el-radio-button :value="false">单面</el-radio-button>
+              <el-radio-button :value="true">双面</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+        </div>
+      </el-form>
+
+      <template #footer>
+        <el-button @click="printVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="printSubmitting"
+          :disabled="!printCanSubmit"
+          @click="handlePrintSubmit"
+        >
+          确定推送
+        </el-button>
+      </template>
+    </el-dialog>
+
     <AssetTaskDetailDrawer v-model="drawerVisible" :task-id="activeTaskId" />
   </div>
 </template>
@@ -336,6 +464,33 @@ onMounted(() => {
   color: var(--nc-muted);
   font-family: var(--nc-font-mono);
   font-size: var(--nc-text-xs);
+}
+
+.print-form :deep(.el-select) {
+  width: 100%;
+}
+
+.print-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.form-hint {
+  margin: 6px 0 0;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
+  line-height: 1.5;
+}
+
+.form-hint.is-error {
+  color: var(--el-color-danger);
+}
+
+@media (max-width: 767px) {
+  .print-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 767px) {

@@ -84,6 +84,7 @@ public static class PrintJobEndpoints
     /// POST /api/print/jobs
     /// body: { businessType, businessId, templateId, templateName?, printerName?, copies?, isDuplex?, mode? }
     /// mode = preview | print（默认 print）。预览与打印共用同一份数据快照，仅 JobKind 不同。
+    /// 支持 FamilyApplication 与 AssetVerification；返回 missingFields 只提示不阻断。
     /// </summary>
     private static async Task<IResult> CreateJobAsync(
         PrintJobCreateRequest? request,
@@ -93,18 +94,6 @@ public static class PrintJobEndpoints
         INewPermissionService permissions,
         CancellationToken ct)
     {
-        var denied = await EndpointSecurity.RequirePermissionAsync(
-            context, permissions, PermissionCodes.PRINT_FAMILYAPPLICATION, ct);
-        if (denied is not null)
-        {
-            return denied;
-        }
-
-        if (context.GetCurrentUser() is not { } user)
-        {
-            return Unauthorized(context);
-        }
-
         if (request is null)
         {
             return InvalidRequest(context, "请求体不能为空");
@@ -113,9 +102,22 @@ public static class PrintJobEndpoints
         var businessType = string.IsNullOrWhiteSpace(request.BusinessType)
             ? PrintBusinessTypes.FamilyApplication
             : request.BusinessType.Trim();
-        if (!string.Equals(businessType, PrintBusinessTypes.FamilyApplication, StringComparison.OrdinalIgnoreCase))
+
+        var permissionCode = ResolvePrintPermission(businessType);
+        if (permissionCode is null)
         {
-            return InvalidRequest(context, "当前仅支持 FamilyApplication 推送打印");
+            return InvalidRequest(context, "当前仅支持 FamilyApplication / AssetVerification 推送打印");
+        }
+
+        var denied = await EndpointSecurity.RequirePermissionAsync(context, permissions, permissionCode, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
         }
 
         if (request.BusinessId is not > 0)
@@ -147,20 +149,59 @@ public static class PrintJobEndpoints
                 ApiErrorCodes.NotFound, "模板不存在");
         }
 
-        // 数据范围 + 业务存在性：复用表单服务（只读，越权与不存在统一 404）。
-        var dataResult = await printData.BuildAsync(request.BusinessId.Value, user.Id, ct);
-        if (dataResult.IsFailure)
+        // 数据装配：FamilyApplication 复用表单服务（数据范围 + 业务存在性）；
+        // AssetVerification 复用资产核查打印数据服务（另一个子代理创建并注册）。
+        ArchivePrintData data;
+        if (string.Equals(businessType, PrintBusinessTypes.AssetVerification, StringComparison.OrdinalIgnoreCase))
         {
-            return MapResult(context, dataResult);
+            var checkService = context.RequestServices.GetRequiredService<AssetCheckPrintDataService>();
+            var checkResult = await checkService.BuildAsync(request.BusinessId.Value, ct);
+            if (checkResult.IsFailure)
+            {
+                return MapResult(context, checkResult);
+            }
+
+            var payload = checkResult.Value;
+            data = new ArchivePrintData
+            {
+                ApplicantName = payload.Fields.GetValueOrDefault(FieldKeys.APPLICANT_NAME) ?? string.Empty,
+                ApplicantIdCard = payload.Fields.GetValueOrDefault(FieldKeys.APPLICANT_ID_CARD) ?? string.Empty
+            };
+            foreach (var (key, value) in payload.Fields)
+            {
+                if (!string.IsNullOrWhiteSpace(value)) data.Fields[key] = value;
+            }
+            data.TableRows.AddRange(payload.TableRows);
+        }
+        else
+        {
+            // 数据范围 + 业务存在性：复用表单服务（只读，越权与不存在统一 404）。
+            var dataResult = await printData.BuildAsync(request.BusinessId.Value, user.Id, ct);
+            if (dataResult.IsFailure)
+            {
+                return MapResult(context, dataResult);
+            }
+            data = dataResult.Value;
         }
 
-        var data = dataResult.Value;
+        var templateConfig = await queue.GetTemplateConfigAsync(template.Id, ct);
+        var configJson = templateConfig.IsSuccess ? templateConfig.Value : null;
+
+        // businessId 只有 FamilyApplication 才等于 nc_biz_applications.id；
+        // 其他业务类型仅按身份证匹配，避免把核查记录 ID 误当申请 ID 取到别人照片。
+        var photoApplicationId = string.Equals(businessType, PrintBusinessTypes.FamilyApplication, StringComparison.OrdinalIgnoreCase)
+            ? request.BusinessId
+            : null;
+
+        var images = await printData.BuildPhotoImagesAsync(
+            data.ApplicantIdCard, photoApplicationId, configJson, ct);
+
         var printerName = NormalizeOptional(request.PrinterName, 300);
         var templateName = NormalizeOptional(request.TemplateName, 300) ?? template.Name;
 
         var jobRequest = new PrintJobRequest
         {
-            BusinessType = PrintBusinessTypes.FamilyApplication,
+            BusinessType = businessType,
             BusinessId = request.BusinessId,
             Classification = data.Classification,
             TemplateId = template.Id,
@@ -172,6 +213,7 @@ public static class PrintJobEndpoints
             IsDuplex = request.IsDuplex ?? false,
             Fields = data.Fields,
             TableRows = data.TableRows,
+            Images = images,
             RequestedBy = user.Id,
             RequestedByName = OperatorName(user),
             JobKind = mode == "preview"
@@ -186,8 +228,73 @@ public static class PrintJobEndpoints
         }
 
         var job = enqueueResult.Value;
+        var missingFields = FindMissingFields(configJson, data.Fields, images);
+
         return Results.Json(new PrintJobCreatedResponse(
-            job.Id, job.JobNo, job.Status, job.JobKind));
+            job.Id, job.JobNo, job.Status, job.JobKind, missingFields));
+    }
+
+    /// <summary>业务类型 → 打印权限码（未登记的类型返回 null）。</summary>
+    private static string? ResolvePrintPermission(string businessType)
+    {
+        if (string.Equals(businessType, PrintBusinessTypes.FamilyApplication, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.PRINT_FAMILYAPPLICATION;
+        if (string.Equals(businessType, PrintBusinessTypes.AssetVerification, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.PRINT_ASSETVERIFICATION;
+        return null;
+    }
+
+    /// <summary>
+    /// 缺字段提示：模板 config.fields 中声明了 fieldKey，但本次数据无值（图片字段已下发图片则不算缺）。
+    /// 只提示，不阻断任务创建。
+    /// </summary>
+    private static List<string> FindMissingFields(
+        string? configJson,
+        IReadOnlyDictionary<string, string> fields,
+        IReadOnlyList<PrintImagePayload> images)
+    {
+        var missing = new List<string>();
+        if (string.IsNullOrWhiteSpace(configJson)) return missing;
+
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(configJson);
+            if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) return missing;
+            if (!TryGetProperty(document.RootElement, "fields", out var fieldsElement)
+                || fieldsElement.ValueKind != System.Text.Json.JsonValueKind.Array)
+            {
+                return missing;
+            }
+
+            var providedImageKeys = images
+                .Select(image => image.FieldKey)
+                .OfType<string>()
+                .Where(key => key.Length > 0)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var field in fieldsElement.EnumerateArray())
+            {
+                if (field.ValueKind != System.Text.Json.JsonValueKind.Object) continue;
+
+                var fieldKey = TryGetProperty(field, "fieldKey", out var keyElement)
+                               && keyElement.ValueKind == System.Text.Json.JsonValueKind.String
+                    ? keyElement.GetString()?.Trim()
+                    : null;
+                if (string.IsNullOrEmpty(fieldKey) || !seen.Add(fieldKey)) continue;
+
+                if (fields.TryGetValue(fieldKey, out var value) && !string.IsNullOrWhiteSpace(value)) continue;
+                if (providedImageKeys.Contains(fieldKey)) continue;
+
+                missing.Add(fieldKey);
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // config 损坏时不做缺字段提示，不影响创建
+        }
+
+        return missing;
     }
 
     /// <summary>GET /api/print/jobs?status=&amp;pageIndex=1&amp;pageSize=20（只返回当前登录用户的任务）。</summary>
@@ -455,9 +562,11 @@ public static class PrintJobEndpoints
 
         var fields = DeserializeFields(job.FieldsJson);
         var tableRows = DeserializeRows(job.TableRowsJson);
+        var images = DeserializeImages(job.ImagesJson);
         var (fileType, extension) = ResolveFileType(template.FileType);
         var fileName = BuildFileName(template.Name, extension);
         var (tableStartMarker, tableEndMarker) = ReadTableMarkers(template.ConfigJson);
+        var templateHash = ResolveTemplateHash(template.FileHash, template.FileData);
 
         return Results.Json(new AgentJobPayloadResponse(
             Convert.ToBase64String(template.FileData),
@@ -473,10 +582,12 @@ public static class PrintJobEndpoints
             job.ApplicantIdCard,
             template.ConfigJson,
             tableStartMarker,
-            tableEndMarker));
+            tableEndMarker,
+            templateHash,
+            images));
     }
 
-    /// <summary>POST /api/agent/jobs/{id}/complete。</summary>
+    /// <summary>POST /api/agent/jobs/{id}/complete（body 可选 { message }：降级打印等警告文案）。</summary>
     private static async Task<IResult> CompleteJobAsync(
         string id,
         HttpContext context,
@@ -500,8 +611,33 @@ public static class PrintJobEndpoints
             return owned.Error;
         }
 
-        var result = await queue.CompleteAsync(jobId, ct);
+        // 老版本 Agent 不带 body（空请求体也允许），只有显式 message 才作为警告回写。
+        var warning = await ReadOptionalCompleteMessageAsync(context, ct);
+        var result = await queue.CompleteAsync(jobId, warning, ct);
         return result.IsFailure ? MapResult(context, result) : Results.NoContent();
+    }
+
+    private static async Task<string?> ReadOptionalCompleteMessageAsync(HttpContext context, CancellationToken ct)
+    {
+        if (context.Request.ContentLength is null or 0) return null;
+
+        try
+        {
+            using var document = await System.Text.Json.JsonDocument
+                .ParseAsync(context.Request.Body, cancellationToken: ct)
+                .ConfigureAwait(false);
+            if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+            if (!TryGetProperty(document.RootElement, "message", out var messageElement)) return null;
+            if (messageElement.ValueKind != System.Text.Json.JsonValueKind.String) return null;
+
+            var message = messageElement.GetString()?.Trim();
+            return string.IsNullOrWhiteSpace(message) ? null : message;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // 非法 JSON 不阻断完成回写
+            return null;
+        }
     }
 
     /// <summary>POST /api/agent/jobs/{id}/fail body { errorMessage }。</summary>
@@ -626,6 +762,35 @@ public static class PrintJobEndpoints
         {
             return [];
         }
+    }
+
+    private static List<PrintImagePayload> DeserializeImages(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return [];
+        }
+
+        try
+        {
+            return System.Text.Json.JsonSerializer.Deserialize<List<PrintImagePayload>>(
+                       json,
+                       new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                   ?? [];
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>payload.templateHash：优先 file_hash；历史数据为空时按 file_data 现算 SHA256。</summary>
+    private static string? ResolveTemplateHash(string? storedHash, byte[]? fileData)
+    {
+        if (!string.IsNullOrWhiteSpace(storedHash)) return storedHash.Trim().ToLowerInvariant();
+        if (fileData is not { Length: > 0 }) return null;
+
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(fileData)).ToLowerInvariant();
     }
 
     private static (string FileType, string Extension) ResolveFileType(string? fileType)
@@ -824,12 +989,13 @@ public sealed record PrintJobCreateRequest(
     bool? IsDuplex,
     string? Mode);
 
-/// <summary>POST /api/print/jobs 响应。</summary>
+/// <summary>POST /api/print/jobs 响应。missingFields 只做提示：模板声明但本次无值的字段键。</summary>
 public sealed record PrintJobCreatedResponse(
     long Id,
     string JobNo,
     string Status,
-    string JobKind);
+    string JobKind,
+    IReadOnlyList<string> MissingFields);
 
 /// <summary>GET /api/print/jobs 列表项。</summary>
 public sealed record PrintJobListItem(
@@ -884,6 +1050,7 @@ public sealed record AgentJobItem(
 /// <summary>
 /// GET /api/agent/jobs/{id}/payload 响应。
 /// templateConfigJson 为附加字段：Agent 用它把 FieldKeys 映射到模板占位符（否则无法正确渲染）。
+/// templateHash + images 供 Agent 本地模板缓存与照片内嵌（images.placeholder 与 config 一致）。
 /// </summary>
 public sealed record AgentJobPayloadResponse(
     string TemplateFileBase64,
@@ -899,7 +1066,9 @@ public sealed record AgentJobPayloadResponse(
     string? ApplicantIdCard,
     string? TemplateConfigJson,
     string? TableStartMarker,
-    string? TableEndMarker);
+    string? TableEndMarker,
+    string? TemplateHash,
+    IReadOnlyList<PrintImagePayload> Images);
 
 /// <summary>POST /api/agent/jobs/{id}/fail 请求体。</summary>
 public sealed record AgentFailRequest(string? ErrorMessage);

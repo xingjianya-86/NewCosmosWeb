@@ -1,12 +1,21 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Refresh } from '@element-plus/icons-vue'
+import { Printer, Refresh } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import { getErrorMessage } from '@/api/http'
 import { getAssetTask } from '@/api/assetVerification'
+import { useAssetPrintDialog } from '@/api/assetPrint'
 import type { AssetTaskDetail } from '@/types/assetVerification'
 import { useMediaQuery } from '@/composables/useMediaQuery'
 import AssetStatusTag from './AssetStatusTag.vue'
-import { formatDate, formatDateTime, textOrDash } from './format'
+import {
+  applicationReasonText,
+  formatDate,
+  formatDateTime,
+  idTypeText,
+  relationshipText,
+  textOrDash,
+} from './format'
 
 const props = withDefaults(
   defineProps<{
@@ -25,6 +34,23 @@ const detail = ref<AssetTaskDetail | null>(null)
 const loading = ref(false)
 const loadError = ref('')
 
+/* ── 打印授权书 / 核查报告（与列表页共用同一套对话框状态） ─────── */
+const printVisible = ref(false)
+const {
+  templates: printTemplates,
+  templatesLoading: printTemplatesLoading,
+  templatesError: printTemplatesError,
+  submitting: printSubmitting,
+  templateId: printTemplateId,
+  mode: printMode,
+  copies: printCopies,
+  isDuplex: printIsDuplex,
+  canSubmit: printCanSubmit,
+  loadTemplates: loadPrintTemplates,
+  open: openPrintDialog,
+  submit: submitPrintJob,
+} = useAssetPrintDialog()
+
 let requestTicket = 0
 
 const basicFields = computed<Array<{ label: string; value: string }>>(() => {
@@ -35,8 +61,8 @@ const basicFields = computed<Array<{ label: string; value: string }>>(() => {
     { label: '批次号', value: textOrDash(task.batchId) },
     { label: '申请人', value: textOrDash(task.applicantName) },
     { label: '身份证号', value: textOrDash(task.applicantIdCard) },
-    { label: '证件类型', value: textOrDash(task.applicantIdType) },
-    { label: '与户主关系', value: textOrDash(task.relationship) },
+    { label: '证件类型', value: idTypeText(task.applicantIdType) },
+    { label: '与户主关系', value: relationshipText(task.relationship) },
     { label: '是否户主', value: task.isHead ? '是' : '否' },
     { label: '户主身份证号', value: textOrDash(task.headIdCard) },
     { label: '联系电话', value: textOrDash(task.contactPhone) },
@@ -69,6 +95,25 @@ async function load(taskId: number): Promise<void> {
 
 function handleVisibleChange(value: boolean): void {
   emit('update:modelValue', value)
+}
+
+async function openPrint(): Promise<void> {
+  if (!detail.value) return
+  printVisible.value = true
+  await openPrintDialog()
+}
+
+async function handlePrintSubmit(): Promise<void> {
+  const task = detail.value
+  if (!task) return
+
+  try {
+    await submitPrintJob(task.id)
+    ElMessage.success('已推送到 PC 端')
+    printVisible.value = false
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '推送打印失败'))
+  }
 }
 
 watch(
@@ -134,7 +179,7 @@ watch(
           </div>
           <div class="detail-item detail-item--wide">
             <dt>申请事由</dt>
-            <dd class="reason">{{ textOrDash(detail.applicationReason) }}</dd>
+            <dd class="reason">{{ applicationReasonText(detail.applicationReason) }}</dd>
           </div>
         </dl>
       </section>
@@ -166,12 +211,89 @@ watch(
 
         <p v-else class="member-empty">暂无同批次家庭成员。</p>
       </section>
+
+      <section class="detail-section print-section">
+        <el-button type="primary" :icon="Printer" @click="openPrint">
+          打印授权书 / 核查报告
+        </el-button>
+        <p class="print-note">按整户数据推送到已绑定的 PC 端打印机，可选预览或直接打印。</p>
+      </section>
     </div>
 
     <div v-else class="drawer-empty">
       <el-empty description="未找到核对详情" />
     </div>
   </el-drawer>
+
+  <el-dialog
+    v-model="printVisible"
+    :width="narrow ? '94%' : '520px'"
+    title="打印授权书 / 核查报告"
+    append-to-body
+  >
+    <el-form label-position="top" class="print-form">
+      <el-form-item label="核对任务">
+        <el-input
+          :model-value="`${detail?.applicantName || '未命名'}（${detail?.batchId || '无批次号'}）`"
+          disabled
+        />
+      </el-form-item>
+
+      <el-form-item label="打印模板">
+        <el-select
+          v-model="printTemplateId"
+          :loading="printTemplatesLoading"
+          :disabled="printTemplatesLoading"
+          placeholder="选择模板"
+        >
+          <el-option
+            v-for="template in printTemplates"
+            :key="template.id"
+            :label="template.name"
+            :value="template.id"
+          />
+        </el-select>
+        <p v-if="printTemplatesError" class="form-hint is-error">
+          {{ printTemplatesError }}
+          <el-button link type="primary" @click="loadPrintTemplates(true)">重试</el-button>
+        </p>
+        <p v-else-if="!printTemplatesLoading && printTemplates.length === 0" class="form-hint">
+          当前业务域暂无可用的打印模板
+        </p>
+      </el-form-item>
+
+      <el-form-item label="输出方式">
+        <el-radio-group v-model="printMode">
+          <el-radio-button value="preview">预览</el-radio-button>
+          <el-radio-button value="print">打印</el-radio-button>
+        </el-radio-group>
+      </el-form-item>
+
+      <div class="print-options">
+        <el-form-item label="份数">
+          <el-input-number v-model="printCopies" :min="1" :max="99" />
+        </el-form-item>
+        <el-form-item label="单双面">
+          <el-radio-group v-model="printIsDuplex">
+            <el-radio-button :value="false">单面</el-radio-button>
+            <el-radio-button :value="true">双面</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+      </div>
+    </el-form>
+
+    <template #footer>
+      <el-button @click="printVisible = false">取消</el-button>
+      <el-button
+        type="primary"
+        :loading="printSubmitting"
+        :disabled="!printCanSubmit"
+        @click="handlePrintSubmit"
+      >
+        确定推送
+      </el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -293,6 +415,43 @@ watch(
   padding: 24px 0;
 }
 
+.print-section {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--nc-line-faint);
+}
+
+.print-note {
+  margin: 0;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
+  line-height: 1.5;
+}
+
+.print-form :deep(.el-select) {
+  width: 100%;
+}
+
+.print-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.form-hint {
+  margin: 6px 0 0;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
+  line-height: 1.5;
+}
+
+.form-hint.is-error {
+  color: var(--el-color-danger);
+}
+
 .mono {
   font-family: var(--nc-font-mono);
   font-size: var(--nc-text-sm);
@@ -301,6 +460,10 @@ watch(
 
 @media (max-width: 720px) {
   .detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .print-options {
     grid-template-columns: minmax(0, 1fr);
   }
 

@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowLeft, ArrowRight, Document, Plus, Refresh, Search, Tickets } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowRight, Document, Refresh, Search, Tickets } from '@element-plus/icons-vue'
 import { getAssetVerificationSummary } from '@/api/assetVerification'
 import { getErrorMessage } from '@/api/http'
 import type { AssetVerificationSummary } from '@/types/assetVerification'
@@ -36,19 +36,13 @@ const stats = computed<StatCapsule[]>(() => [
   { label: '全年累计（户）', value: summary.value?.yearTotal ?? null, tone: 'ink' },
 ])
 
-/* 文案与旧版 Pages/AssetVerification/AssetVerificationHomePage.xaml 一致。 */
+/* 三张功能卡与旧版 Pages/AssetVerification/AssetVerificationHomePage.xaml 一致。 */
 const featureCards: FeatureCard[] = [
-  {
-    title: '发起核查',
-    description: '录入申请人与授权人，提交快速经济状况核查',
-    icon: Plus,
-    to: '/asset-verification/new',
-  },
   {
     title: '快速经济核对',
     description: '发起单户家庭经济状况核对申请',
     icon: Search,
-    to: '/asset-verification/tasks',
+    to: '/asset-verification/new',
   },
   {
     title: '月度审核',
@@ -60,7 +54,7 @@ const featureCards: FeatureCard[] = [
     title: '核对月报表',
     description: '按月生成、导出核对统计报表',
     icon: Tickets,
-    to: '/coming-soon/asset-report',
+    to: '/asset-verification/report',
   },
 ]
 
@@ -142,7 +136,7 @@ onMounted(() => {
     <section class="feature-section" aria-label="业务办理">
       <h2 class="section-title"><span class="seal-dash" aria-hidden="true" />业务办理</h2>
       <p class="section-note">
-        快速核对与月度审核当前开放只读查询，报告上传与审核写入将在下一批开放。
+        快速核对申请、授权报告月度审核与按月统计报表统一在此办理。
       </p>
 
       <div class="feature-grid">

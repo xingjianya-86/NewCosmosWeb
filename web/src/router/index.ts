@@ -128,6 +128,12 @@ const router = createRouter({
           meta: { title: '月度审核' },
         },
         {
+          path: 'asset-verification/report',
+          name: 'asset-verification-report',
+          component: () => import('@/views/asset-verification/AssetMonthlyReportView.vue'),
+          meta: { title: '核对月报表' },
+        },
+        {
           path: 'printers',
           name: 'printers',
           component: () => import('@/views/PrintersView.vue'),

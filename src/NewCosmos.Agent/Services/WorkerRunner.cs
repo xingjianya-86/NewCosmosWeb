@@ -48,7 +48,8 @@ public static class WorkerRunner
 
         var renderer = new TemplateJobRenderer(logger);
         var printer = new JobPrinter(renderer, logger);
-        var executor = new JobTaskExecutor(renderer, printer, files, logger, settings.PreviewKeepCount);
+        var templates = new TemplateCache(logger);
+        var executor = new JobTaskExecutor(renderer, printer, files, templates, logger, settings.PreviewKeepCount);
 
         var worker = new JobWorker(
             client,
@@ -59,6 +60,7 @@ public static class WorkerRunner
             TimeSpan.FromSeconds(settings.JobPollSeconds));
 
         AgentConsole.Info($"任务目录: {settings.PrintJobsDirectory}");
+        AgentConsole.Info($"模板缓存: {templates.Root}（≥200MB 自动清理最旧）");
         AgentConsole.Info($"预览保留最近 {settings.PreviewKeepCount} 个 PDF");
 
         return await worker.RunAsync(ct).ConfigureAwait(false);

@@ -10,7 +10,11 @@ namespace NewCosmos.Agent.Services;
 /// <summary>打印派发：优先 Office COM（可控制打印机/份数/双面），失败降级系统 PDF 打印。</summary>
 public interface IJobPrinter
 {
-    Task PrintAsync(
+    /// <summary>
+    /// 执行打印。成功返回 null；降级到 ShellExecute 时返回 warning 文案（任务仍算完成）。
+    /// 失败必须抛异常（由 JobWorker 回写 fail）。
+    /// </summary>
+    Task<string?> PrintAsync(
         string pdfPath,
         string sourcePath,
         string fileType,
@@ -31,7 +35,7 @@ public sealed class JobPrinter : IJobPrinter
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
-    public async Task PrintAsync(
+    public async Task<string?> PrintAsync(
         string pdfPath,
         string sourcePath,
         string fileType,
@@ -65,7 +69,7 @@ public sealed class JobPrinter : IJobPrinter
                 _logger.Info(
                     $"[JobPrint] Office COM 打印完成: Printer={printerName ?? "(默认)"}, Copies={effectiveCopies}, Duplex={isDuplex}");
                 AgentConsole.Success($"打印已提交: {printerName ?? "(默认打印机)"} × {effectiveCopies}{(isDuplex ? "（双面）" : string.Empty)}");
-                return;
+                return null;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -87,10 +91,13 @@ public sealed class JobPrinter : IJobPrinter
         //    局限：份数/双面由阅读器/打印机默认值决定，无法保证与任务参数一致。
         if (TryPrintPdfViaShell(pdfPath, printerName, out var shellError))
         {
+            var warning =
+                $"已降级为系统 PDF 打印（份数/双面可能不生效）：Office COM 失败" +
+                $"{(officeError is null ? string.Empty : $"（{HttpAgentClient.Truncate(officeError.Message, 300)}）")}";
             _logger.Warn(
                 $"[JobPrint] 已降级为系统 PDF 打印（份数/双面可能不生效）: Printer={printerName ?? "(默认)"}, Copies={effectiveCopies}");
             AgentConsole.Warn($"已通过系统 PDF 阅读器提交打印（份数/双面可能不生效）: {printerName ?? "(默认打印机)"}");
-            return;
+            return warning;
         }
 
         var message =

@@ -26,6 +26,7 @@ public static class AssetVerificationEndpoints
         app.MapGet("/api/asset-verification/summary", GetSummaryAsync);
         app.MapGet("/api/asset-verification/tasks", ListTasksAsync);
         app.MapGet("/api/asset-verification/tasks/{id:long}", GetDetailAsync);
+        app.MapGet("/api/asset-verification/history", GetHistoryAsync);
         app.MapGet("/api/asset-verification/monthly", ListMonthlyAsync);
         app.MapGet("/api/asset-verification/operator-context", GetOperatorContextAsync);
         app.MapPost("/api/asset-verification/checks", CreateCheckAsync);
@@ -123,6 +124,73 @@ public static class AssetVerificationEndpoints
         return result.IsFailure
             ? ApiErrors.FromResult(context, result)
             : Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// 按身份证号查询历史核查记录（快速核对页“查询历史”）。
+    /// 先复用 Core 的历史判定，再按申请日期倒序取最近 20 条任务。
+    /// </summary>
+    private static async Task<IResult> GetHistoryAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        IAssetVerificationService verification,
+        IDatabaseService database,
+        CancellationToken ct,
+        string? idCard)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.ASSET_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetUserId() is null)
+        {
+            return Unauthorized(context);
+        }
+
+        var normalized = (idCard ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return InvalidRequest(context, "请提供身份证号");
+        }
+
+        var history = await verification.GetHistoryByIdCardAsync(normalized, ct);
+        if (history is null)
+        {
+            return Results.Json(new { tasks = Array.Empty<object>() });
+        }
+
+        const string sql = @"
+            SELECT id, batch_id, applicant_name, application_date, family_address, status
+            FROM nc_biz_asset_checks
+            WHERE applicant_id_card = $1 AND deleted_at IS NULL
+            ORDER BY application_date DESC, id DESC
+            LIMIT 20";
+
+        var rowsResult = await database.QueryAsync<AssetHistoryRow>(sql, ct, normalized);
+        if (rowsResult.IsFailure)
+        {
+            return ApiErrors.FromResult(context, rowsResult);
+        }
+
+        var tasks = (rowsResult.Value ?? [])
+            .Select(row => new
+            {
+                id = row.Id,
+                batchId = row.BatchId ?? string.Empty,
+                applicantName = row.ApplicantName ?? string.Empty,
+                applicationDate = row.ApplicationDate,
+                familyAddress = row.FamilyAddress ?? string.Empty,
+                status = row.Status ?? string.Empty,
+                statusText = string.IsNullOrWhiteSpace(row.Status)
+                    ? string.Empty
+                    : AssetCheckStatusConstants.GetDescription(row.Status),
+            })
+            .ToList();
+
+        return Results.Json(new { tasks });
     }
 
     private static async Task<IResult> ListMonthlyAsync(
@@ -516,6 +584,16 @@ public static class AssetVerificationEndpoints
         public int Id { get; set; }
         public string VillageName { get; set; } = string.Empty;
         public string VillageCode { get; set; } = string.Empty;
+    }
+
+    private sealed class AssetHistoryRow
+    {
+        public long Id { get; set; }
+        public string? BatchId { get; set; }
+        public string? ApplicantName { get; set; }
+        public DateTime ApplicationDate { get; set; }
+        public string? FamilyAddress { get; set; }
+        public string? Status { get; set; }
     }
 
     private sealed class VillageOption

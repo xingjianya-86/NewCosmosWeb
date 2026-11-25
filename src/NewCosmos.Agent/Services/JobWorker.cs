@@ -27,6 +27,7 @@ public interface IAgentJobClient
         string serverBaseUrl,
         string deviceKey,
         long jobId,
+        string? message = null,
         CancellationToken ct = default);
 
     Task FailAsync(
@@ -40,8 +41,10 @@ public interface IAgentJobClient
 /// <summary>单个任务的执行器：下载负载之后的渲染/预览/打印。</summary>
 public interface IJobTaskExecutor
 {
-    /// <summary>执行成功后返回；失败必须抛出异常（由 <see cref="JobWorker"/> 回写 fail）。</summary>
-    Task ExecuteAsync(AgentJob job, AgentJobPayload payload, CancellationToken ct);
+    /// <summary>
+    /// 执行成功后返回 warning 文案（如降级打印，可为 null）；失败必须抛出异常（由 <see cref="JobWorker"/> 回写 fail）。
+    /// </summary>
+    Task<string?> ExecuteAsync(AgentJob job, AgentJobPayload payload, CancellationToken ct);
 }
 
 /// <summary>Agent 后台任务执行器。</summary>
@@ -184,12 +187,12 @@ public sealed class JobWorker : IJobWorker
                 .GetPayloadAsync(_serverBaseUrl, _deviceKey, job.Id, ct)
                 .ConfigureAwait(false);
 
-            await _executor.ExecuteAsync(job, payload, ct).ConfigureAwait(false);
+            var warning = await _executor.ExecuteAsync(job, payload, ct).ConfigureAwait(false);
 
             var stateWritten = false;
             try
             {
-                await _client.CompleteAsync(_serverBaseUrl, _deviceKey, job.Id, ct).ConfigureAwait(false);
+                await _client.CompleteAsync(_serverBaseUrl, _deviceKey, job.Id, warning, ct).ConfigureAwait(false);
                 stateWritten = true;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -207,7 +210,11 @@ public sealed class JobWorker : IJobWorker
             if (stateWritten)
             {
                 AgentConsole.Success($"任务完成 #{job.Id} {jobNo}（{elapsed} ms）");
-                _logger.Info($"[JobWorker] 任务完成: Id={job.Id}, No={jobNo}, ElapsedMs={elapsed}");
+                _logger.Info($"[JobWorker] 任务完成: Id={job.Id}, No={jobNo}, ElapsedMs={elapsed}, Warning={(string.IsNullOrWhiteSpace(warning) ? "-" : warning)}");
+                if (!string.IsNullOrWhiteSpace(warning))
+                {
+                    AgentConsole.Warn($"任务 {jobNo} 完成但有警告: {warning}");
+                }
             }
             else
             {

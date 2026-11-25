@@ -62,16 +62,26 @@ public sealed partial class HttpAgentClient
         string serverBaseUrl,
         string deviceKey,
         long jobId,
+        string? message = null,
         CancellationToken ct = default)
     {
         EnsureDeviceKey(deviceKey);
 
-        using var message = new HttpRequestMessage(
+        using var request = new HttpRequestMessage(
             HttpMethod.Post,
             CombineUrl(serverBaseUrl, $"{JobsPath}/{jobId}/complete"));
-        message.Headers.Add("X-NC-Device-Key", deviceKey);
+        request.Headers.Add("X-NC-Device-Key", deviceKey);
 
-        using var response = await _http.SendAsync(message, ct).ConfigureAwait(false);
+        // 降级打印等警告：作为可选 body 回写 error_message（任务仍为 Completed）。
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            request.Content = CreateJsonContent(new AgentJobCompleteRequest
+            {
+                Message = Truncate(message, 1000)
+            });
+        }
+
+        using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
         await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
     }
 

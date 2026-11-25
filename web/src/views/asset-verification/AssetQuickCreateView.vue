@@ -2,11 +2,14 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Delete, Plus } from '@element-plus/icons-vue'
+import { ArrowLeft, Clock, Delete, Plus } from '@element-plus/icons-vue'
 import {
   createQuickAssetCheck,
+  getAssetCheckHistory,
   getAssetOperatorContext,
+  type AssetHistoryTaskItem,
   type AssetOperatorContext,
+  type QuickAssetCheckCreated,
   type QuickAssetCheckPayload,
 } from '@/api/assetVerification'
 import { getErrorMessage } from '@/api/http'
@@ -73,6 +76,11 @@ const agent = reactive({
 const villages = computed(() => context.value?.villages ?? [])
 const canSubmit = computed(() => !submitting.value && !loadingContext.value)
 
+const historyVisible = ref(false)
+const historyLoadingIdCard = ref('')
+const historyTitle = ref('历史核查记录')
+const historyTasks = ref<AssetHistoryTaskItem[]>([])
+
 async function loadContext(): Promise<void> {
   loadingContext.value = true
   try {
@@ -102,6 +110,61 @@ function removeApplicant(row: ApplicantRow): void {
   if (row.isHead) return
   const index = applicants.value.indexOf(row)
   if (index >= 0) applicants.value.splice(index, 1)
+}
+
+function formatHistoryDate(value: string): string {
+  return value ? value.slice(0, 10) : '—'
+}
+
+/** 旧版授权人行“查询历史”：按身份证查询历史核查记录。 */
+async function queryHistory(row: ApplicantRow): Promise<void> {
+  const idCard = row.idCard.trim()
+  if (idCard.length !== 18) {
+    ElMessage.warning('请输入完整的18位身份证号后查询')
+    return
+  }
+
+  historyLoadingIdCard.value = idCard
+  try {
+    const response = await getAssetCheckHistory(idCard)
+    const tasks = response.tasks ?? []
+    if (tasks.length === 0) {
+      ElMessage.info('暂无历史核查记录')
+      return
+    }
+
+    historyTasks.value = tasks
+    historyTitle.value = `历史核查记录 · ${row.name.trim() || '当前授权人'}`
+    historyVisible.value = true
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '查询历史核查记录失败'))
+  } finally {
+    historyLoadingIdCard.value = ''
+  }
+}
+
+/** 提交成功后按旧版询问是否去打印授权书/核查报告。 */
+async function promptPrint(batchId: string): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      '提交成功，是否去打印授权书/核查报告？',
+      '提交成功',
+      {
+        type: 'success',
+        confirmButtonText: '去打印',
+        cancelButtonText: '稍后',
+        distinguishCancelAndClose: true,
+      },
+    )
+  } catch {
+    await router.push('/asset-verification/tasks')
+    return
+  }
+
+  await router.push({
+    path: '/archives/production',
+    query: { assetCheckBatchId: batchId },
+  })
 }
 
 function reset(): void {
@@ -206,10 +269,9 @@ async function submit(overwriteExisting = false): Promise<void> {
   }
 
   submitting.value = true
+  let created: QuickAssetCheckCreated | null = null
   try {
-    await createQuickAssetCheck(buildPayload(overwriteExisting))
-    ElMessage.success('核查申请已提交，可在核查任务中查看和打印')
-    router.push('/asset-verification/tasks')
+    created = await createQuickAssetCheck(buildPayload(overwriteExisting))
   } catch (submitError) {
     const status = (submitError as { response?: { status?: number } })?.response?.status
     if (status === 409 && !overwriteExisting) {
@@ -226,12 +288,17 @@ async function submit(overwriteExisting = false): Promise<void> {
       } catch {
         return
       }
+      submitting.value = false
       await submit(true)
       return
     }
     ElMessage.error(getErrorMessage(submitError, '提交核查申请失败'))
   } finally {
     submitting.value = false
+  }
+
+  if (created) {
+    await promptPrint(created.batchId)
   }
 }
 
@@ -250,6 +317,7 @@ onMounted(() => {
         <el-button :icon="ArrowLeft" @click="router.push('/asset-verification')">
           返回工作台
         </el-button>
+        <el-button @click="router.push('/asset-verification/tasks')">查看历史任务</el-button>
       </template>
     </NcPageHeader>
 
@@ -359,16 +427,26 @@ onMounted(() => {
             :value="option"
           />
         </el-select>
-        <el-button
-          text
-          type="danger"
-          :icon="Delete"
-          :disabled="row.isHead"
-          :title="row.isHead ? '户主行不可删除' : '删除授权人'"
-          @click="removeApplicant(row)"
-        >
-          删除
-        </el-button>
+        <div class="row-actions">
+          <el-button
+            text
+            type="primary"
+            :icon="Clock"
+            :loading="historyLoadingIdCard === row.idCard.trim()"
+            title="查询历史核查记录"
+            @click="queryHistory(row)"
+          />
+          <el-button
+            text
+            type="danger"
+            :icon="Delete"
+            :disabled="row.isHead"
+            :title="row.isHead ? '户主行不可删除' : '删除授权人'"
+            @click="removeApplicant(row)"
+          >
+            删除
+          </el-button>
+        </div>
       </div>
 
       <p class="field-note">
@@ -413,7 +491,23 @@ onMounted(() => {
         提交申请
       </el-button>
       <el-button :disabled="submitting" @click="reset">重置</el-button>
+      <el-button :disabled="submitting" @click="router.push('/asset-verification/tasks')">
+        查看历史任务
+      </el-button>
     </div>
+
+    <el-dialog v-model="historyVisible" :title="historyTitle" width="min(680px, 92vw)">
+      <el-table :data="historyTasks" size="small" border>
+        <el-table-column label="日期" width="120">
+          <template #default="{ row }">{{ formatHistoryDate(row.applicationDate) }}</template>
+        </el-table-column>
+        <el-table-column prop="statusText" label="状态" width="120" />
+        <el-table-column prop="familyAddress" label="地址" min-width="260" />
+      </el-table>
+      <template #footer>
+        <el-button @click="historyVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -488,7 +582,7 @@ onMounted(() => {
 .applicant-head,
 .applicant-row {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) 130px minmax(180px, 1.6fr) 150px 76px;
+  grid-template-columns: minmax(120px, 1fr) 130px minmax(180px, 1.6fr) 150px 112px;
   gap: 10px;
   align-items: center;
 }
@@ -507,6 +601,17 @@ onMounted(() => {
 
 .applicant-row.is-head {
   background: var(--nc-paper-soft);
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.row-actions :deep(.el-button) {
+  margin-left: 0;
+  padding-inline: 6px;
 }
 
 .field-note {

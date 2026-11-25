@@ -9,6 +9,8 @@
     <AssemblyName>NewCosmos.Agent</AssemblyName>
     <LangVersion>latest</LangVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 托盘图标需要 WinForms；保持 OutputType=Exe，控制台输出仍由 Console 负责（worker 模式纯控制台）。 -->
+    <UseWindowsForms>true</UseWindowsForms>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest</AnalysisLevel>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
@@ -23,6 +25,11 @@
   <ItemGroup>
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.10" />
     <PackageReference Include="System.Drawing.Common" Version="10.0.10" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 托盘图标：嵌入 legacy appicon.png（无 .ico，运行时用 GDI+ 生成 Icon）。 -->
+    <EmbeddedResource Include="Assets\agent.png" LogicalName="NewCosmos.Agent.Assets.agent.png" />
   </ItemGroup>
 
 </Project>

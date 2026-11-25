@@ -72,6 +72,34 @@ public class PrintJob
     /// <summary>照片类别（PhotoCategoryConstants，展示/留痕用）</summary>
     public string? PhotoCategory { get; set; }
 
+    /// <summary>重试次数（超时回收 + Agent 失败各 +1；达到 5 次后回收/重试均拒绝）</summary>
+    public int RetryCount { get; set; }
+
+    /// <summary>
+    /// 图片占位符数据 JSON（List&lt;PrintImagePayload&gt;）：模板 config 中 PHOTO_* 字段 → 照片 Base64。
+    /// 由入队时装配，Agent payload 原样下发。
+    /// </summary>
+    public string? ImagesJson { get; set; }
+
+    /// <summary>图片下发列表（由 <see cref="ImagesJson"/> 解析；只读，不参与 DB 映射/序列化）。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public List<PrintImagePayload> Images
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(ImagesJson)) return new List<PrintImagePayload>();
+            try
+            {
+                return System.Text.Json.JsonSerializer.Deserialize<List<PrintImagePayload>>(ImagesJson)
+                       ?? new List<PrintImagePayload>();
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return new List<PrintImagePayload>();
+            }
+        }
+    }
+
     /// <summary>业务类型 + 分类展示（供界面绑定）</summary>
     public string BusinessDisplay =>
         string.IsNullOrEmpty(Classification) ? BusinessType : $"{BusinessType} / {Classification}";
@@ -177,4 +205,26 @@ public class PrintJobRequest
 
     /// <summary>照片类别（PhotoCategoryConstants，展示/留痕用）</summary>
     public string? PhotoCategory { get; set; }
+
+    /// <summary>
+    /// 图片占位符数据（模板 config 中 PHOTO_* 字段 → 照片 Base64）。
+    /// 无照片时为空列表；Agent 以 Placeholder 为 key 调 ReplaceImageFields。
+    /// </summary>
+    public List<PrintImagePayload> Images { get; set; } = new();
+}
+
+/// <summary>
+/// 图片占位符下发单元：Placeholder 必须与模板 config_json 的 placeholder 一致，
+/// FieldKey 为业务字段键（如 PHOTO_APPLICANT），便于服务端按模板配置筛选与留痕。
+/// </summary>
+public class PrintImagePayload
+{
+    public string Placeholder { get; set; } = string.Empty;
+
+    /// <summary>图片字节 Base64（WebP/JPEG/PNG）。</summary>
+    public string Base64 { get; set; } = string.Empty;
+
+    public string? FileName { get; set; }
+
+    public string? FieldKey { get; set; }
 }

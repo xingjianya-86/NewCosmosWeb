@@ -3,7 +3,7 @@ namespace NewCosmos.Agent;
 /// <summary>Agent 命令行参数。</summary>
 public sealed class CliOptions
 {
-    public string Command { get; private set; } = "heartbeat";
+    public string Command { get; private set; } = "tray";
 
     public bool Help { get; private set; }
 
@@ -28,6 +28,9 @@ public sealed class CliOptions
     public int? JobPollSeconds { get; private set; }
 
     public string? PrintJobsDirectory { get; private set; }
+
+    /// <summary>--install-autostart 启动模式：tray（默认，无参数启动托盘）或 worker（纯控制台轮询）。</summary>
+    public string AutostartMode { get; private set; } = "tray";
 
     public static bool TryParse(string[] args, out CliOptions options, out string? error)
     {
@@ -67,6 +70,18 @@ public sealed class CliOptions
 
                 case "--heartbeat":
                     if (!SetCommand(options, "heartbeat", ref commandSet, out error)) return false;
+                    break;
+
+                case "--tray":
+                    if (!SetCommand(options, "tray", ref commandSet, out error)) return false;
+                    break;
+
+                case "--install-autostart":
+                    if (!SetCommand(options, "install-autostart", ref commandSet, out error)) return false;
+                    break;
+
+                case "--uninstall-autostart":
+                    if (!SetCommand(options, "uninstall-autostart", ref commandSet, out error)) return false;
                     break;
 
                 case "--heartbeat-once":
@@ -149,10 +164,22 @@ public sealed class CliOptions
                     options.PrintJobsDirectory = jobsDir;
                     break;
 
+                case "--autostart-mode":
+                    if (!TryReadValue(args, ref i, inlineValue, arg, out var autostartMode, out error)) return false;
+                    var mode = (autostartMode ?? string.Empty).Trim().ToLowerInvariant();
+                    if (mode is not ("tray" or "worker"))
+                    {
+                        error = "--autostart-mode 只能是 tray 或 worker";
+                        return false;
+                    }
+                    options.AutostartMode = mode;
+                    break;
+
                 default:
                     // 允许直接写命令名（register / heartbeat / worker / render ...）
                     var tokenCommand = arg.ToLowerInvariant();
-                    if (tokenCommand is "register" or "heartbeat" or "heartbeat-once" or "worker" or "render" or "printers" or "probe-office")
+                    if (tokenCommand is "register" or "heartbeat" or "heartbeat-once" or "worker" or "render" or "printers" or "probe-office"
+                        or "tray" or "install-autostart" or "uninstall-autostart")
                     {
                         if (!SetCommand(options, tokenCommand, ref commandSet, out error)) return false;
                         break;
@@ -174,11 +201,14 @@ NewCosmos.Agent — Windows 固定 PC 的 Office/打印代理（P0）
 用法:
   NewCosmos.Agent.exe [命令] [选项]
 
-命令（缺省 = heartbeat + worker 并行）:
+命令（缺省 = tray：托盘 + 心跳 + 任务轮询）:
+  --tray                托盘模式（缺省）：托盘图标 + 心跳 + 任务轮询
   --register            向服务端注册本机，保存 deviceKey 后退出
-  --heartbeat           心跳 + 任务轮询并行（Ctrl+C 退出）
+  --heartbeat           心跳 + 任务轮询并行（控制台，Ctrl+C 退出）
   --heartbeat-once      只发一次心跳
-  --worker              只轮询/执行打印任务（不关心跳）
+  --worker              只轮询/执行打印任务（纯控制台，不关心跳）
+  --install-autostart   写入 HKCU\...\Run 实现开机自启（配合 --autostart-mode）
+  --uninstall-autostart 删除开机自启项
   --printers            列出本机打印机（默认打印机标 [默认]）
   --probe-office        探测 Microsoft Office / WPS 可用性
   --render              用 Office 模板渲染一次 PDF（真实 COM）
@@ -196,6 +226,7 @@ NewCosmos.Agent — Windows 固定 PC 的 Office/打印代理（P0）
   --heartbeat-seconds <n> 心跳间隔 5..3600（默认 30）
   --job-poll-seconds <n>  任务轮询间隔 2..300（默认 3）
   --print-jobs-dir <dir>  打印任务临时目录（默认 %TEMP%\NewCosmos\PrintJobs）
+  --autostart-mode <tray|worker> 自启启动模式（默认 tray）
   --help                显示本帮助
   --version             显示版本
 

@@ -135,6 +135,8 @@ builder.Services.AddScoped<AgentDeviceService>();
 // 档案制作页推送打印：数据装配 + Server 侧队列网关（不引用 Office，不在 Server 生成 PDF）。
 builder.Services.AddScoped<ArchivePrintDataService>();
 builder.Services.AddScoped<ArchivePrintQueueService>();
+// 资产核查推送打印：按 nc_biz_asset_checks.id 装配授权书/核查报告字段。
+builder.Services.AddScoped<AssetCheckPrintDataService>();
 builder.Services.AddScoped<ApplicationQueryService>();
 builder.Services.AddScoped<ApplicationWorkflowQueryService>();
 builder.Services.AddScoped<DataScopeFilterBuilder>();

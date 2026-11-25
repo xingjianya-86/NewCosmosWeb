@@ -2,7 +2,7 @@
 import { ArrowRight } from '@element-plus/icons-vue'
 import type { AssetTaskListItem } from '@/types/assetVerification'
 import AssetStatusTag from './AssetStatusTag.vue'
-import { formatDate, textOrDash } from './format'
+import { formatDate, relationshipText, textOrDash } from './format'
 
 withDefaults(
   defineProps<{
@@ -57,7 +57,7 @@ function locationText(item: AssetTaskListItem): string {
       <el-table-column label="与户主关系" min-width="108">
         <template #default="{ row }">
           <span class="relation">
-            {{ textOrDash(row.relationship) }}
+            {{ relationshipText(row.relationship) }}
             <em v-if="row.isHead" class="head-badge">户主</em>
           </span>
         </template>

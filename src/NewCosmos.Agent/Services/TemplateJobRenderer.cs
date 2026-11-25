@@ -1,3 +1,4 @@
+using NewCosmos.Agent.Models;
 using NewCosmos.Constants;
 using NewCosmos.Models.Options;
 using NewCosmos.Models.Results;
@@ -18,6 +19,7 @@ public interface ITemplateJobRenderer
         string fileType,
         IReadOnlyDictionary<string, string> fields,
         IReadOnlyList<Dictionary<string, string>> tableRows,
+        IReadOnlyList<PrintImagePayload>? images,
         string? templateConfigJson,
         string? tableStartMarker,
         string? tableEndMarker,
@@ -29,6 +31,7 @@ public interface ITemplateJobRenderer
         string fileType,
         IReadOnlyDictionary<string, string> fields,
         IReadOnlyList<Dictionary<string, string>> tableRows,
+        IReadOnlyList<PrintImagePayload>? images,
         string? templateConfigJson,
         string? tableStartMarker,
         string? tableEndMarker,
@@ -93,6 +96,7 @@ public sealed class TemplateJobRenderer : ITemplateJobRenderer
         string fileType,
         IReadOnlyDictionary<string, string> fields,
         IReadOnlyList<Dictionary<string, string>> tableRows,
+        IReadOnlyList<PrintImagePayload>? images,
         string? templateConfigJson,
         string? tableStartMarker,
         string? tableEndMarker,
@@ -102,7 +106,7 @@ public sealed class TemplateJobRenderer : ITemplateJobRenderer
         EnsureOffice(fileType);
         using var engine = CreateEngine(fileType);
         engine.LoadFromFile(templatePath);
-        ApplyPayload(engine, fields, tableRows, templateConfigJson, tableStartMarker, tableEndMarker);
+        ApplyPayload(engine, fields, tableRows, images, templateConfigJson, tableStartMarker, tableEndMarker);
 
         var pdfBytes = await engine.ExportPdfAsync(ct).ConfigureAwait(false);
         var directory = Path.GetDirectoryName(pdfPath);
@@ -116,6 +120,7 @@ public sealed class TemplateJobRenderer : ITemplateJobRenderer
         string fileType,
         IReadOnlyDictionary<string, string> fields,
         IReadOnlyList<Dictionary<string, string>> tableRows,
+        IReadOnlyList<PrintImagePayload>? images,
         string? templateConfigJson,
         string? tableStartMarker,
         string? tableEndMarker,
@@ -125,7 +130,7 @@ public sealed class TemplateJobRenderer : ITemplateJobRenderer
         EnsureOffice(fileType);
         using var engine = CreateEngine(fileType);
         engine.LoadFromFile(templatePath);
-        ApplyPayload(engine, fields, tableRows, templateConfigJson, tableStartMarker, tableEndMarker);
+        ApplyPayload(engine, fields, tableRows, images, templateConfigJson, tableStartMarker, tableEndMarker);
         await engine.SaveToFileAsync(outputPath, ct).ConfigureAwait(false);
     }
 
@@ -169,6 +174,7 @@ public sealed class TemplateJobRenderer : ITemplateJobRenderer
         ITemplateEngine engine,
         IReadOnlyDictionary<string, string>? fields,
         IReadOnlyList<Dictionary<string, string>>? tableRows,
+        IReadOnlyList<PrintImagePayload>? images,
         string? templateConfigJson,
         string? tableStartMarker,
         string? tableEndMarker)
@@ -188,7 +194,7 @@ public sealed class TemplateJobRenderer : ITemplateJobRenderer
 
         if (configTables.Count > 0)
         {
-            // 与 PrintExecuteService 顺序一致：先单值字段，再表格（表格标记不在 config.Fields 中）。
+            // 与 PrintExecuteService 顺序一致：先单值字段，再表格（表格标记不在 config.Fields 中），最后图片。
             if (placeholderFields.Count > 0)
                 engine.ReplaceFields(placeholderFields);
 
@@ -202,6 +208,8 @@ public sealed class TemplateJobRenderer : ITemplateJobRenderer
 
                 TryReplaceTable(engine, table.StartMarker, table.EndMarker, tableRowsForEngine);
             }
+
+            ApplyImages(engine, images);
             return;
         }
 
@@ -218,6 +226,56 @@ public sealed class TemplateJobRenderer : ITemplateJobRenderer
 
         if (placeholderFields.Count > 0)
             engine.ReplaceFields(placeholderFields);
+
+        ApplyImages(engine, images);
+    }
+
+    /// <summary>
+    /// 图片占位符内嵌（照片）：key 用模板占位符原文（与 config_json 一致），不是 FieldKey。
+    /// 只处理 Server 下发的 PHOTO_*；SIGNATURE_* 签名系统未设计，跳过不报错。
+    /// </summary>
+    private void ApplyImages(ITemplateEngine engine, IReadOnlyList<PrintImagePayload>? images)
+    {
+        if (images is not { Count: > 0 }) return;
+
+        var map = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var image in images)
+        {
+            if (image == null) continue;
+            if (!string.IsNullOrEmpty(image.FieldKey)
+                && image.FieldKey.StartsWith("SIGNATURE_", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var placeholder = image.Placeholder?.Trim();
+            if (string.IsNullOrEmpty(placeholder) || string.IsNullOrEmpty(image.Base64)) continue;
+            if (map.ContainsKey(placeholder)) continue;
+
+            try
+            {
+                var bytes = Convert.FromBase64String(image.Base64);
+                if (bytes.Length == 0) continue;
+                map[placeholder] = bytes;
+            }
+            catch (FormatException ex)
+            {
+                _logger.Warn($"[JobRender] 图片 Base64 损坏，跳过占位符 {placeholder}: {ex.Message}");
+            }
+        }
+
+        if (map.Count == 0) return;
+
+        try
+        {
+            engine.ReplaceImageFields(map);
+            _logger.Info($"[JobRender] 图片占位符已内嵌: {map.Count} 个");
+        }
+        catch (Exception ex)
+        {
+            // 图片失败不阻断整份文书（Excel 引擎本就不支持图片替换）。
+            _logger.Warn($"[JobRender] 图片内嵌失败（继续渲染）: {ex.Message}");
+        }
     }
 
     private void TryReplaceTable(
@@ -318,7 +376,7 @@ public sealed class TemplateJobRenderer : ITemplateJobRenderer
         {
             if (mapping == null || string.IsNullOrWhiteSpace(mapping.Placeholder)) continue;
 
-            // 签名/照片是图片占位符，不能当作文本替换（Agent 当前不嵌入图片）。
+            // 签名/照片是图片占位符，不能当作文本替换（由 ApplyImages 单独内嵌）。
             if (IsImageFieldKey(mapping.FieldKey)) continue;
 
             if (!string.IsNullOrWhiteSpace(mapping.FieldKey)

@@ -69,6 +69,18 @@ public sealed class AgentJobPayload
     public string? ApplicantIdCard { get; set; }
 
     /// <summary>
+    /// 模板文件 SHA256（服务端 nc_biz_templates.file_hash；缺失时服务端按 file_data 现算）。
+    /// Agent 用 {templateId}-{templateHash} 做本地缓存键：同 hash 复用，不重复写盘。
+    /// </summary>
+    public string? TemplateHash { get; set; }
+
+    /// <summary>
+    /// 图片占位符数据（当前只有 PHOTO_*；SIGNATURE_* 签名系统未设计，Agent 跳过）。
+    /// Placeholder 与模板 config_json 的 placeholder 一致，Agent 以它为 key 调 ReplaceImageFields。
+    /// </summary>
+    public List<PrintImagePayload> Images { get; set; } = new();
+
+    /// <summary>
     /// 模板 config_json（服务端附加字段）：包含字段/表格的 FieldKey → 占位符映射。
     /// Agent 必须按它映射，否则 fields/tableRows 是 FieldKeys，无法直接替换模板占位符。
     /// </summary>
@@ -88,4 +100,27 @@ public sealed class AgentJobFailRequest
 {
     [JsonPropertyName("errorMessage")]
     public string ErrorMessage { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 单个图片占位符（payload.images 元素）。
+/// Placeholder = 模板占位符原文（如 {申请人照片}）；FieldKey = PHOTO_* 业务键。
+/// </summary>
+public sealed class PrintImagePayload
+{
+    public string? Placeholder { get; set; }
+
+    /// <summary>图片字节 Base64（WebP/JPEG/PNG；Word 引擎内部会转码）。</summary>
+    public string? Base64 { get; set; }
+
+    public string? FileName { get; set; }
+
+    public string? FieldKey { get; set; }
+}
+
+/// <summary>POST /api/agent/jobs/{id}/complete 请求体（可选）：message 作为警告文案回写。</summary>
+public sealed class AgentJobCompleteRequest
+{
+    [JsonPropertyName("message")]
+    public string? Message { get; set; }
 }

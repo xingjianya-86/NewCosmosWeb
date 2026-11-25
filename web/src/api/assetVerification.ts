@@ -118,3 +118,26 @@ export function createQuickAssetCheck(
     .post<QuickAssetCheckCreated>('/asset-verification/checks', payload)
     .then((response) => response.data)
 }
+
+/** 按身份证号查询历史核查记录（日期、状态、地址，最多 20 条）。 */
+export interface AssetHistoryTaskItem {
+  id: number
+  batchId: string
+  applicantName: string
+  applicationDate: string
+  familyAddress: string
+  status: string
+  statusText: string
+}
+
+export interface AssetHistoryResponse {
+  tasks: AssetHistoryTaskItem[]
+}
+
+export function getAssetCheckHistory(idCard: string): Promise<AssetHistoryResponse> {
+  return apiHttp
+    .get<AssetHistoryResponse>('/asset-verification/history', {
+      params: { idCard },
+    })
+    .then((response) => response.data)
+}

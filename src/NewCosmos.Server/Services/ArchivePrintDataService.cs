@@ -17,7 +17,7 @@ namespace NewCosmos.Server.Services;
 /// DTO 没有的字段直接跳过，不硬造、不报错。
 /// </para>
 /// </summary>
-public sealed class ArchivePrintDataService(ApplicationFormService forms)
+public sealed class ArchivePrintDataService(ApplicationFormService forms, IDatabaseService database)
 {
     public async Task<Result<ArchivePrintData>> BuildAsync(
         long applicationId,
@@ -143,6 +143,167 @@ public sealed class ArchivePrintDataService(ApplicationFormService forms)
         return Result.Success(data);
     }
 
+    /// <summary>
+    /// 照片下发：只取模板 config_json 中确实声明了 <c>PHOTO_*</c> 占位符的字段，
+    /// 按身份证（或申请 ID）到 nc_biz_archive_photos 取一张最合适的照片，转 Base64 供 Agent 内嵌。
+    /// 无照片时不报错（返回空列表，打印件无照片）。
+    /// </summary>
+    public async Task<List<PrintImagePayload>> BuildPhotoImagesAsync(
+        string? applicantIdCard,
+        long? applicationId,
+        string? templateConfigJson,
+        CancellationToken ct = default)
+    {
+        var images = new List<PrintImagePayload>();
+
+        var photoFields = ReadPhotoFieldMappings(templateConfigJson);
+        if (photoFields.Count == 0) return images;
+
+        var photo = await FindBestPhotoAsync(applicantIdCard, applicationId, ct);
+        if (photo?.PhotoData is not { Length: > 0 }) return images;
+
+        var base64 = Convert.ToBase64String(photo.PhotoData);
+        var fileName = BuildPhotoFileName(photo);
+        foreach (var (fieldKey, placeholder) in photoFields)
+        {
+            images.Add(new PrintImagePayload
+            {
+                FieldKey = fieldKey,
+                Placeholder = placeholder,
+                Base64 = base64,
+                FileName = fileName
+            });
+        }
+
+        return images;
+    }
+
+    /// <summary>
+    /// 取照片优先级：本人证件照 &gt; 身份证 &gt; 户口本 &gt; 其他证件照 &gt; 其余类别，同类取最新。
+    /// 身份证号为空时退化为按 application_id 查。
+    /// </summary>
+    private async Task<ArchivePhotoRow?> FindBestPhotoAsync(
+        string? applicantIdCard,
+        long? applicationId,
+        CancellationToken ct)
+    {
+        var idCard = applicantIdCard?.Trim() ?? string.Empty;
+        if (idCard.Length == 0 && applicationId is not > 0) return null;
+
+        const string sql = @"SELECT id, photo_data, photo_category, photo_name, image_format
+                             FROM nc_biz_archive_photos
+                             WHERE photo_data IS NOT NULL
+                               AND ((NULLIF($1::text, '') IS NOT NULL AND applicant_id_card = $1)
+                                    OR ($2::bigint IS NOT NULL AND application_id = $2))
+                             ORDER BY CASE photo_category
+                                          WHEN $3 THEN 0
+                                          WHEN $4 THEN 1
+                                          WHEN $5 THEN 2
+                                          WHEN $6 THEN 3
+                                          ELSE 9
+                                      END,
+                                      created_at DESC
+                             LIMIT 1";
+
+        var result = await database.QuerySingleAsync<ArchivePhotoRow>(
+            sql, ct,
+            idCard,
+            applicationId is > 0 ? applicationId.Value : null,
+            PhotoCategoryConstants.PERSON_PHOTO,
+            PhotoCategoryConstants.ID_CARD,
+            PhotoCategoryConstants.HOUSEHOLD_REGISTER,
+            PhotoCategoryConstants.OTHER_CERT);
+
+        if (result.IsFailure)
+        {
+            // 照片查询失败不阻断打印（与 legacy PrintExecuteService 口径一致）。
+            return null;
+        }
+
+        return result.Value;
+    }
+
+    private static List<(string FieldKey, string Placeholder)> ReadPhotoFieldMappings(string? configJson)
+    {
+        var mappings = new List<(string, string)>();
+        if (string.IsNullOrWhiteSpace(configJson)) return mappings;
+
+        try
+        {
+            using var document = JsonDocument.Parse(configJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return mappings;
+            if (!TryGetProperty(document.RootElement, "fields", out var fields)
+                || fields.ValueKind != JsonValueKind.Array)
+            {
+                return mappings;
+            }
+
+            var seenKeys = new HashSet<string>(StringComparer.Ordinal);
+            var seenPlaceholders = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var field in fields.EnumerateArray())
+            {
+                if (field.ValueKind != JsonValueKind.Object) continue;
+
+                var fieldKey = TryGetProperty(field, "fieldKey", out var keyElement)
+                               && keyElement.ValueKind == JsonValueKind.String
+                    ? keyElement.GetString()
+                    : null;
+                var placeholder = TryGetProperty(field, "placeholder", out var placeholderElement)
+                                  && placeholderElement.ValueKind == JsonValueKind.String
+                    ? placeholderElement.GetString()
+                    : null;
+
+                if (string.IsNullOrWhiteSpace(fieldKey) || string.IsNullOrWhiteSpace(placeholder)) continue;
+                if (!fieldKey.TrimStart().StartsWith("PHOTO_", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!seenKeys.Add(fieldKey.Trim())) continue;
+                if (!seenPlaceholders.Add(placeholder.Trim())) continue;
+
+                mappings.Add((fieldKey.Trim(), placeholder.Trim()));
+            }
+        }
+        catch (JsonException)
+        {
+            return mappings;
+        }
+
+        return mappings;
+    }
+
+    private static bool TryGetProperty(JsonElement element, string name, out JsonElement value)
+    {
+        if (element.TryGetProperty(name, out value)) return true;
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static string BuildPhotoFileName(ArchivePhotoRow photo)
+    {
+        var safeName = string.IsNullOrWhiteSpace(photo.PhotoName)
+            ? $"photo-{photo.Id}"
+            : photo.PhotoName!.Trim();
+        foreach (var invalid in Path.GetInvalidFileNameChars())
+            safeName = safeName.Replace(invalid, '_');
+
+        var extension = (photo.ImageFormat ?? string.Empty).Trim().ToLowerInvariant() switch
+        {
+            "png" => ".png",
+            "jpeg" or "jpg" => ".jpg",
+            _ => ".webp"
+        };
+
+        return safeName + extension;
+    }
+
     private static void Put(Dictionary<string, string> target, string key, string? value)
     {
         if (!string.IsNullOrWhiteSpace(value))
@@ -179,6 +340,16 @@ public sealed class ArchivePrintData
     public string? Classification { get; set; }
 }
 
+/// <summary>照片表最小行（照片嵌入用；只读，不向前端暴露）。</summary>
+public sealed class ArchivePhotoRow
+{
+    public long Id { get; set; }
+    public byte[]? PhotoData { get; set; }
+    public string? PhotoCategory { get; set; }
+    public string? PhotoName { get; set; }
+    public string? ImageFormat { get; set; }
+}
+
 /// <summary>
 /// Server 侧打印队列网关。
 /// <para>
@@ -193,6 +364,12 @@ public sealed class ArchivePrintData
 /// </summary>
 public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerService logger)
 {
+    /// <summary>最大重试次数：超时回收与 Agent 失败累计，达到后不再自动/手动重试。</summary>
+    public const int MaxRetryCount = 5;
+
+    /// <summary>Processing 超过该时长未回报视为 Agent 失联，回收为 Pending。</summary>
+    public const int ProcessingTimeoutMinutes = 10;
+
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
 
     public async Task<Result<PrintJob>> EnqueueAsync(PrintJobRequest request, CancellationToken ct = default)
@@ -208,6 +385,9 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
         var supporterJson = request.SupporterTableData == null
             ? null
             : JsonSerializer.Serialize(request.SupporterTableData, JsonOptions);
+        var imagesJson = request.Images is { Count: > 0 }
+            ? JsonSerializer.Serialize(request.Images, JsonOptions)
+            : null;
 
         var jobKind = string.IsNullOrWhiteSpace(request.JobKind)
             ? PrintJobConstants.JobKindTemplate
@@ -221,13 +401,13 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
         const string sql = @"INSERT INTO nc_biz_print_jobs
                 (job_no, business_type, business_id, classification, template_id, template_name,
                  applicant_name, applicant_id_card, printer_name, copies, is_duplex,
-                 fields_json, table_rows_json, supporter_table_data_json,
+                 fields_json, table_rows_json, supporter_table_data_json, images_json,
                  job_kind, photo_data, photo_layout, photo_category,
                  status, requested_by, requested_by_name, created_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                        $12::jsonb, $13::jsonb, $14::jsonb,
-                        $15, $16, $17, $18,
-                        $21, $19, $20, NOW())
+                        $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb,
+                        $16, $17, $18, $19,
+                        $22, $20, $21, NOW())
                 RETURNING id, job_no, status, created_at";
 
         var result = await database.QuerySingleAsync<PrintJob>(sql, ct,
@@ -235,7 +415,7 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
             request.TemplateId, request.TemplateName,
             request.ApplicantName, request.ApplicantIdCard, request.PrinterName,
             request.Copies, request.IsDuplex,
-            fieldsJson, tableRowsJson, supporterJson,
+            fieldsJson, tableRowsJson, supporterJson, imagesJson,
             jobKind, request.PhotoData, request.PhotoLayout, request.PhotoCategory,
             request.RequestedBy, request.RequestedByName,
             PrintJobConstants.StatusPending);
@@ -272,6 +452,49 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
 
         await using var tx = await database.BeginTransactionScopeAsync(ct);
 
+        // 1) 超时回收：Processing 且 retry_count 已达上限 → Failed（必须先于重新排队执行，
+        //    否则这些任务会被 +1 后继续排队，突破上限）。
+        const string failExpiredSql = @"UPDATE nc_biz_print_jobs
+                SET status = $1, agent_machine = NULL, completed_at = NOW(), error_message = $2
+                WHERE status = $3 AND deleted_at IS NULL
+                  AND claimed_at < NOW() - ($5 * interval '1 minute')
+                  AND retry_count >= $4";
+
+        var failExpired = await database.ExecuteNonQueryAsync(
+            failExpiredSql, ct,
+            PrintJobConstants.StatusFailed, "超过最大重试次数", PrintJobConstants.StatusProcessing,
+            MaxRetryCount, ProcessingTimeoutMinutes);
+
+        // 2) 超时回收：Processing 未达上限 → Pending，清 agent_machine，retry_count + 1。
+        const string recycleSql = @"UPDATE nc_biz_print_jobs
+                SET status = $1, agent_machine = NULL, claimed_at = NULL, completed_at = NULL,
+                    retry_count = retry_count + 1, error_message = $2
+                WHERE status = $3 AND deleted_at IS NULL
+                  AND claimed_at < NOW() - ($5 * interval '1 minute')
+                  AND retry_count < $4";
+
+        var recycled = await database.ExecuteNonQueryAsync(
+            recycleSql, ct,
+            PrintJobConstants.StatusPending, "任务执行超时（10 分钟无回报），已自动重新排队",
+            PrintJobConstants.StatusProcessing, MaxRetryCount, ProcessingTimeoutMinutes);
+
+        if (failExpired.IsFailure)
+        {
+            await tx.RollbackAsync(ct);
+            return Result.Failure<List<PrintJob>>(failExpired.ErrorCode!, failExpired.Message!);
+        }
+
+        if (recycled.IsFailure)
+        {
+            await tx.RollbackAsync(ct);
+            return Result.Failure<List<PrintJob>>(recycled.ErrorCode!, recycled.Message!);
+        }
+
+        if (failExpired.Value > 0 || recycled.Value > 0)
+        {
+            logger.Warn($"打印任务超时回收: 置失败 {failExpired.Value} 个（重试已达 {MaxRetryCount} 次），重新排队 {recycled.Value} 个");
+        }
+
         const string sql = @"UPDATE nc_biz_print_jobs
                 SET status = $4, agent_machine = $1, claimed_at = NOW()
                 WHERE id IN (
@@ -284,10 +507,11 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
                 )
                 RETURNING id, job_no, business_type, business_id, classification, template_id, template_name,
                           applicant_name, applicant_id_card, printer_name, copies, is_duplex,
-                          job_kind, photo_data, photo_layout, photo_category,
+                          job_kind, photo_data, photo_layout, photo_category, retry_count,
                           fields_json::text AS FieldsJson,
                           table_rows_json::text AS TableRowsJson,
                           supporter_table_data_json::text AS SupporterTableDataJson,
+                          images_json::text AS ImagesJson,
                           status, error_message, requested_by, requested_by_name, agent_machine,
                           created_at, claimed_at, completed_at";
 
@@ -303,25 +527,33 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
         return Result.Success(result.Value ?? []);
     }
 
-    public async Task<Result> CompleteAsync(long id, CancellationToken ct = default)
+    /// <summary>
+    /// 完成回写。<paramref name="message"/> 为可选警告文案（如降级为系统 PDF 打印），
+    /// 写入 error_message 供 Web 任务列表展示；任务本身仍为 Completed，不因警告标失败。
+    /// </summary>
+    public async Task<Result> CompleteAsync(long id, string? message = null, CancellationToken ct = default)
     {
         const string sql = @"UPDATE nc_biz_print_jobs
-                SET status = $2, completed_at = NOW(), error_message = NULL
+                SET status = $2, completed_at = NOW(), error_message = $3
                 WHERE id = $1";
-        var result = await database.ExecuteNonQueryAsync(sql, ct, id, PrintJobConstants.StatusCompleted);
+        var trimmed = string.IsNullOrWhiteSpace(message) ? null : Truncate(message, 2000);
+        var result = await database.ExecuteNonQueryAsync(sql, ct, id, PrintJobConstants.StatusCompleted, trimmed);
         if (result.IsFailure)
         {
             return Result.Failure(result.ErrorCode!, result.Message!);
         }
 
-        logger.Info($"打印任务完成: Id={id}");
+        logger.Info(string.IsNullOrEmpty(trimmed)
+            ? $"打印任务完成: Id={id}"
+            : $"打印任务完成（有警告）: Id={id} - {trimmed}");
         return Result.Success();
     }
 
     public async Task<Result> FailAsync(long id, string errorMessage, CancellationToken ct = default)
     {
         const string sql = @"UPDATE nc_biz_print_jobs
-                SET status = $3, completed_at = NOW(), error_message = $2
+                SET status = $3, completed_at = NOW(), error_message = $2,
+                    retry_count = retry_count + 1
                 WHERE id = $1";
         var result = await database.ExecuteNonQueryAsync(
             sql, ct, id, Truncate(errorMessage, 2000), PrintJobConstants.StatusFailed);
@@ -334,16 +566,27 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
         return Result.Success();
     }
 
+    /// <summary>失败任务重试：retry_count 已达上限（{MaxRetryCount}）时拒绝。</summary>
     public async Task<Result> RetryAsync(long id, CancellationToken ct = default)
     {
         const string sql = @"UPDATE nc_biz_print_jobs
                 SET status = $2, agent_machine = NULL, claimed_at = NULL, completed_at = NULL, error_message = NULL
-                WHERE id = $1 AND status = $3 AND deleted_at IS NULL";
+                WHERE id = $1 AND status = $3 AND deleted_at IS NULL AND retry_count < $4";
         var result = await database.ExecuteNonQueryAsync(
-            sql, ct, id, PrintJobConstants.StatusPending, PrintJobConstants.StatusFailed);
-        return result.IsFailure
-            ? Result.Failure(result.ErrorCode!, result.Message!)
-            : Result.Success();
+            sql, ct, id, PrintJobConstants.StatusPending, PrintJobConstants.StatusFailed, MaxRetryCount);
+        if (result.IsFailure)
+        {
+            return Result.Failure(result.ErrorCode!, result.Message!);
+        }
+
+        if (result.Value <= 0)
+        {
+            return Result.Failure(
+                ErrorCodes.VALIDATION_FAILED,
+                $"超过最大重试次数（{MaxRetryCount}），请人工处理");
+        }
+
+        return Result.Success();
     }
 
     public async Task<Result> DeleteAsync(long id, CancellationToken ct = default)
@@ -374,7 +617,7 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
 
         const string sql = @"SELECT id, job_no, business_type, business_id, classification, template_id, template_name,
                                     applicant_name, applicant_id_card, printer_name, copies, is_duplex,
-                                    job_kind, photo_category,
+                                    job_kind, photo_category, retry_count,
                                     status, error_message, requested_by, requested_by_name, agent_machine,
                                     created_at, claimed_at, completed_at
                              FROM nc_biz_print_jobs
@@ -406,10 +649,11 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
     {
         const string sql = @"SELECT id, job_no, business_type, business_id, classification, template_id, template_name,
                                     applicant_name, applicant_id_card, printer_name, copies, is_duplex,
-                                    job_kind, photo_data, photo_layout, photo_category,
+                                    job_kind, photo_data, photo_layout, photo_category, retry_count,
                                     fields_json::text AS FieldsJson,
                                     table_rows_json::text AS TableRowsJson,
                                     supporter_table_data_json::text AS SupporterTableDataJson,
+                                    images_json::text AS ImagesJson,
                                     status, error_message, requested_by, requested_by_name, agent_machine,
                                     created_at, claimed_at, completed_at
                              FROM nc_biz_print_jobs WHERE id = $1 AND deleted_at IS NULL";
@@ -454,13 +698,13 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
         return Result.Success(result.Value);
     }
 
-    /// <summary>模板文件字节（Agent payload 用；file_data 必须原样下发）。</summary>
+    /// <summary>模板文件字节（Agent payload 用；file_data 必须原样下发）。file_hash 供 Agent 本地缓存键。</summary>
     public async Task<Result<PrintTemplateFileRow?>> GetTemplateFileAsync(
         long templateId,
         CancellationToken ct = default)
     {
         var result = await database.QuerySingleAsync<PrintTemplateFileRow?>(
-            @"SELECT id, name, doc_type, file_type, file_data, config_json
+            @"SELECT id, name, doc_type, file_type, file_data, file_hash, config_json
               FROM nc_biz_templates
               WHERE id = $1",
             ct, templateId);
@@ -468,6 +712,21 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
         if (result.IsFailure)
         {
             return Result.Failure<PrintTemplateFileRow?>(result.ErrorCode!, result.Message!);
+        }
+
+        return Result.Success(result.Value);
+    }
+
+    /// <summary>模板 config_json（入队时判断 PHOTO_* 字段与缺字段提示用；不读 file_data）。</summary>
+    public async Task<Result<string?>> GetTemplateConfigAsync(long templateId, CancellationToken ct = default)
+    {
+        var result = await database.QuerySingleAsync<string?>(
+            @"SELECT config_json FROM nc_biz_templates WHERE id = $1",
+            ct, templateId);
+
+        if (result.IsFailure)
+        {
+            return Result.Failure<string?>(result.ErrorCode!, result.Message!);
         }
 
         return Result.Success(result.Value);
@@ -532,5 +791,9 @@ public sealed class PrintTemplateFileRow
     public string DocType { get; set; } = string.Empty;
     public string FileType { get; set; } = string.Empty;
     public byte[]? FileData { get; set; }
+
+    /// <summary>模板文件 SHA256（历史数据可能为空，payload 侧按字节现算兜底）。</summary>
+    public string? FileHash { get; set; }
+
     public string? ConfigJson { get; set; }
 }
