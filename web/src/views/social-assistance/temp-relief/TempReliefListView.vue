@@ -752,7 +752,7 @@ onMounted(() => {
               </div>
             </header>
 
-            <p class="card-id-card">{{ row.applicantIdCardMasked || '—' }}</p>
+            <p class="card-id-card">{{ row.applicantIdCard || row.applicantIdCardMasked || '—' }}</p>
 
             <div class="card-lines">
               <span class="card-no">编号: {{ row.applicationNo || '—' }}</span>
@@ -824,6 +824,7 @@ onMounted(() => {
       v-model="photoVisible"
       :application-id="photoTarget?.id ?? null"
       :applicant-name="photoTarget?.applicantName ?? ''"
+      editable
     />
 
     <TempReliefPrintDialog

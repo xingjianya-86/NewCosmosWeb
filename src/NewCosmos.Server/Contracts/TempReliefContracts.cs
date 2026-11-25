@@ -10,6 +10,7 @@ public sealed record TempReliefListItemDto(
     long Id,
     string ApplicationNo,
     string ApplicantName,
+    string ApplicantIdCard,
     string ApplicantIdCardMasked,
     string ReliefType,
     string ReliefTypeText,
@@ -64,6 +65,25 @@ public sealed record TempReliefSummaryResponse(
     int? OverdueCount);
 
 public sealed record TempReliefCreatedResponse(long Id);
+
+/// <summary>新建表单默认值：户籍地址按当前用户机构带出，乡镇验收人取机构民政助理。</summary>
+public sealed record TempReliefFormDefaultsResponse(
+    string HukouProvince,
+    string HukouCity,
+    string HukouCounty,
+    string HukouTown,
+    string AcceptancePerson);
+
+/// <summary>申请日期对应的公示/批次预览；小额快救为 null/空。</summary>
+public sealed record TempReliefPublicizePreviewResponse(
+    DateTime? PublicizeStartDate,
+    DateTime? PublicizeEndDate,
+    int? BatchYear,
+    int? BatchMonth,
+    string BatchHintText);
+
+/// <summary>ICD-10 编码对应的常见病名。</summary>
+public sealed record TempReliefIcd10Response(string Code, string Name);
 
 #endregion
 
@@ -317,6 +337,7 @@ public sealed record TempReliefPrintDataResponse(
     long Id,
     string ApplicationNo,
     string ApplicantName,
+    string ApplicantIdCard,
     string ApplicantIdCardMasked,
     string ReliefType,
     string CategoryDisplayName,

@@ -44,6 +44,7 @@ export interface TempReliefListItem {
   id: number
   applicationNo: string
   applicantName: string
+  applicantIdCard: string
   applicantIdCardMasked: string
   reliefType: TempReliefReliefType
   reliefTypeText: string
@@ -351,6 +352,7 @@ export interface TempReliefPrintDataResponse {
   id: number
   applicationNo: string
   applicantName: string
+  applicantIdCard: string
   applicantIdCardMasked: string
   reliefType: TempReliefReliefType
   categoryDisplayName: string
@@ -386,6 +388,27 @@ export interface TempReliefPhotoUploadResponse {
 }
 
 /** 身份证 OCR 结果（类别仅支持 ID_CARD）。 */
+export interface TempReliefFormDefaults {
+  hukouProvince: string
+  hukouCity: string
+  hukouCounty: string
+  hukouTown: string
+  acceptancePerson: string
+}
+
+export interface TempReliefPublicizePreview {
+  publicizeStartDate: string | null
+  publicizeEndDate: string | null
+  batchYear: number | null
+  batchMonth: number | null
+  batchHintText: string
+}
+
+export interface TempReliefIcd10Response {
+  code: string
+  name: string
+}
+
 export interface TempReliefOcrResponse {
   category: string
   name: string

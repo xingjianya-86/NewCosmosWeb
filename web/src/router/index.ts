@@ -122,6 +122,12 @@ const router = createRouter({
           meta: { title: '临时救助申请' },
         },
         {
+          path: 'social-assistance/temp-relief/:id/output',
+          name: 'social-assistance-temp-relief-output',
+          component: () => import('@/views/social-assistance/temp-relief/TempReliefOutputView.vue'),
+          meta: { title: '临时救助档案输出' },
+        },
+        {
           path: 'social-assistance/change-management',
           name: 'social-assistance-change-management',
           component: () => import('@/views/social-assistance/change/ChangeManagementView.vue'),

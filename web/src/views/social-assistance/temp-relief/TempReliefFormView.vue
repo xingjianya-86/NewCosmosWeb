@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -23,8 +23,11 @@ import {
   getTempReliefApplication,
   getTempReliefCandidate,
   getTempReliefFamilyStatus,
+  getTempReliefFormDefaults,
+  getTempReliefIcd10,
   getTempReliefInsuredIdentity,
   getTempReliefPolicySnapshot,
+  getTempReliefPublicizePreview,
   getTempReliefSmallTiers,
   resolveTempReliefHukouType,
   searchTempReliefCandidates,
@@ -97,6 +100,7 @@ interface FormState {
   reliefPersonCount: number
   publicizeStartDate: string | null
   publicizeEndDate: string | null
+  batchHintText: string
 }
 
 interface MemberRow {
@@ -219,7 +223,6 @@ const auth = useAuthStore()
 let rowSeed = 0
 let identityTicket = 0
 let tierTicket = 0
-let routeReloadSuppressed = false
 
 function nextRowKey(): number {
   rowSeed += 1
@@ -397,6 +400,7 @@ function createEmptyForm(): FormState {
     reliefPersonCount: 1,
     publicizeStartDate: null,
     publicizeEndDate: null,
+    batchHintText: '',
   }
 }
 
@@ -533,6 +537,9 @@ const changeDateValue = ref('')
 const changeDateSaving = ref(false)
 
 const lastLargeChannel = ref<PaymentChannel>('County')
+const savedPublicizeDates = ref(false)
+let publicizeTimer: number | null = null
+let publicizePreviewTicket = 0
 
 const isEditable = computed(() => {
   if (isView.value) return false
@@ -782,6 +789,12 @@ function resetAll(): void {
   lastLargeChannel.value = 'County'
   reasonDirty.value = false
   suppressReasonWrite = false
+  savedPublicizeDates.value = false
+  publicizePreviewTicket += 1
+  if (publicizeTimer !== null) {
+    window.clearTimeout(publicizeTimer)
+    publicizeTimer = null
+  }
 }
 
 function hydrateApplicant(current: TempReliefDetail): void {
@@ -989,6 +1002,8 @@ function applyDetail(current: TempReliefDetail): void {
   )
   form.publicizeStartDate = current.publicizeStartDate?.slice(0, 10) ?? null
   form.publicizeEndDate = current.publicizeEndDate?.slice(0, 10) ?? null
+  form.batchHintText = ''
+  savedPublicizeDates.value = Boolean(form.publicizeStartDate || form.publicizeEndDate)
   storedFamilySize.value = current.familySize
 
   hydrateApplicant(current)
@@ -1024,6 +1039,7 @@ async function loadDetail(options: { silent?: boolean } = {}): Promise<void> {
     if (!current.policyEnjoyed || !current.familyMemberStatus) {
       void loadPolicyAndHealth(current.applicantIdCard, false)
     }
+    if (!savedPublicizeDates.value) schedulePublicizePreview()
   } catch (error) {
     const message = getErrorMessage(error, '临时救助档案加载失败')
     if (options.silent) ElMessage.warning(message)
@@ -1081,6 +1097,94 @@ async function loadPolicyAndHealth(idCard: string, overwrite: boolean): Promise<
     }
   } catch {
     // 健康摘要失败不阻断录入，用户可手工补录。
+  }
+}
+
+/** 新建表单默认值：户籍地址与乡镇验收人；仅填空，已有值不覆盖。 */
+async function loadFormDefaults(): Promise<void> {
+  try {
+    const defaults = await getTempReliefFormDefaults()
+    const province = defaults.hukouProvince?.trim() || '黑龙江省'
+    if (!applicant.hukouProvince.trim() || applicant.hukouProvince.trim() === '黑龙江省') {
+      applicant.hukouProvince = province
+    }
+    if (!applicant.hukouCity.trim() && defaults.hukouCity?.trim()) {
+      applicant.hukouCity = defaults.hukouCity.trim()
+    }
+    if (!applicant.hukouDistrict.trim() && defaults.hukouCounty?.trim()) {
+      applicant.hukouDistrict = defaults.hukouCounty.trim()
+    }
+    if (!applicant.hukouTown.trim() && defaults.hukouTown?.trim()) {
+      applicant.hukouTown = defaults.hukouTown.trim()
+    }
+    if (!form.acceptancePerson.trim() && defaults.acceptancePerson?.trim()) {
+      form.acceptancePerson = defaults.acceptancePerson.trim()
+    }
+  } catch {
+    // 默认值加载失败不阻断录入；用户可手工填写。
+  }
+}
+
+/** 清空公示预览与批次提示（小额快救 / 切换类型时）。 */
+function clearPublicizePreview(): void {
+  publicizePreviewTicket += 1
+  if (publicizeTimer !== null) {
+    window.clearTimeout(publicizeTimer)
+    publicizeTimer = null
+  }
+  form.publicizeStartDate = null
+  form.publicizeEndDate = null
+  form.batchHintText = ''
+}
+
+/**
+ * 申请日期/救助类型变化后的公示预览（防抖 + 请求代际）。
+ * 仅新建、草稿且从未保存过公示日期的记录应用预览，避免覆盖库里已有值。
+ */
+function schedulePublicizePreview(): void {
+  if (!isCreate.value && (!isEditable.value || form.status !== 'Draft')) return
+  if (!isCreate.value && savedPublicizeDates.value) return
+  if (form.reliefType === 'Small') {
+    clearPublicizePreview()
+    return
+  }
+
+  publicizePreviewTicket += 1
+  const ticket = publicizePreviewTicket
+  if (publicizeTimer !== null) window.clearTimeout(publicizeTimer)
+  publicizeTimer = window.setTimeout(() => {
+    publicizeTimer = null
+    void applyPublicizePreview(ticket)
+  }, 300)
+}
+
+async function applyPublicizePreview(ticket: number): Promise<void> {
+  if (!isCreate.value && (!isEditable.value || form.status !== 'Draft' || savedPublicizeDates.value)) {
+    return
+  }
+  if (form.reliefType === 'Small') {
+    clearPublicizePreview()
+    return
+  }
+
+  const applyDate = form.applyDate
+  const reliefType = form.reliefType
+  if (!applyDate) return
+
+  try {
+    const preview = await getTempReliefPublicizePreview(applyDate, reliefType)
+    if (ticket !== publicizePreviewTicket) return
+    if (form.applyDate !== applyDate || form.reliefType !== reliefType) return
+    if (!isCreate.value
+      && (!isEditable.value || form.status !== 'Draft' || savedPublicizeDates.value)) {
+      return
+    }
+
+    form.publicizeStartDate = preview.publicizeStartDate?.slice(0, 10) ?? null
+    form.publicizeEndDate = preview.publicizeEndDate?.slice(0, 10) ?? null
+    form.batchHintText = preview.batchHintText ?? ''
+  } catch {
+    // 预览失败不阻断保存；保留现有值，服务端保存时会重新推导。
   }
 }
 
@@ -1501,6 +1605,30 @@ function handleDetailChanged(): void {
   regenerateDifficultyReason()
 }
 
+/**
+ * ICD-10 编码输入完成（blur/change）后查询常见病名：仅回填空病名，失败静默降级。
+ * 请求返回时再次核对行仍在、编码未变、病名仍为空，避免竞态覆盖。
+ */
+async function handleDiseaseCodeChange(row: DiseaseRow): Promise<void> {
+  handleDetailChanged()
+  const code = row.diseaseCode.trim()
+  if (!code || row.diseaseName.trim()) return
+
+  try {
+    const result = await getTempReliefIcd10(code)
+    const current = diseases.value.find((item) => item.key === row.key)
+    if (!current) return
+    if (current.diseaseCode.trim().toLowerCase() !== code.toLowerCase()) return
+    if (current.diseaseName.trim()) return
+    const name = result.name?.trim()
+    if (!name) return
+    current.diseaseName = name
+    regenerateDifficultyReason()
+  } catch {
+    // ICD 字典查询失败不阻断录入，用户可手动填写病名。
+  }
+}
+
 function selectReliefType(next: ReliefType): void {
   if (!isEditable.value || form.reliefType === next) return
   if (next === 'Small') {
@@ -1509,8 +1637,7 @@ function selectReliefType(next: ReliefType): void {
     form.paymentChannel = 'Reserve'
     form.standardTier = ''
     form.confirmAmount = undefined
-    form.publicizeStartDate = null
-    form.publicizeEndDate = null
+    clearPublicizePreview()
     void loadSmallTiers()
     return
   }
@@ -1520,6 +1647,11 @@ function selectReliefType(next: ReliefType): void {
   form.standardTier = ''
   form.confirmAmount = undefined
   void loadSmallTiers()
+  schedulePublicizePreview()
+}
+
+function handleApplyDateChange(): void {
+  schedulePublicizePreview()
 }
 
 function selectChannel(next: PaymentChannel): void {
@@ -1858,17 +1990,8 @@ async function persist(): Promise<number | null> {
       const created = await createTempReliefApplication(request)
       id = created.id
       form.id = created.id
-      if (isCreate.value) {
-        routeReloadSuppressed = true
-        try {
-          await router.replace(`/social-assistance/temp-relief/${created.id}/edit`)
-        } finally {
-          routeReloadSuppressed = false
-        }
-      }
     }
 
-    await loadDetail({ silent: true })
     return id
   } catch (error) {
     const message = getErrorMessage(error, '保存临时救助申请失败')
@@ -1884,6 +2007,7 @@ async function saveDraft(): Promise<void> {
   const id = await persist()
   if (id === null) return
   ElMessage.success(form.status === 'Returned' ? '已保存，申请仍为退回补正状态' : '草稿已保存')
+  await router.push('/social-assistance/temp-relief')
 }
 
 async function saveAndConfirm(): Promise<void> {
@@ -1895,12 +2019,11 @@ async function saveAndConfirm(): Promise<void> {
   try {
     await confirmTempReliefApplication(id)
     ElMessage.success('保存并确认成功')
-    await loadDetail({ silent: true })
+    await router.push(`/social-assistance/temp-relief/${id}/output`)
   } catch (error) {
     const message = getErrorMessage(error, '确认失败，已保存当前修改')
     saveError.value = message
     ElMessage.error(message)
-    await loadDetail({ silent: true })
   } finally {
     confirming.value = false
   }
@@ -2037,6 +2160,8 @@ async function load(): Promise<void> {
 
   if (isCreate.value) {
     hydrateForCreate()
+    schedulePublicizePreview()
+    await loadFormDefaults()
     return
   }
 
@@ -2051,8 +2176,8 @@ async function load(): Promise<void> {
 watch(
   () => route.fullPath,
   () => {
-    if (routeReloadSuppressed) return
-    if (!route.path.startsWith('/social-assistance/temp-relief')) return
+    // 仅表单路由（/new、/:id/edit）触发重载；离开到列表/输出页时不重载。
+    if (!route.path.endsWith('/new') && !route.path.endsWith('/edit')) return
     const raw = route.params.id
     const target = Array.isArray(raw) ? raw[0] : raw
     if (target && form.id > 0 && Number(target) === form.id) return
@@ -2081,6 +2206,14 @@ watch(beneficiaryOptions, (options) => {
 
 onMounted(() => {
   void load()
+})
+
+onBeforeUnmount(() => {
+  if (publicizeTimer !== null) {
+    window.clearTimeout(publicizeTimer)
+    publicizeTimer = null
+  }
+  publicizePreviewTicket += 1
 })
 </script>
 
@@ -2549,6 +2682,7 @@ onMounted(() => {
                 :disabled="!isEditable"
                 :disabled-date="isDateBeyondMax"
                 style="width: 100%"
+                @change="handleApplyDateChange"
               />
               <div v-else class="readonly-with-action">
                 <el-input :model-value="form.applyDate ? formatDate(form.applyDate) : '—'" readonly />
@@ -2712,7 +2846,7 @@ onMounted(() => {
                     v-model="row.diseaseCode"
                     :disabled="!isEditable"
                     placeholder="输入编码自动带出名称"
-                    @change="handleDetailChanged"
+                    @change="handleDiseaseCodeChange(row)"
                   />
                 </label>
               </div>
@@ -3041,6 +3175,15 @@ onMounted(() => {
 
       <!-- ════════════ 第 4 页：金额与公示 ════════════ -->
       <div v-show="activeSection === 2" class="form-section">
+        <el-alert
+          v-if="form.batchHintText"
+          class="batch-hint"
+          type="info"
+          :closable="false"
+          show-icon
+          :title="form.batchHintText"
+        />
+
         <NcCard v-if="isSmall" title="救助金额（小额快救）">
           <div class="form-grid form-grid--3">
             <label class="field">
@@ -3273,6 +3416,10 @@ onMounted(() => {
 
 .load-error,
 .save-error {
+  margin: 0;
+}
+
+.batch-hint {
   margin: 0;
 }
 

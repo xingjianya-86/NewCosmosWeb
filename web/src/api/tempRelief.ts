@@ -6,6 +6,8 @@ import type {
   TempReliefCreatedResponse,
   TempReliefDetail,
   TempReliefFamilyStatusResponse,
+  TempReliefFormDefaults,
+  TempReliefIcd10Response,
   TempReliefHukouTypeResponse,
   TempReliefInsuredIdentityResponse,
   TempReliefListResponse,
@@ -15,6 +17,7 @@ import type {
   TempReliefPhotoUploadResponse,
   TempReliefPolicySnapshotResponse,
   TempReliefPopulationStatus,
+  TempReliefPublicizePreview,
   TempReliefPrintDataResponse,
   TempReliefReasonRequest,
   TempReliefRejectRequest,
@@ -181,6 +184,32 @@ export function getTempReliefFamilyStatus(idCard: string): Promise<string> {
 }
 
 /** 年度唯一校验（编辑时排除自身）。 */
+/** 新建表单默认值：户籍地址与乡镇验收人（按当前用户机构带出）。 */
+export function getTempReliefFormDefaults(): Promise<TempReliefFormDefaults> {
+  return apiHttp
+    .get<TempReliefFormDefaults>(`${BASE}/form-defaults`)
+    .then((response) => response.data)
+}
+
+/** 申请日期对应的批次/公示预览（小额快救免公示）。 */
+export function getTempReliefPublicizePreview(
+  applyDate: string,
+  reliefType: string,
+): Promise<TempReliefPublicizePreview> {
+  return apiHttp
+    .get<TempReliefPublicizePreview>(`${BASE}/publicize-preview`, {
+      params: { applyDate, reliefType },
+    })
+    .then((response) => response.data)
+}
+
+/** ICD-10 编码查询常见病名。 */
+export function getTempReliefIcd10(code: string): Promise<TempReliefIcd10Response> {
+  return apiHttp
+    .get<TempReliefIcd10Response>(`${BASE}/icd10`, { params: { code } })
+    .then((response) => response.data)
+}
+
 export function checkTempReliefAnnual(
   idCard: string,
   applyYear: string,

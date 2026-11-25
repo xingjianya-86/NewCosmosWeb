@@ -10,6 +10,7 @@ using NewCosmos.Services.Core;
 using NewCosmos.Services.Database;
 using NewCosmos.Services.Domain.Reporting;
 using NewCosmos.Services.Domain.TempRelief;
+using NewCosmos.Services.Domain.UserManagement;
 using NewCosmos.Services.UserManagement;
 using NewCosmos.Services.Utilities;
 
@@ -72,6 +73,9 @@ public static class TempReliefEndpoints
         app.MapGet($"{prefix}/family-status", GetFamilyStatusAsync);
         app.MapGet($"{prefix}/check-annual", CheckAnnualAsync);
         app.MapGet($"{prefix}/report-unit-phone", GetReportUnitPhoneAsync);
+        app.MapGet($"{prefix}/form-defaults", GetFormDefaultsAsync);
+        app.MapGet($"{prefix}/publicize-preview", GetPublicizePreviewAsync);
+        app.MapGet($"{prefix}/icd10", GetIcd10Async);
         app.MapGet($"{prefix}/{{id:long}}", GetByIdAsync);
         app.MapGet($"{prefix}/{{id:long}}/print-data", GetPrintDataAsync);
         app.MapGet($"{prefix}/{{id:long}}/photos", GetPhotosAsync);
@@ -776,6 +780,124 @@ public static class TempReliefEndpoints
             : Results.Json(new TempReliefReportUnitPhoneResponse(result.Value ?? string.Empty));
     }
 
+    /// <summary>
+    /// 新建表单默认值：户籍地址按当前用户机构带出，乡镇验收人取本机构民政助理。
+    /// 与 PC TempReliefFormViewModel.ResolveHukouFromOrganizationAsync / GetCivilAssistantNameAsync 同口径。
+    /// </summary>
+    private static async Task<IResult> GetFormDefaultsAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        IOrganizationService organizations,
+        IUserService users,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        var province = "黑龙江省";
+        var city = string.Empty;
+        var county = string.Empty;
+        var town = string.Empty;
+        var acceptancePerson = string.Empty;
+
+        if (user.OrganizationId is > 0)
+        {
+            var orgResult = await organizations.GetByIdAsync(user.OrganizationId.Value, ct);
+            if (orgResult.IsSuccess && orgResult.Value is { } org)
+            {
+                province = string.IsNullOrWhiteSpace(org.ProvinceName) ? province : org.ProvinceName;
+                city = org.CityName ?? string.Empty;
+                county = org.CountyName ?? string.Empty;
+                town = org.TownName ?? string.Empty;
+            }
+
+            var usersResult = await users.GetByOrganizationAsync(user.OrganizationId.Value, ct);
+            if (usersResult.IsSuccess && usersResult.Value is { Count: > 0 } staff)
+            {
+                acceptancePerson = staff
+                    .FirstOrDefault(u => string.Equals(
+                        u.Position, PositionTitles.CivilAssistant, StringComparison.Ordinal))
+                    ?.FullName ?? string.Empty;
+            }
+        }
+
+        return Results.Json(new TempReliefFormDefaultsResponse(
+            province, city, county, town, acceptancePerson));
+    }
+
+    /// <summary>
+    /// 申请日期对应的批次/公示预览（PC ApplyPublicizeDefaultsAsync 同口径）。
+    /// 小额快救免公示，返回空日期与空批次提示。
+    /// </summary>
+    private static async Task<IResult> GetPublicizePreviewAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        IBusinessTimelineService timeline,
+        CancellationToken ct,
+        DateTime? applyDate,
+        string? reliefType)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (string.Equals(reliefType, TempReliefConstants.ReliefTypeSmall, StringComparison.Ordinal))
+        {
+            return Results.Json(new TempReliefPublicizePreviewResponse(null, null, null, null, string.Empty));
+        }
+
+        var date = (applyDate ?? DateTime.Today).Date;
+        var batch = await timeline.CalculateTempReliefForApplyDateAsync(date);
+        var curve = timeline.BuildTempReliefCurve(date);
+        var hint = $"本次归入{batch.Year}年{batch.Month}月批次，" +
+                   $"公示 {curve.PublicityStartDate:MM-dd}~{curve.PublicityEndDate:MM-dd}，" +
+                   $"审核 {curve.AuditDate:MM-dd}。";
+
+        return Results.Json(new TempReliefPublicizePreviewResponse(
+            curve.PublicityStartDate,
+            curve.PublicityEndDate,
+            batch.Year,
+            batch.Month,
+            hint));
+    }
+
+    /// <summary>ICD-10 编码 → 常见病名（PC Icd10Catalog 同源）。</summary>
+    private static async Task<IResult> GetIcd10Async(
+        HttpContext context,
+        INewPermissionService permissions,
+        CancellationToken ct,
+        string? code)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        await Task.CompletedTask;
+        var normalized = (code ?? string.Empty).Trim();
+        if (normalized.Length == 0)
+        {
+            return Invalid(context, "请填写 ICD-10 编码");
+        }
+
+        Icd10Catalog.TryGetName(normalized, out var name);
+        return Results.Json(new TempReliefIcd10Response(normalized, name ?? string.Empty));
+    }
+
     // ───────────────────────────── 打印 / OCR / 照片 ─────────────────────────────
 
     private static async Task<IResult> GetPrintDataAsync(
@@ -848,6 +970,7 @@ public static class TempReliefEndpoints
             app.Id,
             app.ApplicationNo ?? string.Empty,
             app.ApplicantName ?? string.Empty,
+            app.ApplicantIdCard ?? string.Empty,
             DataMasker.MaskIdCard(app.ApplicantIdCard ?? string.Empty),
             app.ReliefType ?? string.Empty,
             TempReliefConstants.GetCategoryDisplayName(app.ReliefType, app.PopulationStatus, app.PaymentChannel),
@@ -2135,6 +2258,7 @@ public static class TempReliefEndpoints
         app.Id,
         app.ApplicationNo ?? string.Empty,
         app.ApplicantName ?? string.Empty,
+        app.ApplicantIdCard ?? string.Empty,
         DataMasker.MaskIdCard(app.ApplicantIdCard ?? string.Empty),
         app.ReliefType ?? string.Empty,
         TempReliefConstants.GetReliefTypeName(app.ReliefType),
