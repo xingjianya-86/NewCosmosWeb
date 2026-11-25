@@ -1,9 +1,26 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
-import { Delete, InfoFilled, Plus, Printer as PrinterIcon, Refresh, Star } from '@element-plus/icons-vue'
+import {
+  Delete,
+  InfoFilled,
+  Key,
+  Plus,
+  Printer as PrinterIcon,
+  Refresh,
+  Star,
+  Timer,
+} from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
-import { bindPrinter, listDevices, listPrinters, setDefaultPrinter, unbindPrinter } from '@/api/printers'
+import {
+  bindPrinter,
+  generatePrinterBindCode,
+  listDevices,
+  listPrinters,
+  setDefaultPrinter,
+  unbindPrinter,
+} from '@/api/printers'
+import type { PrinterBindCode } from '@/api/printers'
 import NcCard from '@/components/NcCard.vue'
 import NcPageHeader from '@/components/NcPageHeader.vue'
 import NcStat from '@/components/NcStat.vue'
@@ -45,6 +62,24 @@ const printerOptions = computed(() => selectedDevice.value?.printers ?? [])
 const onlineCount = computed(() => items.value.filter((item) => item.online).length)
 const defaultPrinter = computed(() => items.value.find((item) => item.isDefault)?.printerName ?? '未设置')
 
+/* ── 本机绑定码 ─────────────────────────────────────────────────── */
+const bindCodeVisible = ref(false)
+const bindCodeLoading = ref(false)
+const bindCode = ref<PrinterBindCode | null>(null)
+const bindCodeError = ref('')
+const remainingSeconds = ref(0)
+let countdownTimer: number | undefined
+let bindingWatchTimer: number | undefined
+
+const bindCodeText = computed(() => bindCode.value?.code || '------')
+const bindCodeExpired = computed(() => remainingSeconds.value <= 0)
+const countdownText = computed(() => {
+  const total = Math.max(0, remainingSeconds.value)
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+})
+
 function formatTime(value: string | null | undefined): string {
   if (!value) return '—'
   const date = new Date(value)
@@ -80,6 +115,105 @@ async function loadDevices(): Promise<void> {
   } finally {
     devicesLoading.value = false
   }
+}
+
+function stopCountdown(): void {
+  if (countdownTimer !== undefined) {
+    window.clearInterval(countdownTimer)
+    countdownTimer = undefined
+  }
+}
+
+function stopBindingWatch(): void {
+  if (bindingWatchTimer !== undefined) {
+    window.clearInterval(bindingWatchTimer)
+    bindingWatchTimer = undefined
+  }
+}
+
+function tickCountdown(): void {
+  const expiresAt = bindCode.value?.expiresAt
+  if (!expiresAt) {
+    remainingSeconds.value = 0
+    stopCountdown()
+    return
+  }
+  const expires = new Date(expiresAt).getTime()
+  if (Number.isNaN(expires)) {
+    remainingSeconds.value = 0
+    stopCountdown()
+    return
+  }
+  remainingSeconds.value = Math.max(0, Math.ceil((expires - Date.now()) / 1000))
+  if (remainingSeconds.value <= 0) stopCountdown()
+}
+
+function startCountdown(): void {
+  stopCountdown()
+  tickCountdown()
+  countdownTimer = window.setInterval(tickCountdown, 1_000)
+}
+
+/** Agent 在另一侧完成绑定，这里轮询比对绑定集合，发现新绑定即提示并关闭弹窗。 */
+function startBindingWatch(): void {
+  stopBindingWatch()
+  const knownIds = new Set(items.value.map((item) => item.id))
+
+  bindingWatchTimer = window.setInterval(async () => {
+    if (!bindCodeVisible.value) return
+    try {
+      const list = await listPrinters()
+      if (list.some((item) => !knownIds.has(item.id))) {
+        items.value = list
+        loadError.value = ''
+        ElMessage.success('已检测到本机打印机绑定成功')
+        closeBindCodeDialog()
+      }
+    } catch {
+      // 轮询失败静默处理，避免打断倒计时；用户可手动刷新。
+    }
+  }, 4_000)
+}
+
+async function requestBindCode(): Promise<void> {
+  if (bindCodeLoading.value) return
+  bindCodeLoading.value = true
+  bindCodeError.value = ''
+  try {
+    bindCode.value = await generatePrinterBindCode()
+    startCountdown()
+    startBindingWatch()
+  } catch (error) {
+    bindCode.value = null
+    remainingSeconds.value = 0
+    stopCountdown()
+    stopBindingWatch()
+    bindCodeError.value = getErrorMessage(error, '绑定码生成失败，请稍后重试')
+  } finally {
+    bindCodeLoading.value = false
+  }
+}
+
+async function openBindCodeDialog(): Promise<void> {
+  bindCodeVisible.value = true
+  await requestBindCode()
+}
+
+function closeBindCodeDialog(): void {
+  bindCodeVisible.value = false
+}
+
+function onBindCodeClosed(): void {
+  stopCountdown()
+  stopBindingWatch()
+  bindCode.value = null
+  bindCodeError.value = ''
+  remainingSeconds.value = 0
+}
+
+async function refreshBindings(): Promise<void> {
+  await load()
+  if (!loadError.value) ElMessage.success('绑定列表已刷新')
 }
 
 async function openBindDialog(): Promise<void> {
@@ -175,18 +309,24 @@ async function handleUnbind(row: PrinterBinding): Promise<void> {
 onMounted(() => {
   void load()
 })
+
+onBeforeUnmount(() => {
+  stopCountdown()
+  stopBindingWatch()
+})
 </script>
 
 <template>
   <div class="nc-page printers-page">
     <NcPageHeader
       title="打印机绑定"
-      description="管理当前账号可用的打印设备。手机端仅入队，实际打印由绑定的 Windows 电脑执行。"
+      description="网页生成绑定码，Agent 读取本机打印机后自动写入绑定。手机端仅入队，实际打印由绑定的 Windows 电脑执行。"
     >
       <template #actions>
         <div class="header-actions">
           <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
-          <el-button type="primary" :icon="Plus" @click="openBindDialog">绑定打印机</el-button>
+          <el-button :icon="Key" @click="openBindCodeDialog">生成本机绑定码</el-button>
+          <el-button type="primary" :icon="Plus" @click="openBindDialog">手动绑定</el-button>
         </div>
       </template>
     </NcPageHeader>
@@ -205,7 +345,7 @@ onMounted(() => {
 
     <div class="hint-bar">
       <el-icon><InfoFilled /></el-icon>
-      <span>选择已启动 Agent 的电脑和该电脑上报的打印机；绑定只属于当前账号，不会打到别人的打印机。</span>
+      <span>推荐在目标电脑上点「生成本机绑定码」，由 Agent 自动读取本机打印机完成绑定；也可手动选择设备与打印机作为兜底。绑定只属于当前账号，不会打到别人的打印机。</span>
     </div>
 
     <el-alert
@@ -340,16 +480,71 @@ onMounted(() => {
 
         <div v-else-if="!loading && !loadError" class="empty-wrap">
           <el-empty description="尚未绑定打印机">
-            <el-button type="primary" :icon="Plus" @click="openBindDialog">绑定第一台打印机</el-button>
-            <p class="empty-tip">请先在 Windows 电脑启动 Agent，再选择该电脑上报的打印机完成绑定。</p>
+            <el-button type="primary" :icon="Key" @click="openBindCodeDialog">生成本机绑定码</el-button>
+            <el-button :icon="Plus" @click="openBindDialog">手动绑定</el-button>
+            <p class="empty-tip">
+              请在 Windows 电脑启动 Agent 后生成本机绑定码，或在下方手动选择该电脑上报的打印机。
+            </p>
           </el-empty>
         </div>
       </div>
     </NcCard>
 
     <el-dialog
+      v-model="bindCodeVisible"
+      title="本机绑定码"
+      :width="isNarrow ? '92%' : '460px'"
+      :close-on-click-modal="false"
+      @closed="onBindCodeClosed"
+    >
+      <div v-if="bindCodeLoading && !bindCode" class="bind-code-loading">
+        <el-skeleton :rows="3" animated />
+      </div>
+
+      <el-alert
+        v-else-if="bindCodeError"
+        type="error"
+        :title="bindCodeError"
+        :closable="false"
+        show-icon
+      />
+
+      <div v-else class="bind-code-body">
+        <p class="bind-code-label">绑定码</p>
+        <div class="bind-code-value" :class="{ 'is-expired': bindCodeExpired }">
+          {{ bindCodeText }}
+        </div>
+
+        <div class="bind-code-countdown" :class="{ 'is-expired': bindCodeExpired }">
+          <el-icon><Timer /></el-icon>
+          <span v-if="bindCodeExpired">绑定码已过期，请重新生成</span>
+          <span v-else>有效期剩余 {{ countdownText }}</span>
+        </div>
+
+        <div class="bind-code-steps">
+          <p>请在当前电脑的 NewCosmos Agent 托盘选择「绑定本机打印机」并输入此码。</p>
+          <p class="nc-muted">
+            Agent 读取本机打印机后会自动写入绑定，成功后本页列表会自动刷新。
+          </p>
+        </div>
+
+        <p v-if="bindCode?.expiresAt" class="bind-code-expire nc-muted">
+          过期时间：{{ formatTime(bindCode.expiresAt) }}
+        </p>
+      </div>
+
+      <template #footer>
+        <el-button @click="closeBindCodeDialog">关闭</el-button>
+        <el-button :loading="loading" @click="refreshBindings">刷新绑定列表</el-button>
+        <el-button type="primary" :loading="bindCodeLoading" @click="requestBindCode">
+          重新生成
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
       v-model="dialogVisible"
-      title="绑定打印机"
+      title="手动绑定打印机"
       :width="isNarrow ? '92%' : '480px'"
       :close-on-click-modal="false"
       @closed="onDialogClosed"
@@ -582,6 +777,78 @@ onMounted(() => {
   font-size: var(--nc-text-sm);
 }
 
+/* ── 绑定码弹窗 ───────────────────────────────────────────────── */
+.bind-code-loading {
+  padding: 6px 2px;
+}
+
+.bind-code-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.bind-code-label {
+  color: var(--nc-muted);
+  font-size: var(--nc-text-sm);
+  letter-spacing: 0.12em;
+}
+
+.bind-code-value {
+  padding: 12px 10px;
+  border: 1px dashed var(--nc-seal);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-3);
+  color: var(--nc-ink);
+  font-family: var(--nc-font-mono);
+  font-size: clamp(34px, 9vw, 46px);
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  line-height: 1.1;
+  text-indent: 0.28em;
+  width: 100%;
+}
+
+.bind-code-value.is-expired {
+  border-color: var(--nc-line);
+  color: var(--nc-muted);
+}
+
+.bind-code-countdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--nc-seal);
+  font-size: var(--nc-text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.bind-code-countdown.is-expired {
+  color: var(--nc-muted);
+}
+
+.bind-code-steps {
+  width: 100%;
+  margin-top: 4px;
+  padding: 10px 12px;
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-2);
+  color: var(--nc-ink-2);
+  font-size: var(--nc-text-sm);
+  line-height: 1.7;
+  text-align: left;
+}
+
+.bind-code-steps p + p {
+  margin-top: 4px;
+}
+
+.bind-code-expire {
+  font-size: var(--nc-text-xs);
+}
+
 /* ── 弹窗 ─────────────────────────────────────────────────────── */
 .dialog-tip {
   margin-bottom: 18px;
@@ -605,11 +872,20 @@ onMounted(() => {
 /* ── 手机 ─────────────────────────────────────────────────────── */
 @media (max-width: 767px) {
   .header-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     width: 100%;
   }
 
   .header-actions .el-button {
-    flex: 1;
+    width: 100%;
+    min-width: 0;
+    margin-left: 0;
+    flex: none;
+  }
+
+  .header-actions .el-button:nth-child(2) {
+    grid-column: 1 / -1;
   }
 
   .summary {

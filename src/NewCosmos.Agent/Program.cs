@@ -112,6 +112,10 @@ internal static class Program
                 case "printers":
                     return PrintPrinters(logger);
 
+                case "bind-code":
+                    return await PrinterBindRunner.RunCliAsync(
+                        settings, configPath, client, options.BindCode, logger, cts.Token);
+
                 case "probe-office":
                     return ProbeOffice(logger);
 

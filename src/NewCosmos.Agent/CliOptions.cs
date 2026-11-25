@@ -29,6 +29,9 @@ public sealed class CliOptions
 
     public string? PrintJobsDirectory { get; private set; }
 
+    /// <summary>--bind-code / bind-code：6 位打印机绑定码。</summary>
+    public string? BindCode { get; private set; }
+
     /// <summary>--install-autostart 启动模式：tray（默认，无参数启动托盘）或 worker（纯控制台轮询）。</summary>
     public string AutostartMode { get; private set; } = "tray";
 
@@ -102,6 +105,12 @@ public sealed class CliOptions
 
                 case "--probe-office":
                     if (!SetCommand(options, "probe-office", ref commandSet, out error)) return false;
+                    break;
+
+                case "--bind-code":
+                    if (!SetCommand(options, "bind-code", ref commandSet, out error)) return false;
+                    if (!TryReadValue(args, ref i, inlineValue, arg, out var bindCode, out error)) return false;
+                    options.BindCode = bindCode;
                     break;
 
                 case "--config":
@@ -179,9 +188,18 @@ public sealed class CliOptions
                     // 允许直接写命令名（register / heartbeat / worker / render ...）
                     var tokenCommand = arg.ToLowerInvariant();
                     if (tokenCommand is "register" or "heartbeat" or "heartbeat-once" or "worker" or "render" or "printers" or "probe-office"
-                        or "tray" or "install-autostart" or "uninstall-autostart")
+                        or "bind-code" or "tray" or "install-autostart" or "uninstall-autostart")
                     {
                         if (!SetCommand(options, tokenCommand, ref commandSet, out error)) return false;
+
+                        // bind-code 支持位置参数形式：bind-code 482913
+                        if (tokenCommand == "bind-code"
+                            && i + 1 < args.Length
+                            && !args[i + 1].StartsWith("-", StringComparison.Ordinal))
+                        {
+                            options.BindCode = args[++i];
+                        }
+
                         break;
                     }
 
@@ -210,6 +228,7 @@ NewCosmos.Agent — Windows 固定 PC 的 Office/打印代理（P0）
   --install-autostart   写入 HKCU\...\Run 实现开机自启（配合 --autostart-mode）
   --uninstall-autostart 删除开机自启项
   --printers            列出本机打印机（默认打印机标 [默认]）
+  --bind-code <code>    用 6 位绑定码把本机打印机绑定到当前设备
   --probe-office        探测 Microsoft Office / WPS 可用性
   --render              用 Office 模板渲染一次 PDF（真实 COM）
 
@@ -239,6 +258,7 @@ NewCosmos.Agent — Windows 固定 PC 的 Office/打印代理（P0）
   NewCosmos.Agent.exe --server https://cosmos-static.sua17.cn:20000 --register
   NewCosmos.Agent.exe --heartbeat-once
   NewCosmos.Agent.exe --worker
+  NewCosmos.Agent.exe --bind-code 482913
   NewCosmos.Agent.exe --render --template C:\tpl\低保审核审批表.docx --data C:\tpl\data.json --out C:\out\result.pdf
 
 说明:

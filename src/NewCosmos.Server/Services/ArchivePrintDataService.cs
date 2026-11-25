@@ -403,11 +403,13 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
                  applicant_name, applicant_id_card, printer_name, copies, is_duplex,
                  fields_json, table_rows_json, supporter_table_data_json, images_json,
                  job_kind, photo_data, photo_layout, photo_category,
-                 status, requested_by, requested_by_name, created_at)
+                 status, requested_by, requested_by_name, created_at,
+                 target_user_id, target_device_id, target_printer)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
                         $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb,
                         $16, $17, $18, $19,
-                        $22, $20, $21, NOW())
+                        $22, $20, $21, NOW(),
+                        $23, $24, $25)
                 RETURNING id, job_no, status, created_at";
 
         var result = await database.QuerySingleAsync<PrintJob>(sql, ct,
@@ -418,7 +420,8 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
             fieldsJson, tableRowsJson, supporterJson, imagesJson,
             jobKind, request.PhotoData, request.PhotoLayout, request.PhotoCategory,
             request.RequestedBy, request.RequestedByName,
-            PrintJobConstants.StatusPending);
+            PrintJobConstants.StatusPending,
+            request.TargetUserId, request.TargetDeviceId, request.TargetPrinter);
 
         if (result.IsFailure)
         {
@@ -500,7 +503,7 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
                 WHERE id IN (
                     SELECT id FROM nc_biz_print_jobs
                     WHERE status = $3 AND deleted_at IS NULL
-                      AND (target_device_id IS NULL OR target_device_id = $5)
+                      AND target_device_id = $5
                     ORDER BY created_at
                     LIMIT $2
                     FOR UPDATE SKIP LOCKED

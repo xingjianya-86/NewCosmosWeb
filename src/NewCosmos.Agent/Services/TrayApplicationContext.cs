@@ -71,6 +71,9 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
         var heartbeatNow = new Forms.ToolStripMenuItem("立即心跳");
         heartbeatNow.Click += async (_, _) => await SendHeartbeatOnceAsync().ConfigureAwait(true);
 
+        var bindPrinters = new Forms.ToolStripMenuItem("绑定本机打印机…");
+        bindPrinters.Click += async (_, _) => await BindPrintersAsync().ConfigureAwait(true);
+
         var openConfig = new Forms.ToolStripMenuItem("打开配置文件");
         openConfig.Click += (_, _) => OpenConfigFile();
 
@@ -79,6 +82,7 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
 
         menu.Items.Add(openLogs);
         menu.Items.Add(heartbeatNow);
+        menu.Items.Add(bindPrinters);
         menu.Items.Add(openConfig);
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add(exit);
@@ -100,6 +104,70 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
         {
             _logger.Warn($"[Tray] 手动心跳异常: {ex.Message}");
             ShowBalloon("立即心跳", $"心跳异常: {ex.Message}", Forms.ToolTipIcon.Error);
+        }
+    }
+
+    /// <summary>托盘菜单：输入 6 位绑定码 → 绑定本机全部打印机 → 补一次心跳刷新在线状态。</summary>
+    private async Task BindPrintersAsync()
+    {
+        try
+        {
+            string code;
+            using (var form = new PrinterBindForm())
+            {
+                if (form.ShowDialog() != Forms.DialogResult.OK)
+                    return;
+
+                code = form.Code;
+            }
+
+            var result = await PrinterBindRunner
+                .BindAsync(_settings, _configFilePath, _client, code, _logger, CancellationToken.None)
+                .ConfigureAwait(true);
+
+            if (!result.Success)
+            {
+                _logger.Warn($"[Tray] 绑定打印机失败: {result.Message}");
+                Forms.MessageBox.Show(
+                    result.Message,
+                    "绑定本机打印机失败",
+                    Forms.MessageBoxButtons.OK,
+                    Forms.MessageBoxIcon.Warning);
+                return;
+            }
+
+            var names = result.Bindings
+                .Select(b => b.PrinterName)
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .ToArray();
+            var detail = names.Length == 0
+                ? result.Message
+                : result.Message + Environment.NewLine + Environment.NewLine + string.Join(Environment.NewLine, names);
+
+            _logger.Info($"[Tray] 绑定打印机成功: {result.Bindings.Count} 台");
+            ShowBalloon("绑定本机打印机", result.Message, Forms.ToolTipIcon.Info);
+            Forms.MessageBox.Show(
+                detail,
+                "绑定成功",
+                Forms.MessageBoxButtons.OK,
+                Forms.MessageBoxIcon.Information);
+
+            // 绑定成功后服务端在线状态可能仍是旧值：主动补一次心跳。
+            var heartbeatCode = await HeartbeatRunner
+                .RunAsync(_settings, _configFilePath, _client, once: true, _logger, CancellationToken.None)
+                .ConfigureAwait(true);
+
+            if (heartbeatCode != 0)
+                _logger.Warn($"[Tray] 绑定成功后刷新心跳失败（退出码 {heartbeatCode}）");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[Tray] 绑定打印机异常");
+            Forms.MessageBox.Show(
+                $"绑定异常: {ex.Message}",
+                "绑定本机打印机失败",
+                Forms.MessageBoxButtons.OK,
+                Forms.MessageBoxIcon.Error);
         }
     }
 

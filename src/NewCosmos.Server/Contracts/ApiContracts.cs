@@ -34,6 +34,20 @@ public sealed record BindPrinterRequest(
     string? PrinterName,
     bool? IsDefault);
 
+/// <summary>POST /api/printers/bind-code 响应：6 位一次性绑定码 + 过期时间。</summary>
+public sealed record PrinterBindCodeResponse(string Code, DateTime ExpiresAt);
+
+/// <summary>
+/// POST /api/printers/bind-by-code 请求体（Agent 用设备密钥调用）。
+/// printers 省略或为空时使用设备最近一次上报的 printers_json。
+/// </summary>
+public sealed record BindPrinterByCodeRequest(
+    string? Code,
+    List<AgentPrinterReport>? Printers);
+
+/// <summary>POST /api/printers/bind-by-code 响应：本次写入/更新的绑定。</summary>
+public sealed record PrinterBindingsResponse(IReadOnlyList<PrinterBindingDto> Bindings);
+
 /// <summary>可选设备：只暴露公开 ID/机器名/上报打印机，不暴露 deviceKey。</summary>
 public sealed record PrinterDeviceDto(
     long Id,

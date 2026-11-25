@@ -130,6 +130,32 @@ NewCosmos.Agent.exe --probe-office
 - Office：`OfficeProviderDetector` 探测 `Word.Application` / `Excel.Application` 与 WPS；
   输出 Provider、ProgID、版本。
 
+### 5.1 绑定本机打印机
+
+托盘右键菜单选择「绑定本机打印机…」，输入服务端生成的 6 位绑定码；
+无托盘环境（例如远程排障）也可用命令行：
+
+```powershell
+NewCosmos.Agent.exe --bind-code 482913
+# 等价写法
+NewCosmos.Agent.exe bind-code 482913
+```
+
+流程：
+
+1. 校验绑定码必须是 6 位数字；
+2. 读取 `deviceKey`（未注册会提示先运行 `--register`）；
+3. 用 `PrinterDiscovery` 枚举本机全部打印机（含默认打印机标记）；
+4. `POST /api/printers/bind-by-code`，请求头 `X-NC-Device-Key`，
+   请求体 `{ "code": "482913", "printers": [{ "name": "HP1020", "isDefault": true }] }`；
+5. 成功返回 `bindings[]`，命令行打印绑定的打印机名称；托盘模式随后补发一次心跳刷新在线状态。
+
+常见失败：
+
+- 绑定码格式错误 / 不存在或已过期（HTTP 404）；
+- 设备未注册或已失效（HTTP 401/403）→ 重新运行 `--register`；
+- 未发现本机打印机 → 检查打印驱动与 Windows 打印服务。
+
 ## 6. 模板渲染（真实 Office COM）
 
 ```powershell
@@ -257,6 +283,7 @@ NewCosmos.Agent.exe
 - 设备注册 + DPAPI 密钥保存 + ACL 降级
 - 心跳循环 / 单次心跳，Ctrl+C 退出
 - 打印机枚举、Office 探测
+- 按绑定码绑定本机打印机（托盘菜单 + 命令行）
 - 单次模板渲染（Word/Excel → PDF，真实 Office COM）
 - 任务队列 claim/payload/complete/fail + 预览/打印执行 + 临时文件清理
 
@@ -273,6 +300,8 @@ NewCosmos.Agent.exe
 
 - [ ] `--version`、`--help` 正常。
 - [ ] `--printers` 列出真实打印机并正确标记默认打印机。
+- [ ] 托盘「绑定本机打印机…」输入 6 位码后可绑定，并补发心跳。
+- [ ] `--bind-code 482913` 成功打印绑定的打印机名称；错误码有明确提示。
 - [ ] `--probe-office` 显示 Word/Excel 可用。
 - [ ] `--register` 成功写入 `%APPDATA%\NewCosmos\agent.json`，且文件中没有明文 `deviceKey`（DPAPI 正常时）。
 - [ ] `--heartbeat-once` 返回成功；服务端设备列表显示 lastSeen 更新。

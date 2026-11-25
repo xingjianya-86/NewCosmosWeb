@@ -21,6 +21,7 @@ public sealed class SessionAuthenticationMiddleware(RequestDelegate next, ILogge
         new("/api/agent/register"),
         new("/api/agent/heartbeat"),
         new("/api/agent/jobs"),
+        new("/api/printers/bind-by-code"),
         new("/health"),
         new("/info")
     ];

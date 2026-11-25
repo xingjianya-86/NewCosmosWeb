@@ -346,7 +346,10 @@ function goPrinters(): void {
 function validationMessage(mode: PrintJobMode): string | null {
   if (!selectedApplication.value) return '请先在左侧选择一条申请'
   if (selectedTemplates.value.length === 0) return '请至少选择一份文书'
-  if (mode === 'print' && !selectedPrinter.value) return '请先选择打印机'
+  if (mode === 'print') {
+    if (printers.value.length === 0) return '当前账号未绑定打印机，请先在本机 Agent 绑定'
+    if (!selectedPrinter.value) return '请先选择打印机'
+  }
   return null
 }
 
@@ -364,6 +367,7 @@ async function pushJobs(mode: PrintJobMode): Promise<void> {
 
   const count = selectedTemplates.value.length
   const printerName = selectedPrinter.value?.printerName
+  const bindingId = selectedPrinter.value?.id ?? null
 
   if (mode === 'print') {
     const printer = selectedPrinter.value
@@ -395,6 +399,7 @@ async function pushJobs(mode: PrintJobMode): Promise<void> {
           businessId: application.id,
           templateId: template.id,
           templateName: template.name,
+          bindingId: mode === 'print' ? bindingId : undefined,
           printerName,
           copies: copiesCount.value,
           isDuplex: isDuplex.value,
@@ -681,7 +686,7 @@ onBeforeUnmount(() => {
                 v-for="printer in printers"
                 :key="printer.id"
                 :value="printer.id"
-                :label="`${printer.deviceName} / ${printer.printerName}`"
+                :label="`${printer.deviceName} · ${printer.printerName} · ${printer.online ? '在线' : '离线'}`"
               >
                 <div class="printer-option">
                   <span class="printer-option__name">{{ printer.printerName }}</span>
@@ -712,10 +717,12 @@ onBeforeUnmount(() => {
           <el-empty
             v-else-if="!printersLoading"
             :image-size="70"
-            description="尚未绑定打印机"
+            description="当前账号未绑定打印机"
           >
             <el-button size="small" :icon="Printer" @click="goPrinters">去绑定打印机</el-button>
-            <p class="empty-tip">预览可不选打印机；实际打印需要先绑定 PC 端打印机。</p>
+            <p class="empty-tip">
+              预览可不选打印机；实际打印需先在本机 Agent 绑定打印机。
+            </p>
           </el-empty>
         </div>
 
@@ -749,6 +756,7 @@ onBeforeUnmount(() => {
             :icon="Printer"
             :loading="pushing && pushMode === 'print'"
             :disabled="!canPrint"
+            :title="printers.length === 0 ? '当前账号未绑定打印机，请先在本机 Agent 绑定' : ''"
             @click="pushJobs('print')"
           >
             打印

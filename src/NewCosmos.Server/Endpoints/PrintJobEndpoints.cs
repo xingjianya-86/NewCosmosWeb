@@ -83,7 +83,7 @@ public static class PrintJobEndpoints
 
     /// <summary>
     /// POST /api/print/jobs
-    /// body: { businessType, businessId, templateId, templateName?, printerName?, copies?, isDuplex?, mode? }
+    /// body: { businessType, businessId, templateId, templateName?, bindingId?, printerName?, copies?, isDuplex?, mode? }
     /// mode = preview | print（默认 print）。预览与打印共用同一份数据快照，仅 JobKind 不同。
     /// 支持 FamilyApplication 与 AssetVerification；返回 missingFields 只提示不阻断。
     /// </summary>
@@ -92,6 +92,7 @@ public static class PrintJobEndpoints
         HttpContext context,
         ArchivePrintDataService printData,
         ArchivePrintQueueService queue,
+        PrinterBindingService printers,
         INewPermissionService permissions,
         CancellationToken ct)
     {
@@ -200,6 +201,17 @@ public static class PrintJobEndpoints
         var printerName = NormalizeOptional(request.PrinterName, 300);
         var templateName = NormalizeOptional(request.TemplateName, 300) ?? template.Name;
 
+        // 任务目标固化：bindingId 优先；只有 printerName 时按当前账号绑定匹配；
+        // 都没传时退回默认绑定（预览兼容旧前端），无绑定时目标为空（新认领协议不会领取）。
+        var targetResult = await printers.ResolveTargetAsync(
+            user.Id, request.BindingId, request.PrinterName, ct);
+        if (targetResult.IsFailure)
+        {
+            return MapResult(context, targetResult);
+        }
+
+        var target = targetResult.Value;
+
         var jobRequest = new PrintJobRequest
         {
             BusinessType = businessType,
@@ -209,7 +221,10 @@ public static class PrintJobEndpoints
             TemplateName = templateName,
             ApplicantName = data.ApplicantName,
             ApplicantIdCard = data.ApplicantIdCard,
-            PrinterName = printerName,
+            PrinterName = target?.PrinterName ?? printerName,
+            TargetUserId = target?.UserId,
+            TargetDeviceId = target?.DeviceId,
+            TargetPrinter = target?.PrinterName,
             Copies = Math.Clamp(request.Copies ?? 1, 1, 99),
             IsDuplex = request.IsDuplex ?? false,
             Fields = data.Fields,
@@ -1059,7 +1074,9 @@ public sealed record PrintJobCreateRequest(
     string? PrinterName,
     int? Copies,
     bool? IsDuplex,
-    string? Mode);
+    string? Mode,
+    // 打印机绑定 ID（GET /api/printers 的 id），后端据此固化 target_device_id/target_printer。
+    long? BindingId = null);
 
 /// <summary>POST /api/print/jobs 响应。missingFields 只做提示：模板声明但本次无值的字段键。</summary>
 public sealed record PrintJobCreatedResponse(

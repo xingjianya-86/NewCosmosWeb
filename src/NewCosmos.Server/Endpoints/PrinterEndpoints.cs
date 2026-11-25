@@ -10,6 +10,8 @@ public static class PrinterEndpoints
     {
         app.MapGet("/api/printers", ListAsync);
         app.MapGet("/api/printers/devices", ListDevicesAsync);
+        app.MapPost("/api/printers/bind-code", CreateBindCodeAsync);
+        app.MapPost("/api/printers/bind-by-code", BindByCodeAsync);
         app.MapPost("/api/printers/bind", BindAsync);
         app.MapDelete("/api/printers/{id}", DeleteAsync);
         app.MapPost("/api/printers/{id}/default", SetDefaultAsync);
@@ -45,6 +47,52 @@ public static class PrinterEndpoints
         }
 
         var result = await printers.ListDevicesAsync(ct);
+        return result.IsFailure
+            ? ApiErrors.FromResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    /// <summary>POST /api/printers/bind-code —— 登录用户生成 6 位一次性绑定码（5 分钟有效）。</summary>
+    private static async Task<IResult> CreateBindCodeAsync(
+        HttpContext context,
+        PrinterBindingService printers,
+        CancellationToken ct)
+    {
+        var userId = context.GetUserId();
+        if (userId is null)
+        {
+            return Unauthorized(context);
+        }
+
+        var result = await printers.CreateBindCodeAsync(userId.Value, ct);
+        return result.IsFailure
+            ? ApiErrors.FromResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// POST /api/printers/bind-by-code —— Agent 用 X-NC-Device-Key + 绑定码写入当前账号绑定。
+    /// 不需要登录会话（与 /api/agent/heartbeat 同一设备密钥口径）。
+    /// </summary>
+    private static async Task<IResult> BindByCodeAsync(
+        BindPrinterByCodeRequest? request,
+        HttpContext context,
+        PrinterBindingService printers,
+        CancellationToken ct)
+    {
+        if (!Guid.TryParse(context.Request.Headers["X-NC-Device-Key"].ToString().Trim(), out var deviceKey))
+        {
+            return ApiErrors.Write(context, StatusCodes.Status401Unauthorized,
+                ApiErrorCodes.AuthRequired, "设备不存在或已失效");
+        }
+
+        if (request is null)
+        {
+            return ApiErrors.Write(context, StatusCodes.Status400BadRequest,
+                ApiErrorCodes.ValidationError, "请求体不能为空");
+        }
+
+        var result = await printers.BindByCodeAsync(deviceKey, request, ct);
         return result.IsFailure
             ? ApiErrors.FromResult(context, result)
             : Results.Json(result.Value);

@@ -6,6 +6,8 @@ import {
   type PrintJobMode,
 } from './archivePrint'
 import { apiHttp, getErrorMessage } from './http'
+import { listPrinters } from './printers'
+import type { PrinterBinding } from '@/types/api'
 
 /** 资产核查推送打印的业务类型键，与后端 PrintBusinessTypes.AssetVerification 一致。 */
 export const ASSET_PRINT_BUSINESS_TYPE = 'AssetVerification'
@@ -17,6 +19,8 @@ export interface CreateAssetPrintJobInput {
   businessId: number
   templateId: number
   templateName?: string
+  /** 打印机绑定 id；打印模式必填，预览模式可省略。 */
+  bindingId?: number | null
   mode?: PrintJobMode
   copies?: number
   isDuplex?: boolean
@@ -35,6 +39,7 @@ export function createAssetPrintJob(input: CreateAssetPrintJobInput): Promise<Cr
       businessId: input.businessId,
       templateId: input.templateId,
       templateName: input.templateName,
+      bindingId: input.bindingId ?? undefined,
       copies: Math.min(99, Math.max(1, input.copies ?? 1)),
       isDuplex: input.isDuplex ?? false,
       mode: input.mode ?? 'print',
@@ -62,8 +67,12 @@ export function useAssetPrintDialog() {
   const templates = ref<DocumentTemplate[]>([])
   const templatesLoading = ref(false)
   const templatesError = ref('')
+  const printers = ref<PrinterBinding[]>([])
+  const printersLoading = ref(false)
+  const printersError = ref('')
   const submitting = ref(false)
   const templateId = ref<number | null>(null)
+  const printerId = ref<number | null>(null)
   const mode = ref<PrintJobMode>('print')
   const copies = ref(1)
   const isDuplex = ref(false)
@@ -71,8 +80,16 @@ export function useAssetPrintDialog() {
   const selectedTemplate = computed(
     () => templates.value.find((template) => template.id === templateId.value) ?? null,
   )
+  const selectedPrinter = computed(
+    () => printers.value.find((printer) => printer.id === printerId.value) ?? null,
+  )
+  /** 打印模式必须有打印机；预览模式（PC 端查看）可不选。 */
   const canSubmit = computed(
-    () => templateId.value !== null && !submitting.value && !templatesLoading.value,
+    () =>
+      templateId.value !== null &&
+      !submitting.value &&
+      !templatesLoading.value &&
+      (mode.value === 'preview' || printerId.value !== null),
   )
 
   async function loadTemplates(force = false): Promise<void> {
@@ -95,16 +112,52 @@ export function useAssetPrintDialog() {
     }
   }
 
+  /** 加载当前账号的打印机绑定；默认选「默认且在线」→「默认」→「在线」→ 第一台。 */
+  async function loadPrinters(force = false): Promise<void> {
+    if (!force && printers.value.length > 0) return
+
+    printersLoading.value = true
+    printersError.value = ''
+    try {
+      const list = await listPrinters()
+      printers.value = list
+
+      if (printerId.value !== null && list.some((item) => item.id === printerId.value)) {
+        return
+      }
+      const preferred =
+        list.find((printer) => printer.isDefault && printer.online)
+        ?? list.find((printer) => printer.isDefault)
+        ?? list.find((printer) => printer.online)
+        ?? list[0]
+      printerId.value = preferred?.id ?? null
+    } catch (error) {
+      printers.value = []
+      printerId.value = null
+      printersError.value = getErrorMessage(error, '打印机列表加载失败')
+    } finally {
+      printersLoading.value = false
+    }
+  }
+
   function reset(): void {
     templateId.value = templates.value[0]?.id ?? null
     mode.value = 'print'
     copies.value = 1
     isDuplex.value = false
+    if (printerId.value === null) {
+      const preferred =
+        printers.value.find((printer) => printer.isDefault && printer.online)
+        ?? printers.value.find((printer) => printer.isDefault)
+        ?? printers.value.find((printer) => printer.online)
+        ?? printers.value[0]
+      printerId.value = preferred?.id ?? null
+    }
   }
 
   async function open(): Promise<void> {
     reset()
-    await loadTemplates()
+    await Promise.all([loadTemplates(), loadPrinters(true)])
   }
 
   async function submit(businessId: number): Promise<CreatedPrintJob> {
@@ -114,6 +167,13 @@ export function useAssetPrintDialog() {
     if (templateId.value === null) {
       throw new Error('请选择打印模板')
     }
+    if (mode.value === 'print' && printerId.value === null) {
+      throw new Error(
+        printers.value.length === 0
+          ? '当前账号未绑定打印机，请先在本机 Agent 绑定'
+          : '请选择打印机',
+      )
+    }
 
     submitting.value = true
     try {
@@ -121,6 +181,7 @@ export function useAssetPrintDialog() {
         businessId,
         templateId: templateId.value,
         templateName: selectedTemplate.value?.name,
+        bindingId: printerId.value,
         mode: mode.value,
         copies: copies.value,
         isDuplex: isDuplex.value,
@@ -134,14 +195,20 @@ export function useAssetPrintDialog() {
     templates,
     templatesLoading,
     templatesError,
+    printers,
+    printersLoading,
+    printersError,
     submitting,
     templateId,
+    printerId,
     mode,
     copies,
     isDuplex,
     selectedTemplate,
+    selectedPrinter,
     canSubmit,
     loadTemplates,
+    loadPrinters,
     reset,
     open,
     submit,

@@ -28,6 +28,15 @@ public class PrintJob
 
     public string? PrinterName { get; set; }
 
+    /// <summary>任务固化的目标账号（入队时的当前用户）；仅定向任务有值。</summary>
+    public int? TargetUserId { get; set; }
+
+    /// <summary>任务固化的目标 Agent 设备（nc_sys_print_devices.id）；只有该设备能认领。</summary>
+    public long? TargetDeviceId { get; set; }
+
+    /// <summary>任务固化的目标打印机名（来自绑定记录）。</summary>
+    public string? TargetPrinter { get; set; }
+
     public int Copies { get; set; } = 1;
 
     public bool IsDuplex { get; set; }
@@ -179,6 +188,15 @@ public class PrintJobRequest
     public string? ApplicantIdCard { get; set; }
 
     public string? PrinterName { get; set; }
+
+    /// <summary>任务固化的目标账号（nc_sys_printer_bindings.user_id）。</summary>
+    public int? TargetUserId { get; set; }
+
+    /// <summary>任务固化的目标 Agent 设备（nc_sys_print_devices.id）。</summary>
+    public long? TargetDeviceId { get; set; }
+
+    /// <summary>任务固化的目标打印机名。</summary>
+    public string? TargetPrinter { get; set; }
 
     public int Copies { get; set; } = 1;
 

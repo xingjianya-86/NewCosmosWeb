@@ -40,13 +40,18 @@ const {
   templates: printTemplates,
   templatesLoading: printTemplatesLoading,
   templatesError: printTemplatesError,
+  printers: printPrinters,
+  printersLoading: printPrintersLoading,
+  printersError: printPrintersError,
   submitting: printSubmitting,
   templateId: printTemplateId,
+  printerId: printPrinterId,
   mode: printMode,
   copies: printCopies,
   isDuplex: printIsDuplex,
   canSubmit: printCanSubmit,
   loadTemplates: loadPrintTemplates,
+  loadPrinters: loadPrintPrinters,
   open: openPrintDialog,
   submit: submitPrintJob,
 } = useAssetPrintDialog()
@@ -237,6 +242,38 @@ watch(
           :model-value="`${detail?.applicantName || '未命名'}（${detail?.batchId || '无批次号'}）`"
           disabled
         />
+      </el-form-item>
+
+      <el-form-item label="打印机">
+        <el-select
+          v-model="printPrinterId"
+          :loading="printPrintersLoading"
+          :disabled="printPrintersLoading"
+          filterable
+          clearable
+          placeholder="选择已绑定的打印机"
+        >
+          <el-option
+            v-for="printer in printPrinters"
+            :key="printer.id"
+            :label="`${printer.deviceName} · ${printer.printerName} · ${printer.online ? '在线' : '离线'}`"
+            :value="printer.id"
+          />
+        </el-select>
+        <p v-if="printPrintersError" class="form-hint is-error">
+          {{ printPrintersError }}
+          <el-button link type="primary" @click="loadPrintPrinters(true)">重试</el-button>
+        </p>
+        <p v-else-if="printPrintersLoading" class="form-hint">正在读取已绑定打印机…</p>
+        <p v-else-if="printPrinters.length === 0" class="form-hint is-error">
+          当前账号未绑定打印机，请先在本机 Agent 绑定；预览模式可继续使用。
+        </p>
+        <p v-else-if="printMode === 'print' && !printPrinterId" class="form-hint is-error">
+          打印模式需要选择打印机
+        </p>
+        <p v-else-if="printMode === 'preview' && !printPrinterId" class="form-hint">
+          预览模式可不选打印机
+        </p>
       </el-form-item>
 
       <el-form-item label="打印模板">

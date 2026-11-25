@@ -18,6 +18,8 @@ export interface CreatePrintJobPayload {
   businessId: number
   templateId: number
   templateName?: string
+  /** 打印机绑定 id（nc_sys_printer_bindings.id），后端据此写 target_device_id/target_printer。 */
+  bindingId?: number | null
   printerName?: string
   copies: number
   isDuplex: boolean
