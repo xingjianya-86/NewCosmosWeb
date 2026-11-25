@@ -255,7 +255,7 @@ const moduleGroups: ModuleGroup[] = [
         iconBg: '#FFF3E0',
         iconColor: '#7a5315',
         buttonText: '进入模块',
-        to: '/coming-soon/recovery',
+        to: '/recovery',
       },
       {
         title: '照片补传',

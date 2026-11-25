@@ -90,6 +90,9 @@ public static class ArchiveCategoryResolver
             ["普惠高龄/新增", "普惠高龄/停止", "普惠高龄/变更", "普惠高龄/月报"],
         "AssetVerification" => [ClassificationConstants.AssetVerification],
         "DynamicManagementRecord" => ["变更档案"],
+        "Recovery" => ["追缴"],
+        "LowIncomeProof" => ["证明文件"],
+        "DeathStatement" => ["证明文件"],
         _ => null
     };
 

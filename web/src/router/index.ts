@@ -226,6 +226,24 @@ const router = createRouter({
           meta: { title: '高龄津贴月报表' },
         },
         {
+          path: 'recovery',
+          name: 'recovery',
+          component: () => import('@/views/recovery/RecoveryListView.vue'),
+          meta: { title: '后补追缴 - 搜索停止人员' },
+        },
+        {
+          path: 'recovery/form',
+          name: 'recovery-form',
+          component: () => import('@/views/recovery/RecoveryFormView.vue'),
+          meta: { title: '后补追缴 - 填写追缴信息' },
+        },
+        {
+          path: 'recovery/manual',
+          name: 'recovery-manual',
+          component: () => import('@/views/recovery/RecoveryManualView.vue'),
+          meta: { title: '后补追缴 - 手工录入' },
+        },
+        {
           path: 'asset-verification',
           name: 'asset-verification-home',
           component: () => import('@/views/asset-verification/AssetVerificationHomeView.vue'),

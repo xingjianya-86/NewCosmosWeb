@@ -3,7 +3,7 @@ import { apiHttp } from './http'
 /** 档案制作使用的业务类型键，与后端 PrintBusinessTypes.FamilyApplication 一致。 */
 export const ARCHIVE_PRINT_BUSINESS_TYPE = 'FamilyApplication'
 
-export type PrintJobMode = 'preview' | 'print'
+export type PrintJobMode = 'preview' | 'print' | 'save'
 
 export interface DocumentTemplate {
   id: number
@@ -91,6 +91,7 @@ function toNullableNumber(value: unknown): number | null {
 function resolveMode(raw: Record<string, unknown>): PrintJobMode {
   const mode = toText(raw.mode).toLowerCase()
   if (mode === 'preview') return 'preview'
+  if (mode === 'save') return 'save'
   if (mode === 'print') return 'print'
   // 兼容旧任务：预览任务以 jobKind=Preview 落库。
   return toText(raw.jobKind).toLowerCase() === 'preview' ? 'preview' : 'print'
@@ -174,7 +175,8 @@ export function createPrintJob(payload: CreatePrintJobPayload): Promise<CreatedP
       jobNo: toText(raw.jobNo),
       status: toText(raw.status) || 'Pending',
       jobKind: toText(raw.jobKind) || 'Template',
-      mode: resolveMode(raw),
+      // 服务端创建响应不返回 mode 时，保留本次请求方式（预览/打印/保存）。
+      mode: toText(raw.mode) ? resolveMode(raw) : payload.mode,
     }
   })
 }

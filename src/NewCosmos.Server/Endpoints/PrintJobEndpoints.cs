@@ -6,6 +6,7 @@ using NewCosmos.Server.Contracts;
 using NewCosmos.Server.Infrastructure;
 using NewCosmos.Server.Services;
 using NewCosmos.Services.Core;
+using NewCosmos.Services.Domain.Recovery;
 using NewCosmos.Services.Domain.TempRelief;
 using NewCosmos.Services.UserManagement;
 using NewCosmos.Services.Utilities;
@@ -21,6 +22,20 @@ namespace NewCosmos.Server.Endpoints;
 /// </summary>
 public static class PrintJobEndpoints
 {
+    /// <summary>支持的输出模式：preview 预览 / print 打印 / save 保存 / open-folder 打开输出目录。</summary>
+    private static readonly string[] PrintJobModes = ["preview", "print", "save", "open-folder"];
+
+    /// <summary>打印任务列表/管理的任一权限（列表不限定单一业务域）。</summary>
+    private static readonly string[] AnyPrintPermissions =
+    [
+        PermissionCodes.PRINT_FAMILYAPPLICATION,
+        PermissionCodes.PRINT_ASSETVERIFICATION,
+        PermissionCodes.PRINT_RECOVERY,
+        PermissionCodes.PRINT_LOWINCOMEPROOF,
+        PermissionCodes.TEMP_VIEW,
+        PermissionCodes.ELDERLY_VIEW
+    ];
+
     public static IEndpointRouteBuilder MapPrintJobEndpoints(this IEndpointRouteBuilder app)
     {
         // Web 端（登录 + 打印权限）
@@ -85,9 +100,10 @@ public static class PrintJobEndpoints
 
     /// <summary>
     /// POST /api/print/jobs
-    /// body: { businessType, businessId, templateId, templateName?, bindingId?, printerName?, copies?, isDuplex?, mode? }
-    /// mode = preview | print（默认 print）。预览与打印共用同一份数据快照，仅 JobKind 不同。
-    /// 支持 FamilyApplication 与 AssetVerification；返回 missingFields 只提示不阻断。
+    /// body: { businessType, businessId, templateId?, templateName?, bindingId?, printerName?, copies?, isDuplex?, mode? }
+    /// mode = preview | print | save | open-folder（默认 print）。
+    /// 支持 FamilyApplication / AssetVerification / TempRelief / Recovery；
+    /// Recovery 与 save/open-folder 走 TemplateBatch，返回 missingFields 只提示不阻断。
     /// </summary>
     private static async Task<IResult> CreateJobAsync(
         PrintJobCreateRequest? request,
@@ -111,7 +127,7 @@ public static class PrintJobEndpoints
         if (permissionCode is null)
         {
             return InvalidRequest(context,
-                "当前仅支持 FamilyApplication / AssetVerification / TempRelief 推送打印");
+                "当前仅支持 FamilyApplication / AssetVerification / TempRelief / Recovery 推送打印");
         }
 
         var denied = await EndpointSecurity.RequirePermissionAsync(context, permissions, permissionCode, ct);
@@ -130,34 +146,84 @@ public static class PrintJobEndpoints
             return InvalidRequest(context, "businessId 必须为正整数");
         }
 
-        if (request.TemplateId is not > 0)
-        {
-            return InvalidRequest(context, "templateId 必须为正整数");
-        }
-
         var mode = (request.Mode ?? "print").Trim().ToLowerInvariant();
-        if (mode is not ("print" or "preview"))
+        if (!PrintJobModes.Contains(mode, StringComparer.Ordinal))
         {
-            return InvalidRequest(context, "mode 只能是 print 或 preview");
+            return InvalidRequest(context, "mode 只能是 preview / print / save / open-folder");
         }
 
-        var templateResult = await queue.GetTemplateMetaAsync(request.TemplateId.Value, ct);
-        if (templateResult.IsFailure)
+        var isRecovery = string.Equals(
+            businessType, PrintBusinessTypes.Recovery, StringComparison.OrdinalIgnoreCase);
+        var isOpenFolder = string.Equals(mode, "open-folder", StringComparison.Ordinal);
+
+        // 追缴（含 preview/print）与任何 save/open-folder 走批量任务契约（Agent 已支持 TemplateBatch）。
+        var useBatch = isRecovery || isOpenFolder || string.Equals(mode, "save", StringComparison.Ordinal);
+
+        // 追缴模板按分类 + 名称精确解析（前端不必知道模板 ID）；其余业务沿用请求模板。
+        PrintTemplateMetaRow? template = null;
+        if (isRecovery && !isOpenFolder)
         {
-            return MapResult(context, templateResult);
+            var templatesResult = await queue.ListTemplatesAsync([RecoveryPrintDataService.Category], ct);
+            if (templatesResult.IsFailure)
+            {
+                return MapResult(context, templatesResult);
+            }
+
+            template = (templatesResult.Value ?? [])
+                .FirstOrDefault(item => string.Equals(
+                    item.Name, RecoveryPrintDataService.TemplateName, StringComparison.Ordinal));
+            if (template is null)
+            {
+                return NotFound(context, $"模板不存在：{RecoveryPrintDataService.TemplateName}");
+            }
+        }
+        else if (!isOpenFolder)
+        {
+            if (request.TemplateId is not > 0)
+            {
+                return InvalidRequest(context, "templateId 必须为正整数");
+            }
+
+            var templateResult = await queue.GetTemplateMetaAsync(request.TemplateId.Value, ct);
+            if (templateResult.IsFailure)
+            {
+                return MapResult(context, templateResult);
+            }
+
+            template = templateResult.Value;
+            if (template is null)
+            {
+                return NotFound(context, "模板不存在");
+            }
         }
 
-        var template = templateResult.Value;
-        if (template is null)
-        {
-            return ApiErrors.Write(context, StatusCodes.Status404NotFound,
-                ApiErrorCodes.NotFound, "模板不存在");
-        }
-
-        // 数据装配：FamilyApplication 复用表单服务（数据范围 + 业务存在性）；
+        // 数据装配：Recovery 用追缴打印数据服务；FamilyApplication 复用表单服务（数据范围 + 业务存在性）；
         // AssetVerification 复用资产核查打印数据服务；TempRelief 复用 Core 打印数据组装。
         ArchivePrintData data;
-        if (string.Equals(businessType, PrintBusinessTypes.AssetVerification, StringComparison.OrdinalIgnoreCase))
+        RecoveryPrintData? recoveryData = null;
+        if (isRecovery)
+        {
+            var recoveryPrintData = context.RequestServices.GetRequiredService<RecoveryPrintDataService>();
+            var recoveryResult = await recoveryPrintData.BuildAsync(
+                request.BusinessId.Value, user.OrganizationId, user.Username, ct);
+            if (recoveryResult.IsFailure)
+            {
+                return MapResult(context, recoveryResult);
+            }
+
+            recoveryData = recoveryResult.Value;
+            data = new ArchivePrintData
+            {
+                ApplicantName = recoveryData.PersonName,
+                ApplicantIdCard = recoveryData.IdCard ?? string.Empty,
+                Classification = RecoveryPrintDataService.Category
+            };
+            foreach (var (key, value) in recoveryData.Fields)
+            {
+                if (!string.IsNullOrWhiteSpace(value)) data.Fields[key] = value;
+            }
+        }
+        else if (string.Equals(businessType, PrintBusinessTypes.AssetVerification, StringComparison.OrdinalIgnoreCase))
         {
             var checkService = context.RequestServices.GetRequiredService<AssetCheckPrintDataService>();
             var checkResult = await checkService.BuildAsync(request.BusinessId.Value, ct);
@@ -258,8 +324,11 @@ public static class PrintJobEndpoints
             data = dataResult.Value;
         }
 
-        var templateConfig = await queue.GetTemplateConfigAsync(template.Id, ct);
-        var configJson = templateConfig.IsSuccess ? templateConfig.Value : null;
+        var configJson = template is null
+            ? null
+            : (await queue.GetTemplateConfigAsync(template.Id, ct)) is { IsSuccess: true } configResult
+                ? configResult.Value
+                : null;
 
         // businessId 只有 FamilyApplication 才等于 nc_biz_applications.id；
         // 其他业务类型仅按身份证匹配，避免把核查记录 ID 误当申请 ID 取到别人照片。
@@ -267,11 +336,16 @@ public static class PrintJobEndpoints
             ? request.BusinessId
             : null;
 
-        var images = await printData.BuildPhotoImagesAsync(
-            data.ApplicantIdCard, photoApplicationId, configJson, ct);
+        // 批量任务由 Agent 按 batch.parts 渲染，照片占位符不参与批量契约。
+        var images = useBatch
+            ? []
+            : await printData.BuildPhotoImagesAsync(
+                data.ApplicantIdCard, photoApplicationId, configJson, ct);
 
         var printerName = NormalizeOptional(request.PrinterName, 300);
-        var templateName = NormalizeOptional(request.TemplateName, 300) ?? template.Name;
+        var templateName = NormalizeOptional(request.TemplateName, 300)
+            ?? template?.Name
+            ?? (isRecovery ? RecoveryPrintDataService.TemplateName : businessType);
 
         // 任务目标固化：bindingId 优先；只有 printerName 时按当前账号绑定匹配；
         // 都没传时退回默认绑定（预览兼容旧前端），无绑定时目标为空（新认领协议不会领取）。
@@ -284,12 +358,49 @@ public static class PrintJobEndpoints
 
         var target = targetResult.Value;
 
+        // 批量月报口径：preview/print/save 必须有绑定；open-folder 只打开输出目录，不强制绑定。
+        if (useBatch && !isOpenFolder
+            && (target is null || target.DeviceId <= 0 || string.IsNullOrWhiteSpace(target.PrinterName)))
+        {
+            return InvalidRequest(context,
+                "当前账号未绑定打印机，请先在「我的打印机」中生成绑定码并完成绑定");
+        }
+
+        PrintBatchDefinition? batch = null;
+        if (useBatch)
+        {
+            var period = recoveryData?.Period ?? DateTime.Now.ToString("yyyyMM");
+            batch = new PrintBatchDefinition
+            {
+                Mode = mode,
+                Category = isRecovery
+                    ? RecoveryPrintDataService.Category
+                    : (data.Classification ?? businessType),
+                Period = period
+            };
+
+            if (!isOpenFolder && template is not null)
+            {
+                var (_, extension) = ResolveFileType(template.FileType);
+                batch.Parts.Add(new PrintBatchPart
+                {
+                    TemplateId = template.Id,
+                    TemplateName = template.Name,
+                    FileName = isRecovery
+                        ? BuildRecoveryFileName(period, recoveryData!.PersonName, extension)
+                        : BuildFileName(template.Name, extension),
+                    Fields = data.Fields,
+                    TableRows = data.TableRows
+                });
+            }
+        }
+
         var jobRequest = new PrintJobRequest
         {
             BusinessType = businessType,
             BusinessId = request.BusinessId,
             Classification = data.Classification,
-            TemplateId = template.Id,
+            TemplateId = useBatch ? null : template!.Id,
             TemplateName = templateName,
             ApplicantName = data.ApplicantName,
             ApplicantIdCard = data.ApplicantIdCard,
@@ -299,14 +410,17 @@ public static class PrintJobEndpoints
             TargetPrinter = target?.PrinterName,
             Copies = Math.Clamp(request.Copies ?? 1, 1, 99),
             IsDuplex = request.IsDuplex ?? false,
-            Fields = data.Fields,
-            TableRows = data.TableRows,
+            Fields = useBatch ? new Dictionary<string, string>(StringComparer.Ordinal) : data.Fields,
+            TableRows = useBatch ? [] : data.TableRows,
             Images = images,
             RequestedBy = user.Id,
             RequestedByName = OperatorName(user),
-            JobKind = mode == "preview"
-                ? PrintJobConstants.JobKindPreview
-                : PrintJobConstants.JobKindTemplate
+            JobKind = useBatch
+                ? PrintJobConstants.JobKindTemplateBatch
+                : mode == "preview"
+                    ? PrintJobConstants.JobKindPreview
+                    : PrintJobConstants.JobKindTemplate,
+            Batch = batch
         };
 
         var enqueueResult = await queue.EnqueueAsync(jobRequest, ct);
@@ -316,7 +430,11 @@ public static class PrintJobEndpoints
         }
 
         var job = enqueueResult.Value;
-        var missingFields = FindMissingFields(configJson, data.Fields, images);
+        var missingFields = useBatch
+            ? (isOpenFolder || template is null
+                ? []
+                : FindMissingFields(configJson, data.Fields, []))
+            : FindMissingFields(configJson, data.Fields, images);
 
         return Results.Json(new PrintJobCreatedResponse(
             job.Id, job.JobNo, job.Status, job.JobKind, missingFields));
@@ -331,6 +449,12 @@ public static class PrintJobEndpoints
             return PermissionCodes.PRINT_ASSETVERIFICATION;
         if (string.Equals(businessType, PrintBusinessTypes.TempRelief, StringComparison.OrdinalIgnoreCase))
             return PermissionCodes.TEMP_VIEW;
+        if (string.Equals(businessType, PrintBusinessTypes.Recovery, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.PRINT_RECOVERY;
+        if (string.Equals(businessType, PrintBusinessTypes.LowIncomeProof, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.PRINT_LOWINCOMEPROOF;
+        if (string.Equals(businessType, PrintBusinessTypes.DeathStatement, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.PRINT_LOWINCOMEPROOF;
         return null;
     }
 
@@ -397,16 +521,16 @@ public static class PrintJobEndpoints
         int? pageIndex,
         int? pageSize)
     {
-        var denied = await EndpointSecurity.RequirePermissionAsync(
-            context, permissions, PermissionCodes.PRINT_FAMILYAPPLICATION, ct);
-        if (denied is not null)
-        {
-            return denied;
-        }
-
         if (context.GetUserId() is not { } userId)
         {
             return Unauthorized(context);
+        }
+
+        var denied = await RequireAnyPermissionAsync(
+            context, permissions, userId, AnyPrintPermissions, ct);
+        if (denied is not null)
+        {
+            return denied;
         }
 
         if (!TryNormalizeStatus(status, out var statusFilter))
@@ -455,13 +579,6 @@ public static class PrintJobEndpoints
         INewPermissionService permissions,
         CancellationToken ct)
     {
-        var denied = await EndpointSecurity.RequirePermissionAsync(
-            context, permissions, PermissionCodes.PRINT_FAMILYAPPLICATION, ct);
-        if (denied is not null)
-        {
-            return denied;
-        }
-
         if (context.GetUserId() is not { } userId)
         {
             return Unauthorized(context);
@@ -482,6 +599,13 @@ public static class PrintJobEndpoints
         if (job is null || job.RequestedBy != userId)
         {
             return NotFound(context, "打印任务不存在");
+        }
+
+        var denied = await RequireJobPermissionAsync(
+            context, permissions, userId, job.BusinessType, ct);
+        if (denied is not null)
+        {
+            return denied;
         }
 
         if (!string.Equals(job.Status, PrintJobConstants.StatusFailed, StringComparison.Ordinal))
@@ -503,13 +627,6 @@ public static class PrintJobEndpoints
         INewPermissionService permissions,
         CancellationToken ct)
     {
-        var denied = await EndpointSecurity.RequirePermissionAsync(
-            context, permissions, PermissionCodes.PRINT_FAMILYAPPLICATION, ct);
-        if (denied is not null)
-        {
-            return denied;
-        }
-
         if (context.GetUserId() is not { } userId)
         {
             return Unauthorized(context);
@@ -530,6 +647,13 @@ public static class PrintJobEndpoints
         if (job is null || job.RequestedBy != userId)
         {
             return NotFound(context, "打印任务不存在");
+        }
+
+        var denied = await RequireJobPermissionAsync(
+            context, permissions, userId, job.BusinessType, ct);
+        if (denied is not null)
+        {
+            return denied;
         }
 
         if (string.Equals(job.Status, PrintJobConstants.StatusProcessing, StringComparison.Ordinal))
@@ -820,6 +944,8 @@ public static class PrintJobEndpoints
         string id,
         HttpContext context,
         ArchivePrintQueueService queue,
+        IRecoveryService recovery,
+        ILoggerService logger,
         CancellationToken ct)
     {
         var (device, error) = await AuthorizeDeviceAsync(context, queue, ct);
@@ -842,7 +968,66 @@ public static class PrintJobEndpoints
         // 老版本 Agent 不带 body（空请求体也允许），只有显式 message 才作为警告回写。
         var warning = await ReadOptionalCompleteMessageAsync(context, ct);
         var result = await queue.CompleteAsync(jobId, warning, ct);
-        return result.IsFailure ? MapResult(context, result) : Results.NoContent();
+        if (result.IsFailure)
+        {
+            return MapResult(context, result);
+        }
+
+        // 追缴文书实际出纸后推进记录状态（预览/保存/打开目录不推进）；失败只记日志不阻断。
+        await TryMarkRecoveryPrintedAsync(owned.Job, recovery, logger, ct);
+        return Results.NoContent();
+    }
+
+    /// <summary>
+    /// 追缴打印完成回调：BusinessType=Recovery 且为实际 print（batch.mode=print / 单模板 JobKind=Template）时，
+    /// 将记录推进到 Printed。幂等重入由 Core 状态机保证。
+    /// </summary>
+    private static async Task TryMarkRecoveryPrintedAsync(
+        PrintJob? job,
+        IRecoveryService recovery,
+        ILoggerService logger,
+        CancellationToken ct)
+    {
+        if (job is null
+            || !string.Equals(job.BusinessType, PrintBusinessTypes.Recovery, StringComparison.OrdinalIgnoreCase)
+            || job.BusinessId is not > 0
+            || !IsPrintOutput(job))
+        {
+            return;
+        }
+
+        var result = await recovery.UpdateRecoveryRecordStatusAsync(
+            job.BusinessId.Value, RecoveryConstants.STATUS_PRINTED, ct);
+        if (result.IsFailure)
+        {
+            logger.Warn(
+                $"追缴记录打印状态回写失败: RecordId={job.BusinessId} {result.ErrorCode} {result.Message}");
+        }
+    }
+
+    /// <summary>是否实际出纸的 print（预览/保存/打开目录均不推进业务状态）。</summary>
+    private static bool IsPrintOutput(PrintJob job)
+    {
+        if (!string.IsNullOrWhiteSpace(job.BatchJson))
+        {
+            try
+            {
+                var batch = System.Text.Json.JsonSerializer.Deserialize<PrintBatchDefinition>(
+                    job.BatchJson,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (batch is not null)
+                {
+                    return string.Equals(batch.Mode, "print", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // 批量快照损坏：按非 print 处理，避免误推进状态
+                return false;
+            }
+        }
+
+        return string.Equals(job.JobKind, PrintJobConstants.JobKindTemplate, StringComparison.Ordinal);
     }
 
     private static async Task<string?> ReadOptionalCompleteMessageAsync(HttpContext context, CancellationToken ct)
@@ -1104,6 +1289,79 @@ public static class PrintJobEndpoints
         return safe + extension;
     }
 
+    /// <summary>追缴批量输出文件名：{yyyyMM}_追缴资金办理单_{姓名}.xlsx（姓名非法字符替换为下划线）。</summary>
+    private static string BuildRecoveryFileName(string period, string? personName, string extension)
+        => $"{period}_追缴资金办理单_{SanitizeFileNameSegment(personName)}{extension}";
+
+    private static string SanitizeFileNameSegment(string? value)
+    {
+        var safe = string.IsNullOrWhiteSpace(value) ? "未命名" : value.Trim();
+        foreach (var invalid in Path.GetInvalidFileNameChars())
+        {
+            safe = safe.Replace(invalid, '_');
+        }
+
+        return safe;
+    }
+
+    /// <summary>任一权限命中即放行（打印任务列表跨业务域）。</summary>
+    private static async Task<IResult?> RequireAnyPermissionAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        int userId,
+        IReadOnlyCollection<string> permissionCodes,
+        CancellationToken ct)
+    {
+        var checks = await permissions.CheckPermissionsAsync(userId, permissionCodes, ct);
+        return checks.Values.Any(granted => granted)
+            ? null
+            : Forbidden(context, "没有权限执行该操作");
+    }
+
+    /// <summary>按任务 businessType 解析对应打印权限；未登记的历史业务类型退化为「任一打印权限」。</summary>
+    private static async Task<IResult?> RequireJobPermissionAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        int userId,
+        string? businessType,
+        CancellationToken ct)
+    {
+        var permissionCode = ResolveJobPermission(businessType);
+        return permissionCode is not null
+            ? await EndpointSecurity.RequirePermissionAsync(context, permissions, permissionCode, ct)
+            : await RequireAnyPermissionAsync(context, permissions, userId, AnyPrintPermissions, ct);
+    }
+
+    /// <summary>打印任务 businessType → 管理/重试权限（与创建端保持同域）。</summary>
+    private static string? ResolveJobPermission(string? businessType)
+    {
+        if (string.IsNullOrWhiteSpace(businessType))
+        {
+            return null;
+        }
+
+        var type = businessType.Trim();
+        if (string.Equals(type, PrintBusinessTypes.FamilyApplication, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.PRINT_FAMILYAPPLICATION;
+        if (string.Equals(type, PrintBusinessTypes.AssetVerification, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.PRINT_ASSETVERIFICATION;
+        if (string.Equals(type, PrintBusinessTypes.AssetVerificationMonthlyReport, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.PRINT_ASSETVERIFICATIONMONTHLYREPORT;
+        if (string.Equals(type, PrintBusinessTypes.TempRelief, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.TEMP_VIEW;
+        if (string.Equals(type, PrintBusinessTypes.Recovery, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.PRINT_RECOVERY;
+        if (string.Equals(type, PrintBusinessTypes.LowIncomeProof, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.PRINT_LOWINCOMEPROOF;
+        if (string.Equals(type, PrintBusinessTypes.DeathStatement, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.PRINT_LOWINCOMEPROOF;
+        if (string.Equals(type, PrintBusinessTypes.ElderlyBenefits, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.ELDERLY_VIEW;
+        if (string.Equals(type, PrintBusinessTypes.NearRelative, StringComparison.OrdinalIgnoreCase))
+            return NearRelativeConstants.PermissionManage;
+        return null;
+    }
+
     private static (string? Start, string? End) ReadTableMarkers(string? configJson)
     {
         if (string.IsNullOrWhiteSpace(configJson))
@@ -1258,7 +1516,11 @@ public sealed record TemplateListItem(
     string FileType,
     int SortOrder);
 
-/// <summary>POST /api/print/jobs 请求体；mode=preview|print（默认 print）。</summary>
+/// <summary>
+/// POST /api/print/jobs 请求体。
+/// mode=preview|print|save|open-folder（默认 print）：preview 预览 / print 出纸 / save 保存文件 / open-folder 打开输出目录。
+/// Recovery 及 save/open-folder 走 TemplateBatch（模板由服务端按分类+名称解析，templateId 可空）。
+/// </summary>
 public sealed record PrintJobCreateRequest(
     string? BusinessType,
     long? BusinessId,

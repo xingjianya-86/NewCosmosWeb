@@ -14,6 +14,7 @@ using NewCosmos.Services.Domain.BankFlow;
 using NewCosmos.Services.Domain.ChangeManagement;
 using NewCosmos.Services.Domain.ElderlyBenefits;
 using NewCosmos.Services.Domain.NearRelative;
+using NewCosmos.Services.Domain.Recovery;
 using NewCosmos.Services.Domain.Reporting;
 using NewCosmos.Services.Domain.SocialAssistance;
 using NewCosmos.Services.Domain.SpecialApproval;
@@ -126,6 +127,11 @@ builder.Services.AddSingleton<IQuickVerifySimulationService, QuickVerifySimulati
 // 月报服务依赖 Scoped 的 IUserService，必须 Scoped（Singleton 无法消费 Scoped）。
 builder.Services.AddScoped<IMonthlyReportService, MonthlyReportService>();
 
+// 后补追缴：业务口径全部在 Core；Server 只做端点/打印装配。
+builder.Services.AddScoped<IRecoveryService, RecoveryService>();
+builder.Services.AddScoped<IRecoveryHistoryProvider, RecoveryHistoryProvider>();
+builder.Services.AddScoped<RecoveryPrintDataService>();
+
 // 低收入人口认定表单：复用 Core 业务服务，禁止在 Server 重抄收入/分类/保障金公式。
 builder.Services.AddSingleton<IPdfVerificationService, PdfVerificationService>();
 builder.Services.AddSingleton<ICapabilityAssessmentService, CapabilityAssessmentService>();
@@ -188,6 +194,7 @@ app.MapCollegeStudentEndpoints();
 app.MapNearRelativeEndpoints();
 app.MapQuickVerifyEndpoints();
 app.MapTempReliefEndpoints();
+app.MapRecoveryEndpoints();
 app.MapChangeManagementEndpoints();
 app.MapMonthlyReportEndpoints();
 app.MapApplicationWorkflowEndpoints();

@@ -59,7 +59,7 @@ const navGroups: NavGroup[] = [
       { label: '家庭经济状况核对', icon: Search, path: '/asset-verification' },
       { label: '救助档案管理', icon: FolderOpened, path: '/coming-soon/archive' },
       { label: '档案制作', icon: Files, path: '/archives/production' },
-      { label: '后补追缴', icon: Money, path: '/coming-soon/recovery' },
+      { label: '后补追缴', icon: Money, path: '/recovery' },
     ],
   },
   {
@@ -114,6 +114,7 @@ const activePath = computed(() => {
     return '/social-assistance'
   }
   if (route.path === '/elderly' || route.path.startsWith('/elderly/')) return '/elderly'
+  if (route.path === '/recovery' || route.path.startsWith('/recovery/')) return '/recovery'
   if (
     route.path === '/asset-verification' ||
     route.path.startsWith('/asset-verification/')
