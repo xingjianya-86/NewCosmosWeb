@@ -89,6 +89,8 @@ builder.Services.AddSingleton<IDatabaseService>(
     provider => provider.GetRequiredService<PostgreSqlDatabaseService>());
 builder.Services.AddSingleton<IUserSessionService, UserSessionService>();
 builder.Services.AddScoped<IUserService, UserService>();
+// 行政区划：无状态缓存 + 单例 DB 依赖，沿用 Core 其它 System 服务的 Singleton 生命周期。
+builder.Services.AddSingleton<IRegionService, RegionService>();
 
 // 权限与数据范围：服务端强制校验，不信任前端。
 builder.Services.AddSingleton<INewPermissionService, NewPermissionService>();
@@ -162,6 +164,7 @@ app.MapApplicationFormEndpoints();
 app.MapElderlyEndpoints();
 app.MapAssetVerificationEndpoints();
 app.MapSystemEndpoints();
+app.MapRegionEndpoints();
 
 if (serverOptions.AutoMigrate)
 {

@@ -3,6 +3,7 @@ import { computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Plus } from '@element-plus/icons-vue'
 import NcCard from '@/components/NcCard.vue'
+import AddressCascader from '@/components/AddressCascader.vue'
 import { formatMoney } from '../format'
 import { createMember, createSupporter } from './formModel'
 import {
@@ -44,6 +45,19 @@ type SupporterRow = ApplicationFormSupporter & {
   monthlyIncomeCapacity?: number | null
   phone?: string | null
   address?: string | null
+}
+
+/**
+ * 共同生活成员地址/疾病字段由后端 DTO 末尾追加，
+ * 共享 types.ts 不在本次改动范围，这里做局部扩展读取。
+ */
+type MemberRow = ApplicationFormMember & {
+  homeProvince: string
+  homeCity: string
+  homeDistrict: string
+  homeTown: string
+  homeVillage: string
+  diseaseCode: string
 }
 
 const members = computed(() => props.form.members)
@@ -138,9 +152,25 @@ function handleSupportAbilityChange(
 }
 
 /** 户主（申请人）信息只在第 1 步维护，旧版共同生活成员列表排除户主。 */
-const visibleMembers = computed(() =>
-  members.value.filter((item) => !item.isHouseholdHead && !item.isApplicant),
+const visibleMembers = computed<MemberRow[]>(() =>
+  members.value.filter((item) => !item.isHouseholdHead && !item.isApplicant) as MemberRow[],
 )
+
+/** 非草稿（已提交/审批中/已通过等）只读，禁用全部输入。 */
+const isReadonly = computed(() => props.form.status !== 'Draft')
+
+/** 只读展示值：空值统一显示“—”。 */
+function displayText(value: string | null | undefined): string {
+  const text = (value ?? '').trim()
+  return text || '—'
+}
+
+/** 选项值 → 中文文案；字典外的值原样显示。 */
+function optionText(options: { label: string; value: string }[], value: string | null | undefined): string {
+  const raw = (value ?? '').trim()
+  if (!raw) return '—'
+  return options.find((item) => item.value === raw)?.label ?? raw
+}
 
 const duplicateIdCards = computed<Set<string>>(() => {
   const counts = new Map<string, number>()
@@ -200,19 +230,6 @@ function memberIdIssue(member: ApplicationFormMember): string {
   if (error) return error
   if (duplicateIdCards.value.has(idCard)) return '身份证号与家庭其他成员重复'
   return ''
-}
-
-function setLaborAbility(member: ApplicationFormMember, value: string): void {
-  member.isLaborExempt = value === 'none'
-}
-
-function handleDisabilityTypeChange(member: ApplicationFormMember, value: string): void {
-  member.hasDisability = Boolean(value)
-  if (!value) member.disabilityLevel = ''
-}
-
-function handleDiseaseInput(member: ApplicationFormMember): void {
-  member.isSevereDisease = Boolean(member.diseaseName.trim())
 }
 
 function addMember(): void {
@@ -368,7 +385,7 @@ onMounted(() => {
             <div class="member-grid">
               <label class="field">
                 <span class="field__label">姓名 <i>*</i></span>
-                <el-input v-model="member.name" maxlength="30" placeholder="请输入成员姓名" clearable />
+                <el-input v-model="member.name" maxlength="30" placeholder="请输入成员姓名" clearable :disabled="isReadonly" />
               </label>
 
               <label class="field" :class="{ 'field--error': Boolean(memberIdIssue(member)) }">
@@ -378,13 +395,14 @@ onMounted(() => {
                   maxlength="18"
                   placeholder="请输入 18 位身份证号"
                   clearable
+                  :disabled="isReadonly"
                   @blur="handleMemberIdBlur(member)"
                 />
               </label>
 
               <label class="field">
                 <span class="field__label">与户主关系</span>
-                <el-select v-model="member.relation" filterable allow-create default-first-option>
+                <el-select v-model="member.relation" filterable allow-create default-first-option :disabled="isReadonly">
                   <el-option
                     v-for="item in RELATION_OPTIONS"
                     :key="item.value"
@@ -396,7 +414,7 @@ onMounted(() => {
 
               <label class="field">
                 <span class="field__label">性别</span>
-                <el-select v-model="member.gender" clearable placeholder="身份证自动带出">
+                <el-select v-model="member.gender" clearable placeholder="身份证自动带出" :disabled="isReadonly">
                   <el-option
                     v-for="item in GENDER_OPTIONS"
                     :key="item.value"
@@ -413,6 +431,7 @@ onMounted(() => {
                   type="date"
                   value-format="YYYY-MM-DD"
                   placeholder="请选择出生日期"
+                  :disabled="isReadonly"
                   @change="handleBirthDateChange(member)"
                 />
               </label>
@@ -425,13 +444,14 @@ onMounted(() => {
                   :max="130"
                   :controls="false"
                   placeholder="岁"
+                  :disabled="isReadonly"
                   @update:model-value="member.age = $event ?? null"
                 />
               </label>
 
               <label class="field">
                 <span class="field__label">民族</span>
-                <el-select v-model="member.ethnicity" filterable allow-create default-first-option clearable>
+                <el-select v-model="member.ethnicity" filterable allow-create default-first-option clearable :disabled="isReadonly">
                   <el-option
                     v-for="item in ETHNICITY_OPTIONS"
                     :key="item.value"
@@ -450,6 +470,7 @@ onMounted(() => {
                   default-first-option
                   clearable
                   placeholder="请选择或输入文化程度"
+                  :disabled="isReadonly"
                 >
                   <el-option
                     v-for="item in EDUCATION_LEVEL_OPTIONS"
@@ -469,6 +490,7 @@ onMounted(() => {
                   default-first-option
                   clearable
                   placeholder="请选择或输入婚姻状况"
+                  :disabled="isReadonly"
                 >
                   <el-option
                     v-for="item in MARITAL_STATUS_OPTIONS"
@@ -488,6 +510,7 @@ onMounted(() => {
                   default-first-option
                   clearable
                   placeholder="请选择或输入政治面貌"
+                  :disabled="isReadonly"
                 >
                   <el-option
                     v-for="item in POLITICAL_STATUS_OPTIONS"
@@ -500,12 +523,12 @@ onMounted(() => {
 
               <label class="field">
                 <span class="field__label">联系电话</span>
-                <el-input v-model="member.phone" maxlength="20" placeholder="请输入手机号或固定电话" clearable />
+                <el-input v-model="member.phone" maxlength="20" placeholder="请输入手机号或固定电话" clearable :disabled="isReadonly" />
               </label>
 
               <label class="field">
                 <span class="field__label">户口性质</span>
-                <el-select v-model="member.hukouType" placeholder="请选择户口性质">
+                <el-select v-model="member.hukouType" placeholder="请选择户口性质" :disabled="isReadonly">
                   <el-option
                     v-for="item in HUKOU_TYPE_OPTIONS"
                     :key="item.value"
@@ -519,82 +542,114 @@ onMounted(() => {
           </section>
 
           <section class="member-section">
-            <h4 class="member-section__title">健康、就业与收入</h4>
+            <h4 class="member-section__title">家庭住址</h4>
+            <div class="member-grid">
+              <div class="field field--full">
+                <AddressCascader
+                  :province="member.homeProvince ?? ''"
+                  :city="member.homeCity ?? ''"
+                  :district="member.homeDistrict ?? ''"
+                  :town="member.homeTown ?? ''"
+                  :village="member.homeVillage ?? ''"
+                  :disabled="isReadonly"
+                  @update:province="member.homeProvince = $event"
+                  @update:city="member.homeCity = $event"
+                  @update:district="member.homeDistrict = $event"
+                  @update:town="member.homeTown = $event"
+                  @update:village="member.homeVillage = $event"
+                />
+              </div>
+
+              <label class="field field--full">
+                <span class="field__label">详细地址</span>
+                <el-input
+                  v-model="member.homeAddress"
+                  maxlength="120"
+                  placeholder="请输入详细地址（门牌号、楼栋等）"
+                  clearable
+                  :disabled="isReadonly"
+                />
+              </label>
+            </div>
+          </section>
+
+          <section class="member-section">
+            <h4 class="member-section__title">户籍地址</h4>
+            <div class="member-grid">
+              <label class="field">
+                <span class="field__label">省份</span>
+                <el-input
+                  :model-value="displayText(props.form.basic.hukouProvince)"
+                  readonly
+                  class="field--readonly"
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">城市</span>
+                <el-input
+                  :model-value="displayText(props.form.basic.hukouCity)"
+                  readonly
+                  class="field--readonly"
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">区县</span>
+                <el-input
+                  :model-value="displayText(props.form.basic.hukouDistrict)"
+                  readonly
+                  class="field--readonly"
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">乡镇</span>
+                <el-input
+                  :model-value="displayText(props.form.basic.hukouTown)"
+                  readonly
+                  class="field--readonly"
+                  :disabled="isReadonly"
+                />
+              </label>
+            </div>
+            <p class="field-note">户籍地址与户主一致，请在第 1 步修改。</p>
+          </section>
+
+          <section class="member-section">
+            <h4 class="member-section__title">健康与残疾信息</h4>
             <div class="member-grid">
               <label class="field">
                 <span class="field__label">健康状态</span>
-                <el-select v-model="member.healthStatus" filterable allow-create default-first-option>
-                  <el-option
-                    v-for="item in HEALTH_STATUS_OPTIONS"
-                    :key="item.value"
-                    :label="item.label"
-                    :value="item.value"
-                  />
-                </el-select>
-              </label>
-
-              <label class="field">
-                <span class="field__label">就业状态</span>
-                <el-select
-                  v-model="member.employmentStatus"
-                  filterable
-                  allow-create
-                  default-first-option
-                  clearable
-                  placeholder="请选择或输入就业状态"
-                >
-                  <el-option
-                    v-for="item in EMPLOYMENT_STATUS_OPTIONS"
-                    :key="item.value"
-                    :label="item.label"
-                    :value="item.value"
-                  />
-                </el-select>
-              </label>
-
-              <label class="field">
-                <span class="field__label">劳动能力</span>
-                <el-select
-                  :model-value="member.isLaborExempt ? 'none' : 'full'"
-                  @change="setLaborAbility(member, $event)"
-                >
-                  <el-option label="有劳动能力" value="full" />
-                  <el-option label="无劳动能力" value="none" />
-                </el-select>
+                <el-input
+                  :model-value="optionText(HEALTH_STATUS_OPTIONS, member.healthStatus)"
+                  readonly
+                  class="field--readonly"
+                  :disabled="isReadonly"
+                />
               </label>
 
               <label class="field">
                 <span class="field__label">残疾类型</span>
-                <el-select
-                  v-model="member.disabilityType"
-                  clearable
-                  placeholder="无残疾可留空"
-                  @change="handleDisabilityTypeChange(member, $event)"
-                >
-                  <el-option
-                    v-for="item in DISABILITY_TYPE_OPTIONS"
-                    :key="item.value"
-                    :label="item.label"
-                    :value="item.value"
-                  />
-                </el-select>
+                <el-input
+                  :model-value="optionText(DISABILITY_TYPE_OPTIONS, member.disabilityType)"
+                  readonly
+                  class="field--readonly"
+                  :disabled="isReadonly"
+                />
               </label>
 
               <label class="field">
                 <span class="field__label">残疾等级</span>
-                <el-select
-                  v-model="member.disabilityLevel"
-                  clearable
-                  :disabled="!member.hasDisability"
-                  placeholder="无残疾可留空"
-                >
-                  <el-option
-                    v-for="item in DISABILITY_LEVEL_OPTIONS"
-                    :key="item.value"
-                    :label="item.label"
-                    :value="item.value"
-                  />
-                </el-select>
+                <el-input
+                  :model-value="optionText(DISABILITY_LEVEL_OPTIONS, member.disabilityLevel)"
+                  readonly
+                  class="field--readonly"
+                  :disabled="isReadonly"
+                />
               </label>
 
               <label class="field">
@@ -604,29 +659,36 @@ onMounted(() => {
                   maxlength="30"
                   placeholder="无残疾可留空"
                   clearable
+                  :disabled="isReadonly"
                 />
               </label>
 
+              <label class="field field--switch">
+                <span class="field__label">是否重病</span>
+                <el-checkbox v-model="member.isSevereDisease" :disabled="isReadonly" />
+              </label>
+
               <label class="field">
-                <span class="field__label">重病病种</span>
+                <span class="field__label">疾病编码（ICD-10）</span>
                 <el-input
-                  v-model="member.diseaseName"
-                  maxlength="60"
-                  placeholder="无重病可留空"
+                  v-model="member.diseaseCode"
+                  maxlength="20"
+                  placeholder="如 A00.900"
                   clearable
-                  @input="handleDiseaseInput(member)"
+                  :disabled="isReadonly"
                 />
               </label>
 
               <label class="field">
-                <span class="field__label">疾病分类</span>
+                <span class="field__label">一级疾病</span>
                 <el-select
                   v-model="member.diseaseCategory"
                   filterable
                   allow-create
                   default-first-option
                   clearable
-                  placeholder="请选择或输入疾病分类"
+                  placeholder="请选择或输入一级疾病"
+                  :disabled="isReadonly"
                 >
                   <el-option
                     v-for="item in DISEASE_CATEGORY_OPTIONS"
@@ -638,20 +700,69 @@ onMounted(() => {
               </label>
 
               <label class="field">
-                <span class="field__label">前 12 个月医疗自付（元）</span>
+                <span class="field__label">二级疾病</span>
+                <el-input
+                  v-model="member.diseaseName"
+                  maxlength="60"
+                  placeholder="输入疾病编码自动带出，可手工修改"
+                  clearable
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">前 12 个月个人医疗自付累计（元）</span>
                 <el-input-number
                   :model-value="member.medicalSelfPaid12m"
                   :min="0"
                   :precision="2"
                   :controls="false"
                   placeholder="0.00"
+                  :disabled="isReadonly"
                   @update:model-value="member.medicalSelfPaid12m = $event ?? null"
                 />
               </label>
 
+              <div class="field field--full">
+                <el-checkbox v-model="member.isLaborExempt" :disabled="isReadonly">
+                  因照顾重病重残亲属，免于劳动力判定
+                </el-checkbox>
+              </div>
+            </div>
+          </section>
+
+          <section class="member-section">
+            <h4 class="member-section__title">就业与收入</h4>
+            <div class="member-grid">
+              <label class="field">
+                <span class="field__label">就业状态</span>
+                <el-select
+                  v-model="member.employmentStatus"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入就业状态"
+                  :disabled="isReadonly"
+                >
+                  <el-option
+                    v-for="item in EMPLOYMENT_STATUS_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
               <label class="field">
                 <span class="field__label">工作单位</span>
-                <el-input v-model="member.workUnit" maxlength="60" placeholder="无工作单位可留空" clearable />
+                <el-input
+                  v-model="member.workUnit"
+                  maxlength="60"
+                  placeholder="无工作单位可留空"
+                  clearable
+                  :disabled="isReadonly"
+                />
               </label>
 
               <label class="field">
@@ -662,32 +773,8 @@ onMounted(() => {
                   :precision="2"
                   :controls="false"
                   placeholder="0.00"
+                  :disabled="isReadonly"
                   @update:model-value="member.monthlyIncomeCapacity = $event ?? null"
-                />
-              </label>
-            </div>
-          </section>
-
-          <section class="member-section">
-            <h4 class="member-section__title">户籍与居住地址</h4>
-            <div class="member-grid">
-              <label class="field field--full">
-                <span class="field__label">户籍地址</span>
-                <el-input
-                  v-model="member.hukouAddress"
-                  maxlength="120"
-                  placeholder="请输入户籍所在地址"
-                  clearable
-                />
-              </label>
-
-              <label class="field field--full">
-                <span class="field__label">现居住地址</span>
-                <el-input
-                  v-model="member.homeAddress"
-                  maxlength="120"
-                  placeholder="请输入现居住地址"
-                  clearable
                 />
               </label>
             </div>
@@ -705,6 +792,7 @@ onMounted(() => {
                   default-first-option
                   clearable
                   placeholder="请选择或输入人员类型"
+                  :disabled="isReadonly"
                 >
                   <el-option
                     v-for="item in PERSON_TYPE_OPTIONS"
@@ -722,6 +810,7 @@ onMounted(() => {
                   active-text="是"
                   inactive-text="否"
                   inline-prompt
+                  :disabled="isReadonly"
                 />
               </label>
 
@@ -734,6 +823,7 @@ onMounted(() => {
                   default-first-option
                   clearable
                   placeholder="请选择或输入自理能力"
+                  :disabled="isReadonly"
                 >
                   <el-option
                     v-for="item in SELF_CARE_ABILITY_OPTIONS"
@@ -1030,6 +1120,23 @@ onMounted(() => {
 
 .field--switch {
   justify-content: flex-end;
+}
+
+/** 户籍地址/健康状态等只读展示：与旧版灰色只读输入框一致。 */
+.field--readonly :deep(.el-input__wrapper) {
+  background-color: var(--nc-paper-3);
+}
+
+.field--readonly :deep(.el-input__inner) {
+  color: var(--nc-ink-2);
+  -webkit-text-fill-color: var(--nc-ink-2);
+}
+
+.field-note {
+  margin: 9px 0 0;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
+  line-height: 1.6;
 }
 
 .field :deep(.el-select),

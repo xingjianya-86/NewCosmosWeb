@@ -6,8 +6,9 @@ namespace NewCosmos.Server.Contracts;
 
 /// <summary>
 /// 表单基本信息（Step1）。字段名与 web/src/views/applications/form/types.ts 保持一致；
-/// 主表没有独立的户籍省/市/区/镇列，保存时合并进 hukou_address，读取时统一放在
-/// hukou_detail_address 中回填（户籍分级字段返回空串）。
+/// 主表没有 hukou_province/hukou_city 等**名称**列，只有 hukou_address 与
+/// hukou_city_id/hukou_county_id/hukou_town_id/hukou_village_id；保存时名称合并进
+/// hukou_address、并按名称解析 ID 写入，读取时由 Service 反解为省/市/区/镇/村 + 详细地址。
 /// </summary>
 public sealed record ApplicationFormBasicDto(
     string HukouType,
@@ -41,7 +42,13 @@ public sealed record ApplicationFormBasicDto(
     string DiseaseName,
     string DisabilityType,
     string DisabilityLevel,
-    decimal? MedicalSelfPaid12m);
+    decimal? MedicalSelfPaid12m,
+    // 2026-11 地址级联/疾病补全：新增字段一律追加在末尾并带默认值，保持旧客户端反序列化兼容。
+    // DiseaseCategory = 一级疾病（落 disease_name），SecondaryDiseaseName = 二级疾病（落 secondary_disease_name）。
+    string? DiseaseCode = null,
+    string? DiseaseCategory = null,
+    string? SecondaryDiseaseName = null,
+    bool IsSevereDisease = false);
 
 /// <summary>家庭成员（Step2）。id=0 表示新增；birthDate 使用 yyyy-MM-dd。</summary>
 public sealed record ApplicationFormMemberDto(
@@ -80,7 +87,21 @@ public sealed record ApplicationFormMemberDto(
     string DisabilityCertificateNo,
     string PersonType,
     bool IsSingleRescue,
-    string SelfCareAbility);
+    string SelfCareAbility,
+    // 2026-11 地址级联/疾病补全：追加在末尾并带默认值，保持旧客户端兼容。
+    // 注意 DiseaseCategory=一级疾病（落 disease_name），DiseaseName=二级疾病（落 secondary_disease）；
+    // 成员表没有 hukou_village 列，故这里也不提供 HukouVillage。
+    string? DiseaseCode = null,
+    string? SecondaryDiseaseName = null,
+    string? HomeProvince = null,
+    string? HomeCity = null,
+    string? HomeDistrict = null,
+    string? HomeTown = null,
+    string? HomeVillage = null,
+    string? HukouProvince = null,
+    string? HukouCity = null,
+    string? HukouDistrict = null,
+    string? HukouTown = null);
 
 /// <summary>
 /// 赡养/抚养/扶养义务人（Step3）。

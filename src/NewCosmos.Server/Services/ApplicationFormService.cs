@@ -9,6 +9,7 @@ using NewCosmos.Server.Infrastructure;
 using NewCosmos.Services.Core;
 using NewCosmos.Services.Database;
 using NewCosmos.Services.Domain.SocialAssistance;
+using NewCosmos.Services.System;
 
 namespace NewCosmos.Server.Services;
 
@@ -42,6 +43,7 @@ public sealed class ApplicationFormService(
     ILandContractService landContracts,
     DataScopeFilterBuilder dataScope,
     IDatabaseService database,
+    IRegionService regions,
     ILoggerService logger)
 {
     private static readonly CultureInfo DateCulture = CultureInfo.InvariantCulture;
@@ -105,14 +107,17 @@ public sealed class ApplicationFormService(
         // 年赡养费乘数 = 申请表家庭人口；主表 family_size 尚未回填时按成员行现算。
         var familySize = ResolveApplicationFamilySize(app.FamilySize, members);
 
+        // 地址分级列（户籍/现住）在主表只有 ID 或合并文本；先统一反解，成员回填可复用。
+        var basicDto = await ToBasicDtoAsync(app, ct);
+
         var dto = new ApplicationFormDto(
             app.Id,
             app.ApplicationNo ?? string.Empty,
             app.Status ?? string.Empty,
             ApplicationQueryService.ToStatusText(app.Status),
             app.CurrentStep,
-            ToBasicDto(app),
-            members.Select(ToMemberDto).ToList(),
+            basicDto,
+            members.Select(m => ToMemberDto(m, basicDto)).ToList(),
             (supportersResult.Value ?? [])
                 .Select(supporter => ToSupporterDto(supporter, familySize))
                 .ToList(),
@@ -145,6 +150,8 @@ public sealed class ApplicationFormService(
         if (request.Basic is { } basic)
         {
             ApplyBasic(application, basic);
+            // 主表只有 hukou_*_id 与 city_id/county_id/... 等 ID 列：按名称解析后一并落库。
+            await ApplyAddressIdsAsync(application, basic, ct);
         }
         ApplyHeadMemberToApplication(application, members);
         ApplyEconomy(application, request.Economy, familySize, alimonyAnnual, totals);
@@ -251,6 +258,7 @@ public sealed class ApplicationFormService(
         if (request.Basic is { } basic)
         {
             ApplyBasic(application, basic);
+            await ApplyAddressIdsAsync(application, basic, ct);
         }
         if (request.Members is { } updateMembers)
         {
@@ -1302,7 +1310,13 @@ public sealed class ApplicationFormService(
         application.MaritalStatus = ToCoreMaritalStatus(basic.MaritalStatus);
         application.PoliticalStatus = ToCorePoliticalStatus(basic.PoliticalStatus);
         application.HealthStatus = ToCoreHealthStatus(basic.HealthStatus);
-        application.DiseaseName = basic.DiseaseName ?? string.Empty;
+        // 疾病口径（与 Core ClassificationService 的主表快照一致）：
+        // disease_name = 一级分类 DiseaseCategory，secondary_disease_name = 二级疾病。
+        // DiseaseName 仍兼容旧前端（只传 diseaseName 表示二级疾病）。
+        application.DiseaseCode = basic.DiseaseCode ?? string.Empty;
+        application.DiseaseName = basic.DiseaseCategory ?? string.Empty;
+        application.SecondaryDiseaseName = FirstNonEmpty(basic.SecondaryDiseaseName, basic.DiseaseName);
+        application.IsSevereDisease = basic.IsSevereDisease;
         application.DisabilityType = ToCoreDisabilityType(basic.DisabilityType);
         application.DisabilityLevel = ToCoreDisabilityLevel(basic.DisabilityLevel);
         application.MedicalSelfPaid12m = basic.MedicalSelfPaid12m;
@@ -1345,8 +1359,29 @@ public sealed class ApplicationFormService(
         application.HealthStatus = ToCoreHealthStatus(head.HealthStatus);
         application.DisabilityType = ToCoreDisabilityType(head.DisabilityType);
         application.DisabilityLevel = ToCoreDisabilityLevel(head.DisabilityLevel);
-        application.DiseaseName = head.DiseaseName ?? string.Empty;
-        application.IsSevereDisease = head.IsSevereDisease;
+        // 户主卡疾病与 Step1 同源：一级→disease_name，二级→secondary_disease_name。
+        // Step1 是权威：只有主表为空时才用户主卡补空，避免户主行旧值覆盖 Step1 新值。
+        if (string.IsNullOrWhiteSpace(application.DiseaseName)
+            && !string.IsNullOrWhiteSpace(head.DiseaseCategory))
+        {
+            application.DiseaseName = head.DiseaseCategory.Trim();
+        }
+        var headSecondary = FirstNonEmpty(head.SecondaryDiseaseName, head.DiseaseName);
+        if (string.IsNullOrWhiteSpace(application.SecondaryDiseaseName) && headSecondary.Length > 0)
+        {
+            application.SecondaryDiseaseName = headSecondary;
+        }
+        if (string.IsNullOrWhiteSpace(application.DiseaseCode)
+            && !string.IsNullOrWhiteSpace(head.DiseaseCode))
+        {
+            application.DiseaseCode = head.DiseaseCode.Trim();
+        }
+        if (string.IsNullOrWhiteSpace(application.DiseaseName)
+            && string.IsNullOrWhiteSpace(application.SecondaryDiseaseName)
+            && string.IsNullOrWhiteSpace(application.DiseaseCode))
+        {
+            application.IsSevereDisease = head.IsSevereDisease;
+        }
 
         // Step2 户主卡与 Step1 共用同一人：户主卡有值的新增字段回写主表，
         // 避免“只在成员卡修改”时因户主行不参与全删全插而丢失。
@@ -1502,8 +1537,34 @@ public sealed class ApplicationFormService(
 
     // ───────────────────────────── 成员/赡养人映射 ─────────────────────────────
 
-    private static ApplicationFormMemberDto ToMemberDto(FamilyMember member)
-        => new(
+    /// <summary>
+    /// 成员回填。疾病口径：成员表 disease_name 存一级分类、secondary_disease 存二级疾病
+    /// （见 FamilyMemberService.UpsertHouseholdHeadFromApplicationAsync 的主表→成员同步）；
+    /// 旧数据只有 disease_category/disease_name 时按旧语义兜底，避免历史值丢失。
+    /// 成员表没有 hukou_village 列，户籍村/社区不单独回填。
+    /// </summary>
+    private static ApplicationFormMemberDto ToMemberDto(
+        FamilyMember member,
+        ApplicationFormBasicDto? basic)
+    {
+        // 新数据：disease_category 与 disease_name 同为一级、secondary_disease 为二级；
+        // 旧数据：disease_category=一级、disease_name=二级、secondary_disease 为空。
+        // 两者都按“一级→DiseaseCategory、二级→DiseaseName/SecondaryDiseaseName”归一，不反向。
+        var category = string.IsNullOrWhiteSpace(member.DiseaseCategory)
+            ? (member.DiseaseName ?? string.Empty).Trim()
+            : member.DiseaseCategory.Trim();
+        var secondary = (member.SecondaryDisease ?? string.Empty).Trim();
+        if (secondary.Length == 0
+            && !string.IsNullOrWhiteSpace(member.DiseaseCategory)
+            && !string.IsNullOrWhiteSpace(member.DiseaseName)
+            && !string.Equals(member.DiseaseCategory.Trim(), member.DiseaseName.Trim(),
+                StringComparison.Ordinal))
+        {
+            // 旧版行：disease_category=一级、disease_name=二级；仅在两者不同时兜底。
+            secondary = member.DiseaseName.Trim();
+        }
+
+        return new(
             member.Id,
             member.Name ?? string.Empty,
             member.IdCard ?? string.Empty,
@@ -1526,7 +1587,7 @@ public sealed class ApplicationFormService(
             member.IsDisabled,
             ToFormDisabilityType(member.DisabilityType),
             ToFormDisabilityLevel(member.DisabilityLevel),
-            member.DiseaseName ?? string.Empty,
+            secondary,
             member.IsSevereDisease,
             member.IsLaborExempt,
             ToFormEducationLevel(member.EducationLevel),
@@ -1534,12 +1595,26 @@ public sealed class ApplicationFormService(
             ToFormPoliticalStatus(member.PoliticalStatus),
             member.HukouAddress ?? string.Empty,
             member.HomeAddress ?? string.Empty,
-            member.DiseaseCategory ?? string.Empty,
+            category,
             member.MedicalSelfPaid12m,
             member.DisabilityCertificateNo ?? string.Empty,
             member.PersonType ?? string.Empty,
             member.IsSingleRescue,
-            member.SelfCareAbility ?? string.Empty);
+            member.SelfCareAbility ?? string.Empty,
+            member.DiseaseCode ?? string.Empty,
+            secondary,
+            member.HomeProvince ?? string.Empty,
+            member.HomeCity ?? string.Empty,
+            member.HomeDistrict ?? string.Empty,
+            member.HomeTown ?? string.Empty,
+            member.HomeVillage ?? string.Empty,
+            // 共同生活成员的户籍分级在保存时按申请人户籍写入；主表有值时以成员列为准，
+            // 空值回落到申请人户籍，避免户主行同步后显示空白。
+            FirstNonEmpty(member.HukouProvince, basic?.HukouProvince),
+            FirstNonEmpty(member.HukouCity, basic?.HukouCity),
+            FirstNonEmpty(member.HukouDistrict, basic?.HukouDistrict),
+            FirstNonEmpty(member.HukouTown, basic?.HukouTown));
+    }
 
     /// <summary>
     /// 赡养人回填。年费 = 月费 × 月数 × 申请表家庭人口（familySize 参数）；
@@ -1605,7 +1680,11 @@ public sealed class ApplicationFormService(
                 || disabilityLevel.Length > 0,
             DisabilityType = disabilityType,
             DisabilityLevel = disabilityLevel,
-            DiseaseName = member.DiseaseName ?? string.Empty,
+            // 成员表 disease_name=一级分类（DiseaseCategory），secondary_disease=二级疾病；
+            // DiseaseName 字段继续承载二级，兼容旧前端（旧前端只传 diseaseName）。
+            DiseaseName = member.DiseaseCategory ?? string.Empty,
+            SecondaryDiseaseName = FirstNonEmpty(member.SecondaryDiseaseName, member.DiseaseName),
+            DiseaseCode = member.DiseaseCode ?? string.Empty,
             IsSevereDisease = member.IsSevereDisease,
             IsLaborExempt = member.IsLaborExempt,
             EducationLevel = ToCoreEducationLevel(member.EducationLevel),
@@ -1615,6 +1694,11 @@ public sealed class ApplicationFormService(
             MedicalSelfPaid12m = member.MedicalSelfPaid12m,
             DisabilityCertificateNo = member.DisabilityCertificateNo ?? string.Empty,
             PersonType = member.PersonType ?? string.Empty,
+            HomeProvince = member.HomeProvince ?? string.Empty,
+            HomeCity = member.HomeCity ?? string.Empty,
+            HomeDistrict = member.HomeDistrict ?? string.Empty,
+            HomeTown = member.HomeTown ?? string.Empty,
+            HomeVillage = member.HomeVillage ?? string.Empty,
             HomeAddress = member.HomeAddress ?? string.Empty,
             IsHouseholdHead = false,
             MemberCategory = MemberCategoryConstants.SHARED_LIVING,
@@ -1626,22 +1710,23 @@ public sealed class ApplicationFormService(
             IsSupportAbility = true
         };
 
-        // 成员户籍分级仍沿用主申请人户籍；成员可覆盖完整户籍地址（前端 member.hukouAddress）。
+        // 成员户籍分级：优先成员自己的级联值，缺失时按旧版沿用申请人户籍（共同生活成员口径）。
         var memberHukouAddress = (member.HukouAddress ?? string.Empty).Trim();
-        if (basic is not null)
-        {
-            createRequest.HukouProvince = basic.HukouProvince ?? string.Empty;
-            createRequest.HukouCity = basic.HukouCity ?? string.Empty;
-            createRequest.HukouDistrict = basic.HukouDistrict ?? string.Empty;
-            createRequest.HukouTown = basic.HukouTown ?? string.Empty;
-            createRequest.HukouAddress = memberHukouAddress.Length > 0
-                ? memberHukouAddress
-                : ComposeHukouAddress(basic);
-        }
-        else if (memberHukouAddress.Length > 0)
-        {
-            createRequest.HukouAddress = memberHukouAddress;
-        }
+        createRequest.HukouProvince = FirstNonEmpty(member.HukouProvince, basic?.HukouProvince);
+        createRequest.HukouCity = FirstNonEmpty(member.HukouCity, basic?.HukouCity);
+        createRequest.HukouDistrict = FirstNonEmpty(member.HukouDistrict, basic?.HukouDistrict);
+        createRequest.HukouTown = FirstNonEmpty(member.HukouTown, basic?.HukouTown);
+        // 成员表无 hukou_village 列，village 只在完整地址文本里体现。
+        var hukouDetail = memberHukouAddress.Length > 0
+            ? memberHukouAddress
+            : (basic?.HukouDetailAddress ?? string.Empty).Trim();
+        createRequest.HukouAddress = ComposeRegionAddress(
+            new[]
+            {
+                createRequest.HukouProvince, createRequest.HukouCity,
+                createRequest.HukouDistrict, createRequest.HukouTown
+            },
+            hukouDetail);
 
         return createRequest;
     }
@@ -1686,9 +1771,17 @@ public sealed class ApplicationFormService(
         }
         request.MedicalSelfPaid12m ??= existing.MedicalSelfPaid12m;
 
+        // 表单已建模的列：本次为空才沿用旧值，有值以请求为准（否则新增的疾病二级/编码会被旧值覆盖）。
+        if (string.IsNullOrWhiteSpace(request.SecondaryDiseaseName))
+        {
+            request.SecondaryDiseaseName = existing.SecondaryDisease;
+        }
+        if (string.IsNullOrWhiteSpace(request.DiseaseCode))
+        {
+            request.DiseaseCode = existing.DiseaseCode;
+        }
+
         // 表单未建模的列仍原样沿用，避免全删全插静默丢失。
-        request.SecondaryDiseaseName = existing.SecondaryDisease;
-        request.DiseaseCode = existing.DiseaseCode;
         request.WorkCapacity = existing.WorkCapacity;
         request.FamilySize = existing.FamilySize;
         request.AnnualSupportFee = existing.AnnualSupportFee;
@@ -1699,8 +1792,17 @@ public sealed class ApplicationFormService(
         if (string.IsNullOrWhiteSpace(request.HukouProvince))
         {
             request.HukouProvince = existing.HukouProvince;
+        }
+        if (string.IsNullOrWhiteSpace(request.HukouCity))
+        {
             request.HukouCity = existing.HukouCity;
+        }
+        if (string.IsNullOrWhiteSpace(request.HukouDistrict))
+        {
             request.HukouDistrict = existing.HukouDistrict;
+        }
+        if (string.IsNullOrWhiteSpace(request.HukouTown))
+        {
             request.HukouTown = existing.HukouTown;
         }
         if (string.IsNullOrWhiteSpace(request.HukouAddress))
@@ -1708,11 +1810,27 @@ public sealed class ApplicationFormService(
             request.HukouAddress = existing.HukouAddress;
         }
 
-        request.HomeProvince = existing.HomeProvince;
-        request.HomeCity = existing.HomeCity;
-        request.HomeDistrict = existing.HomeDistrict;
-        request.HomeTown = existing.HomeTown;
-        request.HomeVillage = existing.HomeVillage;
+        // 现住址已建模：逐级按“本次为空则沿用旧值”，否则新增的级联选择会被旧值覆盖。
+        if (string.IsNullOrWhiteSpace(request.HomeProvince))
+        {
+            request.HomeProvince = existing.HomeProvince;
+        }
+        if (string.IsNullOrWhiteSpace(request.HomeCity))
+        {
+            request.HomeCity = existing.HomeCity;
+        }
+        if (string.IsNullOrWhiteSpace(request.HomeDistrict))
+        {
+            request.HomeDistrict = existing.HomeDistrict;
+        }
+        if (string.IsNullOrWhiteSpace(request.HomeTown))
+        {
+            request.HomeTown = existing.HomeTown;
+        }
+        if (string.IsNullOrWhiteSpace(request.HomeVillage))
+        {
+            request.HomeVillage = existing.HomeVillage;
+        }
         if (string.IsNullOrWhiteSpace(request.HomeAddress))
         {
             request.HomeAddress = existing.HomeAddress;
@@ -1739,28 +1857,60 @@ public sealed class ApplicationFormService(
 
     // ───────────────────────────── DTO 映射 ─────────────────────────────
 
-    private static ApplicationFormBasicDto ToBasicDto(ApplicationEntity app)
-        => new(
+    /// <summary>
+    /// 基本信息回填。地址分级在主表并非全量文本列：
+    /// 户籍只有 hukou_address + hukou_*_id，现住有 province/city/district/town/community + *_id。
+    /// 先按 ID 取名称，再按 nc_regions_* 名称从合并地址里拆分补齐；拆不出就整段留在详细地址。
+    /// </summary>
+    private async Task<ApplicationFormBasicDto> ToBasicDtoAsync(
+        ApplicationEntity app,
+        CancellationToken ct)
+    {
+        var hukou = await ResolveStoredAddressAsync(
+            app.HukouCityId,
+            app.HukouCountyId,
+            app.HukouTownId,
+            app.HukouVillageId,
+            string.Empty, string.Empty, string.Empty, string.Empty, string.Empty,
+            app.HukouAddress,
+            ct);
+
+        var home = await ResolveStoredAddressAsync(
+            app.CityId,
+            app.CountyId,
+            app.TownId,
+            app.VillageId,
+            app.Province,
+            app.City,
+            app.District,
+            app.Town,
+            FirstNonEmpty(app.Community, app.Village),
+            app.Address,
+            ct);
+
+        // disease_name=一级分类、secondary_disease_name=二级疾病（与 Core 主表快照一致）。
+        var diseaseCategory = app.DiseaseName ?? string.Empty;
+        var secondaryDisease = app.SecondaryDiseaseName ?? string.Empty;
+
+        return new ApplicationFormBasicDto(
             app.HukouType ?? string.Empty,
             app.ApplicantName ?? string.Empty,
             app.ApplicantIdCard ?? string.Empty,
             NormalizeGender(app.Gender),
             app.Ethnicity ?? string.Empty,
             app.ApplicantPhone ?? string.Empty,
-            // 主表只有 hukou_address 与 hukou_*_id，没有户籍各级名称列；
-            // 户籍分级字段返回空串，完整户籍地址由 hukouDetailAddress 承载。
-            string.Empty,
-            string.Empty,
-            string.Empty,
-            string.Empty,
-            string.Empty,
-            app.HukouAddress ?? string.Empty,
-            app.Province ?? string.Empty,
-            app.City ?? string.Empty,
-            app.District ?? string.Empty,
-            app.Town ?? string.Empty,
-            FirstNonEmpty(app.Community, app.Village),
-            app.Address ?? string.Empty,
+            hukou.Province,
+            hukou.City,
+            hukou.District,
+            hukou.Town,
+            hukou.Village,
+            hukou.Detail,
+            home.Province,
+            home.City,
+            home.District,
+            home.Town,
+            home.Village,
+            home.Detail,
             app.BankName ?? string.Empty,
             app.BankAccount ?? string.Empty,
             app.DisabilityCardNo ?? string.Empty,
@@ -1771,10 +1921,15 @@ public sealed class ApplicationFormService(
             ToFormMaritalStatus(app.MaritalStatus),
             ToFormPoliticalStatus(app.PoliticalStatus),
             ToFormHealthStatus(app.HealthStatus),
-            app.DiseaseName ?? string.Empty,
+            secondaryDisease,
             ToFormDisabilityType(app.DisabilityType),
             ToFormDisabilityLevel(app.DisabilityLevel),
-            app.MedicalSelfPaid12m);
+            app.MedicalSelfPaid12m,
+            app.DiseaseCode ?? string.Empty,
+            diseaseCategory,
+            secondaryDisease,
+            app.IsSevereDisease);
+    }
 
     private static ApplicationFormEconomyDto ToEconomyDto(ApplicationEntity app)
         => new(
@@ -2016,24 +2171,410 @@ public sealed class ApplicationFormService(
     }
 
     private static string ComposeHukouAddress(ApplicationFormBasicDto basic)
+        => ComposeRegionAddress(
+            new[]
+            {
+                basic.HukouProvince, basic.HukouCity, basic.HukouDistrict,
+                basic.HukouTown, basic.HukouVillage
+            },
+            basic.HukouDetailAddress);
+
+    /// <summary>
+    /// 五级名称 + 详细地址拼成完整地址；逐级去重，详细地址里已含的层级不再前置，
+    /// 避免“林口县林口县…”这类重复。
+    /// </summary>
+    private static string ComposeRegionAddress(IEnumerable<string?> parts, string? detail)
     {
-        var parts = new[]
-        {
-            basic.HukouProvince, basic.HukouCity, basic.HukouDistrict,
-            basic.HukouTown, basic.HukouVillage
-        };
-
-        var detail = (basic.HukouDetailAddress ?? string.Empty).Trim();
-
-        // 逐级去重：详细地址里已含的层级不再前置，避免“林口县林口县…”这类重复。
+        var text = (detail ?? string.Empty).Trim();
         var prefix = string.Concat(
             parts
                 .Where(x => !string.IsNullOrWhiteSpace(x))
                 .Select(x => x!.Trim())
-                .Where(x => !detail.Contains(x, StringComparison.Ordinal)));
+                .Where(x => !text.Contains(x, StringComparison.Ordinal)));
 
-        return prefix + detail;
+        return prefix + text;
     }
+
+    // ───────────────────────── 地址解析（名称 ↔ ID / 文本拆分） ─────────────────────────
+
+    private sealed record ResolvedFormAddress(
+        string Province,
+        string City,
+        string District,
+        string Town,
+        string Village,
+        string Detail);
+
+    private sealed record ResolvedRegionIds(
+        int? CityId,
+        int? CountyId,
+        int? TownId,
+        int? VillageId);
+
+    /// <summary>
+    /// 保存：按五级名称解析主表 ID 列（nc_regions_* 主键）。
+    /// 区划数据不可用或市级匹配不到时返回 null，调用方保留原 ID，避免一次查询失败清空历史值。
+    /// </summary>
+    private async Task<ResolvedRegionIds?> ResolveRegionIdsAsync(
+        string? province,
+        string? city,
+        string? district,
+        string? town,
+        string? village,
+        CancellationToken ct)
+    {
+        var cityName = (city ?? string.Empty).Trim();
+        if (cityName.Length == 0)
+        {
+            return null;
+        }
+
+        var provincesResult = await regions.GetProvincesAsync(ct);
+        var provinceEntity = provincesResult.Value?
+            .FirstOrDefault(p => RegionNameEquals(p.ProvinceName, province));
+
+        RegionCity? cityEntity;
+        if (provinceEntity is not null)
+        {
+            var citiesResult = await regions.GetCitiesByProvinceIdAsync(provinceEntity.Id, ct);
+            cityEntity = citiesResult.Value?
+                .FirstOrDefault(c => RegionNameEquals(c.CityName, cityName));
+        }
+        else
+        {
+            // 历史数据可能只有市/县没有省：按市名做一次全国匹配。
+            var cityResult = await regions.GetCityByNameAsync(cityName, ct);
+            cityEntity = cityResult.HasValue && cityResult.Value is { } found ? found : null;
+        }
+
+        if (cityEntity is null)
+        {
+            return null;
+        }
+
+        int? countyId = null;
+        int? townId = null;
+        int? villageId = null;
+
+        var districtName = (district ?? string.Empty).Trim();
+        if (districtName.Length > 0)
+        {
+            var countiesResult = await regions.GetCountiesByCityIdAsync(cityEntity.Id, ct);
+            var county = countiesResult.Value?
+                .FirstOrDefault(c => RegionNameEquals(c.CountyName, districtName));
+
+            if (county is not null)
+            {
+                countyId = county.Id;
+
+                var townName = (town ?? string.Empty).Trim();
+                if (townName.Length > 0)
+                {
+                    var townsResult = await regions.GetTownsByCountyIdAsync(county.Id, ct);
+                    var townEntity = townsResult.Value?
+                        .FirstOrDefault(t => RegionNameEquals(t.TownName, townName));
+
+                    if (townEntity is not null)
+                    {
+                        townId = townEntity.Id;
+
+                        var villageName = (village ?? string.Empty).Trim();
+                        if (villageName.Length > 0)
+                        {
+                            var villagesResult = await regions.GetVillagesByTownIdAsync(townEntity.Id, ct);
+                            villageId = villagesResult.Value?
+                                .FirstOrDefault(v => RegionNameEquals(v.VillageName, villageName))?.Id;
+                        }
+                    }
+                }
+            }
+        }
+
+        return new ResolvedRegionIds(cityEntity.Id, countyId, townId, villageId);
+    }
+
+    /// <summary>
+    /// 保存：Basic 的户籍/现住名称解析成主表 ID 列。
+    /// nc_biz_applications 实际列：hukou_city_id/hukou_county_id/hukou_town_id/hukou_village_id、
+    /// city_id/county_id/town_id/village_id（没有 hukou_province_id，也没有 home_* 列）。
+    /// </summary>
+    private async Task ApplyAddressIdsAsync(
+        ApplicationEntity application,
+        ApplicationFormBasicDto basic,
+        CancellationToken ct)
+    {
+        var hukou = await ResolveRegionIdsAsync(
+            basic.HukouProvince, basic.HukouCity, basic.HukouDistrict,
+            basic.HukouTown, basic.HukouVillage, ct);
+
+        if (hukou is not null)
+        {
+            application.HukouCityId = hukou.CityId;
+            application.HukouCountyId = hukou.CountyId;
+            application.HukouTownId = hukou.TownId;
+            application.HukouVillageId = hukou.VillageId;
+        }
+        else if (!HasAnyRegionName(
+                     basic.HukouProvince, basic.HukouCity, basic.HukouDistrict,
+                     basic.HukouTown, basic.HukouVillage))
+        {
+            // 用户清空了户籍地址：同步清空 ID，避免回填出旧地址。
+            application.HukouCityId = null;
+            application.HukouCountyId = null;
+            application.HukouTownId = null;
+            application.HukouVillageId = null;
+        }
+
+        var home = await ResolveRegionIdsAsync(
+            basic.Province, basic.City, basic.District, basic.Town, basic.Village, ct);
+
+        if (home is not null)
+        {
+            application.CityId = home.CityId;
+            application.CountyId = home.CountyId;
+            application.TownId = home.TownId;
+            application.VillageId = home.VillageId;
+        }
+        else if (!HasAnyRegionName(
+                     basic.Province, basic.City, basic.District, basic.Town, basic.Village))
+        {
+            application.CityId = null;
+            application.CountyId = null;
+            application.TownId = null;
+            application.VillageId = null;
+        }
+    }
+
+    private static bool HasAnyRegionName(params string?[] values)
+        => values.Any(v => !string.IsNullOrWhiteSpace(v));
+
+    /// <summary>
+    /// 回填：把主表存量地址还原成五级名称 + 详细地址。
+    /// 1) 有 ID 的先按 ID 取名称；2) 名称仍缺、地址文本非空时按 nc_regions_* 名称拆分；
+    /// 3) 拆不出就把原文整段放进 Detail（不丢原始地址）。
+    /// </summary>
+    private async Task<ResolvedFormAddress> ResolveStoredAddressAsync(
+        int? cityId,
+        int? countyId,
+        int? townId,
+        int? villageId,
+        string? provinceName,
+        string? cityName,
+        string? districtName,
+        string? townName,
+        string? villageName,
+        string? fullAddress,
+        CancellationToken ct)
+    {
+        var province = (provinceName ?? string.Empty).Trim();
+        var city = (cityName ?? string.Empty).Trim();
+        var district = (districtName ?? string.Empty).Trim();
+        var town = (townName ?? string.Empty).Trim();
+        var village = (villageName ?? string.Empty).Trim();
+        var address = (fullAddress ?? string.Empty).Trim();
+
+        if (cityId is { } cityIdValue)
+        {
+            var cityResult = await regions.GetCityByIdAsync(cityIdValue, ct);
+            if (cityResult.HasValue && cityResult.Value is { } cityEntity)
+            {
+                if (city.Length == 0)
+                {
+                    city = (cityEntity.CityName ?? string.Empty).Trim();
+                }
+                if (province.Length == 0 && cityEntity.ProvinceId is { } provinceId)
+                {
+                    province = await GetProvinceNameAsync(provinceId, ct);
+                }
+            }
+        }
+
+        if (countyId is { } countyIdValue && district.Length == 0)
+        {
+            var countyResult = await regions.GetCountyByIdAsync(countyIdValue, ct);
+            if (countyResult.HasValue && countyResult.Value is { } countyEntity)
+            {
+                district = (countyEntity.CountyName ?? string.Empty).Trim();
+            }
+        }
+
+        if (townId is { } townIdValue && town.Length == 0)
+        {
+            var townResult = await regions.GetTownByIdAsync(townIdValue, ct);
+            if (townResult.HasValue && townResult.Value is { } townEntity)
+            {
+                town = (townEntity.TownName ?? string.Empty).Trim();
+            }
+        }
+
+        if (villageId is { } villageIdValue && village.Length == 0)
+        {
+            var villageResult = await regions.GetVillageByIdAsync(villageIdValue, ct);
+            if (villageResult.HasValue && villageResult.Value is { } villageEntity)
+            {
+                village = (villageEntity.VillageName ?? string.Empty).Trim();
+            }
+        }
+
+        var detail = address;
+        if (address.Length > 0)
+        {
+            // 主表 hukou_address 是“五级 + 详细”的合并串，即使层级已由 ID 还原也要剥掉前缀，
+            // 否则详细地址会重复带上省/市/县。拆不出（只剩门牌等）时保留原文。
+            var parsed = await ParseAddressTextAsync(address, ct);
+            if (parsed is not null)
+            {
+                province = province.Length > 0 ? province : parsed.Province;
+                city = city.Length > 0 ? city : parsed.City;
+                district = district.Length > 0 ? district : parsed.District;
+                town = town.Length > 0 ? town : parsed.Town;
+                village = village.Length > 0 ? village : parsed.Village;
+                detail = parsed.Detail;
+            }
+        }
+
+        return new ResolvedFormAddress(province, city, district, town, village, detail);
+    }
+
+    /// <summary>
+    /// 按 nc_regions_* 名称从完整地址文本中逐级拆分（省→市→县→镇→村）。
+    /// 省匹配不到时返回 null，调用方保留整段原文。剩余文本作为详细地址。
+    /// </summary>
+    private async Task<ResolvedFormAddress?> ParseAddressTextAsync(string text, CancellationToken ct)
+    {
+        var working = text.Trim();
+        if (working.Length == 0)
+        {
+            return null;
+        }
+
+        var provincesResult = await regions.GetProvincesAsync(ct);
+        var province = MatchRegionByName(provincesResult.Value, text, x => x.ProvinceName);
+        if (province is null)
+        {
+            return null;
+        }
+
+        var citiesResult = await regions.GetCitiesByProvinceIdAsync(province.Id, ct);
+        var city = MatchRegionByName(citiesResult.Value, text, x => x.CityName);
+        if (city is null)
+        {
+            working = RemoveFirstOccurrence(working, province.ProvinceName);
+            return new ResolvedFormAddress(
+                province.ProvinceName.Trim(), string.Empty, string.Empty, string.Empty, string.Empty,
+                NormalizeDetail(working, text));
+        }
+
+        var countiesResult = await regions.GetCountiesByCityIdAsync(city.Id, ct);
+        var county = MatchRegionByName(countiesResult.Value, text, x => x.CountyName);
+
+        RegionTown? townEntity = null;
+        RegionVillage? villageEntity = null;
+        if (county is not null)
+        {
+            var townsResult = await regions.GetTownsByCountyIdAsync(county.Id, ct);
+            townEntity = MatchRegionByName(townsResult.Value, text, x => x.TownName);
+
+            if (townEntity is not null)
+            {
+                var villagesResult = await regions.GetVillagesByTownIdAsync(townEntity.Id, ct);
+                villageEntity = MatchRegionByName(villagesResult.Value, text, x => x.VillageName);
+            }
+        }
+
+        foreach (var name in new[]
+                 {
+                     province.ProvinceName, city.CityName, county?.CountyName,
+                     townEntity?.TownName, villageEntity?.VillageName
+                 })
+        {
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                working = RemoveFirstOccurrence(working, name.Trim());
+            }
+        }
+
+        return new ResolvedFormAddress(
+            province.ProvinceName.Trim(),
+            city.CityName.Trim(),
+            (county?.CountyName ?? string.Empty).Trim(),
+            (townEntity?.TownName ?? string.Empty).Trim(),
+            (villageEntity?.VillageName ?? string.Empty).Trim(),
+            NormalizeDetail(working, text));
+    }
+
+    /// <summary>名称匹配：优先取文本中出现的最长名称，避免“林口县/林口镇”互相误配。</summary>
+    private static T? MatchRegionByName<T>(
+        IEnumerable<T>? options,
+        string text,
+        Func<T, string?> nameSelector)
+        where T : class
+    {
+        if (options is null || string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        T? matched = null;
+        var matchedLength = 0;
+        foreach (var option in options)
+        {
+            var name = nameSelector(option)?.Trim();
+            if (string.IsNullOrEmpty(name) || !text.Contains(name, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (name.Length > matchedLength)
+            {
+                matched = option;
+                matchedLength = name.Length;
+            }
+        }
+
+        return matched;
+    }
+
+    private static string RemoveFirstOccurrence(string text, string part)
+    {
+        var index = text.IndexOf(part, StringComparison.Ordinal);
+        return index < 0 ? text : text.Remove(index, part.Length);
+    }
+
+    /// <summary>剥离层级名称后剩余的详细地址；没剥离出任何内容时返回空串。</summary>
+    private static string NormalizeDetail(string working, string original)
+    {
+        var detail = working.Trim(' ', '\t', ',', '，', '/', '\\', ';', '；', '-', '—', '、');
+        return string.Equals(detail, original.Trim(), StringComparison.Ordinal) ? string.Empty : detail;
+    }
+
+    private async Task<string> GetProvinceNameAsync(int provinceId, CancellationToken ct)
+    {
+        var provincesResult = await regions.GetProvincesAsync(ct);
+        return (provincesResult.Value?
+            .FirstOrDefault(p => p.Id == provinceId)?.ProvinceName ?? string.Empty).Trim();
+    }
+
+    /// <summary>名称相等：先精确，再忽略行政区划后缀（兼容“林口”/“林口县”）。</summary>
+    private static bool RegionNameEquals(string? left, string? right)
+    {
+        var a = (left ?? string.Empty).Trim();
+        var b = (right ?? string.Empty).Trim();
+        if (a.Length == 0 || b.Length == 0)
+        {
+            return false;
+        }
+
+        if (string.Equals(a, b, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return string.Equals(NormalizeRegionName(a), NormalizeRegionName(b), StringComparison.Ordinal);
+    }
+
+    private static string NormalizeRegionName(string value)
+        => value.Trim().TrimEnd('省', '市', '区', '县', '镇', '乡', '村');
 
     // ── 旧版字典 key ↔ 中文显示值（表单只显示中文，落库保留 key） ────────────────
     private static string ToFormEducationLevel(string? value) => value?.Trim() switch

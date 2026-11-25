@@ -8,6 +8,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AddressCascader: typeof import('./src/components/AddressCascader.vue')['default']
     ElAlert: typeof import('element-plus/es/components/alert/index')['ElAlert']
     ElButton: typeof import('element-plus/es/components/button/index')['ElButton']
     ElCheckbox: typeof import('element-plus/es/components/checkbox/index')['ElCheckbox']

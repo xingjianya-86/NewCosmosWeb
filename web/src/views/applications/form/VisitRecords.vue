@@ -162,6 +162,7 @@ async function submitVisit(): Promise<void> {
     :title="sectionTitle"
     class="visit-section"
     :class="{ 'is-pending': !latestRecord }"
+    padding="sm"
   >
     <template #actions>
       <div class="visit-actions">
@@ -176,16 +177,11 @@ async function submitVisit(): Promise<void> {
       </div>
     </template>
 
-    <h3 class="visit-section__title">回访历史</h3>
+    <h3 v-if="sortedRecords.length > 0" class="visit-section__title">回访历史</h3>
 
-    <el-empty
-      v-if="sortedRecords.length === 0"
-      class="visit-empty"
-      description="暂无回访记录"
-      :image-size="68"
-    />
+    <p v-else class="visit-empty-text">暂无回访记录</p>
 
-    <template v-else>
+    <template v-if="sortedRecords.length > 0">
       <el-table v-if="!isNarrow" :data="sortedRecords" row-key="id" class="visit-table">
         <el-table-column label="回访时间" min-width="158">
           <template #default="{ row }">
@@ -324,6 +320,11 @@ async function submitVisit(): Promise<void> {
   color: var(--nc-amber-dark);
 }
 
+.visit-section :deep(.nc-card__head) {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+}
+
 .visit-section__title {
   margin-bottom: 11px;
   color: var(--nc-ink-2);
@@ -333,8 +334,12 @@ async function submitVisit(): Promise<void> {
   letter-spacing: 0.03em;
 }
 
-.visit-empty {
-  padding: 6px 0 14px;
+.visit-empty-text {
+  margin: 0;
+  padding: 1px 0 2px;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-sm);
+  line-height: 1.6;
 }
 
 .visit-table {

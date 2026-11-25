@@ -4,18 +4,17 @@ import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { changeApplicationDate } from '@/api/applicationForm'
 import { getErrorMessage } from '@/api/http'
+import AddressCascader from '@/components/AddressCascader.vue'
 import NcCard from '@/components/NcCard.vue'
 import {
-  DISABILITY_LEVEL_OPTIONS,
-  DISABILITY_TYPE_OPTIONS,
+  DISEASE_CATEGORY_OPTIONS,
   EDUCATION_LEVEL_OPTIONS,
   ETHNICITY_OPTIONS,
-  HEALTH_STATUS_OPTIONS,
   HUKOU_TYPE_OPTIONS,
   MARITAL_STATUS_OPTIONS,
   POLITICAL_STATUS_OPTIONS,
 } from './options'
-import type { ApplicationFormModel } from './types'
+import type { ApplicationFormBasic, ApplicationFormModel } from './types'
 import { getIdCardError, isBasicValid, parseIdCard } from './validation'
 
 const props = defineProps<{
@@ -26,6 +25,52 @@ const emit = defineEmits<{ reload: [] }>()
 
 const formRef = ref<FormInstance>()
 const basic = computed(() => props.form.basic)
+
+/** 旧版疾病字段尚未进入共享类型；按约定 camelCase 局部扩展，不改 types.ts。 */
+type BasicWithDiseaseFields = ApplicationFormBasic & {
+  isSevereDisease?: boolean
+  diseaseCode?: string
+  diseaseCategory?: string
+}
+
+const diseaseFields = computed(() => props.form.basic as BasicWithDiseaseFields)
+
+/** 非草稿状态（旧版 IsStep1Editable 同口径）全部输入只读。 */
+const isLocked = computed(() => props.form.status !== 'Draft')
+
+const isSevereDisease = computed<boolean>({
+  get: () => Boolean(diseaseFields.value.isSevereDisease),
+  set: (value) => {
+    diseaseFields.value.isSevereDisease = value
+  },
+})
+
+const diseaseCode = computed<string>({
+  get: () => diseaseFields.value.diseaseCode ?? '',
+  set: (value) => {
+    diseaseFields.value.diseaseCode = value
+  },
+})
+
+const diseaseCategory = computed<string>({
+  get: () => diseaseFields.value.diseaseCategory ?? '',
+  set: (value) => {
+    diseaseFields.value.diseaseCategory = value
+  },
+})
+
+/** 健康状态只读展示：勾选“是否重病”时显示重病（当前为重残/重病且重残者保留原值）。 */
+const healthStatusDisplay = computed(() => {
+  const current = basic.value.healthStatus?.trim() ?? ''
+  if (isSevereDisease.value && current !== '重残' && current !== '重病且重残') {
+    return '重病'
+  }
+  return current || '—'
+})
+
+function displayOrDash(value: string | null | undefined): string {
+  return value?.trim() ? value.trim() : '—'
+}
 
 /**
  * 申请日期（只读）：编号日期段是权威来源（旧版 ArchiveAnchorHelper 同口径），
@@ -157,6 +202,11 @@ watch(
   },
 )
 
+/** 疾病编码变化：不造假数据回填；仅在已有疾病名时联动“是否重病”（只勾不取消）。 */
+watch(diseaseCode, () => {
+  if (basic.value.diseaseName?.trim()) isSevereDisease.value = true
+})
+
 async function validate(): Promise<boolean> {
   if (!formRef.value) return isBasicValid(basic.value)
   try {
@@ -181,58 +231,37 @@ defineExpose({ validate })
     </NcCard>
 
     <NcCard title="户籍所在地" subtitle="（限本单位管辖范围）">
-      <div class="field-grid">
-        <label class="field">
-          <span class="field__label">省份</span>
-          <el-input v-model="basic.hukouProvince" placeholder="请选择或输入省份" />
-        </label>
-        <label class="field">
-          <span class="field__label">城市</span>
-          <el-input v-model="basic.hukouCity" placeholder="请选择或输入城市" />
-        </label>
-        <label class="field">
-          <span class="field__label">区县</span>
-          <el-input v-model="basic.hukouDistrict" placeholder="请选择或输入区县" />
-        </label>
-        <label class="field">
-          <span class="field__label">乡镇</span>
-          <el-input v-model="basic.hukouTown" placeholder="请选择或输入乡镇" />
-        </label>
-        <label class="field">
-          <span class="field__label">村社区</span>
-          <el-input v-model="basic.hukouVillage" placeholder="请选择或输入村社区" />
-        </label>
-      </div>
+      <AddressCascader
+        v-model:province="basic.hukouProvince"
+        v-model:city="basic.hukouCity"
+        v-model:district="basic.hukouDistrict"
+        v-model:town="basic.hukouTown"
+        v-model:village="basic.hukouVillage"
+        province-readonly
+        :disabled="isLocked"
+      />
     </NcCard>
 
     <NcCard
       title="申请人所在地址（家庭住址）"
       subtitle="居住地全国可选（默认取本单位区划），不受户籍管辖范围限制"
     >
-      <div class="field-grid">
-        <label class="field">
-          <span class="field__label">省份</span>
-          <el-input v-model="basic.province" placeholder="请选择或输入省份" />
-        </label>
-        <label class="field">
-          <span class="field__label">城市</span>
-          <el-input v-model="basic.city" placeholder="请选择或输入城市" />
-        </label>
-        <label class="field">
-          <span class="field__label">区县</span>
-          <el-input v-model="basic.district" placeholder="请选择或输入区县" />
-        </label>
-        <label class="field">
-          <span class="field__label">乡镇社区</span>
-          <el-input v-model="basic.town" placeholder="请选择或输入乡镇社区" />
-        </label>
-        <label class="field">
-          <span class="field__label">村社区</span>
-          <el-input v-model="basic.village" placeholder="请选择或输入村社区" />
-        </label>
+      <AddressCascader
+        v-model:province="basic.province"
+        v-model:city="basic.city"
+        v-model:district="basic.district"
+        v-model:town="basic.town"
+        v-model:village="basic.village"
+        :disabled="isLocked"
+      />
+      <div class="field-grid address-detail">
         <label class="field field--full">
           <span class="field__label">详细地址</span>
-          <el-input v-model="basic.address" placeholder="请输入详细地址（如：XX路XX号）" />
+          <el-input
+            v-model="basic.address"
+            placeholder="请输入详细地址（如：XX路XX号）"
+            :disabled="isLocked"
+          />
         </label>
       </div>
     </NcCard>
@@ -253,6 +282,7 @@ defineExpose({ validate })
               maxlength="30"
               placeholder="请输入姓名"
               clearable
+              :disabled="isLocked"
             />
           </el-form-item>
 
@@ -262,6 +292,7 @@ defineExpose({ validate })
               maxlength="18"
               placeholder="请输入 18 位身份证号"
               clearable
+              :disabled="isLocked"
             />
           </el-form-item>
 
@@ -271,6 +302,7 @@ defineExpose({ validate })
               maxlength="30"
               placeholder="无残疾可留空"
               clearable
+              :disabled="isLocked"
             />
           </el-form-item>
 
@@ -279,17 +311,24 @@ defineExpose({ validate })
               :model-value="basic.gender"
               readonly
               placeholder="身份证自动带出"
+              :disabled="isLocked"
             />
           </el-form-item>
 
           <el-form-item label="年龄">
-            <el-input :model-value="ageDisplay" readonly placeholder="身份证自动计算">
+            <el-input :model-value="ageDisplay" readonly placeholder="身份证自动计算" :disabled="isLocked">
               <template #suffix>岁</template>
             </el-input>
           </el-form-item>
 
           <el-form-item label="联系电话" prop="phone">
-            <el-input v-model="basic.phone" maxlength="20" placeholder="请输入手机号或固定电话" clearable />
+            <el-input
+              v-model="basic.phone"
+              maxlength="20"
+              placeholder="请输入手机号或固定电话"
+              clearable
+              :disabled="isLocked"
+            />
           </el-form-item>
 
           <el-form-item label="民族" prop="ethnicity">
@@ -299,6 +338,7 @@ defineExpose({ validate })
               allow-create
               default-first-option
               placeholder="请选择或输入民族"
+              :disabled="isLocked"
             >
               <el-option
                 v-for="item in ETHNICITY_OPTIONS"
@@ -317,6 +357,7 @@ defineExpose({ validate })
               default-first-option
               clearable
               placeholder="请选择或输入婚姻状况"
+              :disabled="isLocked"
             >
               <el-option
                 v-for="item in MARITAL_STATUS_OPTIONS"
@@ -328,7 +369,7 @@ defineExpose({ validate })
           </el-form-item>
 
           <el-form-item label="户口性质" prop="hukouType">
-            <el-select v-model="basic.hukouType" placeholder="请选择户口性质">
+            <el-select v-model="basic.hukouType" placeholder="请选择户口性质" :disabled="isLocked">
               <el-option
                 v-for="item in HUKOU_TYPE_OPTIONS"
                 :key="item.value"
@@ -346,6 +387,7 @@ defineExpose({ validate })
               default-first-option
               clearable
               placeholder="请选择或输入文化程度"
+              :disabled="isLocked"
             >
               <el-option
                 v-for="item in EDUCATION_LEVEL_OPTIONS"
@@ -364,6 +406,7 @@ defineExpose({ validate })
               default-first-option
               clearable
               placeholder="请选择或输入政治面貌"
+              :disabled="isLocked"
             >
               <el-option
                 v-for="item in POLITICAL_STATUS_OPTIONS"
@@ -380,6 +423,7 @@ defineExpose({ validate })
               maxlength="60"
               placeholder="请输入银行卡开户行"
               clearable
+              :disabled="isLocked"
             />
           </el-form-item>
 
@@ -389,6 +433,7 @@ defineExpose({ validate })
               maxlength="32"
               placeholder="请输入银行卡号"
               clearable
+              :disabled="isLocked"
             />
           </el-form-item>
         </div>
@@ -396,85 +441,87 @@ defineExpose({ validate })
     </NcCard>
 
     <NcCard title="健康与残疾信息">
-      <div class="field-grid">
-        <label class="field">
-          <span class="field__label">健康状态</span>
-          <el-select
-            v-model="basic.healthStatus"
-            filterable
-            allow-create
-            default-first-option
-            clearable
-            placeholder="请选择或输入健康状态"
-          >
-            <el-option
-              v-for="item in HEALTH_STATUS_OPTIONS"
-              :key="item.value"
-              :label="item.label"
-              :value="item.value"
+      <div class="disease-grid">
+        <div class="disease-row disease-row--three">
+          <label class="field">
+            <span class="field__label">身体状况</span>
+            <el-input :model-value="healthStatusDisplay" readonly :disabled="isLocked" />
+          </label>
+
+          <label class="field">
+            <span class="field__label">残疾类型</span>
+            <el-input :model-value="displayOrDash(basic.disabilityType)" readonly :disabled="isLocked" />
+          </label>
+
+          <label class="field">
+            <span class="field__label">残疾等级</span>
+            <el-input :model-value="displayOrDash(basic.disabilityLevel)" readonly :disabled="isLocked" />
+          </label>
+        </div>
+
+        <div class="disease-row disease-row--four">
+          <div class="field">
+            <span class="field__label">是否重病</span>
+            <el-checkbox v-model="isSevereDisease" :disabled="isLocked" aria-label="是否重病" />
+          </div>
+
+          <label class="field">
+            <span class="field__label">疾病编码（ICD-10）</span>
+            <el-input
+              v-model="diseaseCode"
+              maxlength="20"
+              placeholder="如 A00.900，输入后自动带出疾病"
+              clearable
+              :disabled="isLocked"
             />
-          </el-select>
-        </label>
+          </label>
 
-        <label class="field">
-          <span class="field__label">残疾类型</span>
-          <el-select
-            v-model="basic.disabilityType"
-            filterable
-            allow-create
-            default-first-option
-            clearable
-            placeholder="无残疾可留空"
-          >
-            <el-option
-              v-for="item in DISABILITY_TYPE_OPTIONS"
-              :key="item.value"
-              :label="item.label"
-              :value="item.value"
+          <label class="field">
+            <span class="field__label">一级疾病</span>
+            <el-select
+              v-model="diseaseCategory"
+              filterable
+              allow-create
+              default-first-option
+              clearable
+              placeholder="请选择或输入一级疾病"
+              :disabled="isLocked"
+            >
+              <el-option
+                v-for="item in DISEASE_CATEGORY_OPTIONS"
+                :key="item.value"
+                :label="item.label"
+                :value="item.value"
+              />
+            </el-select>
+          </label>
+
+          <label class="field">
+            <span class="field__label">二级疾病</span>
+            <el-input
+              v-model="basic.diseaseName"
+              maxlength="60"
+              placeholder="输入疾病编码自动带出，可手工修改"
+              clearable
+              :disabled="isLocked"
             />
-          </el-select>
-        </label>
+          </label>
+        </div>
 
-        <label class="field">
-          <span class="field__label">残疾等级</span>
-          <el-select
-            v-model="basic.disabilityLevel"
-            filterable
-            allow-create
-            default-first-option
-            clearable
-            placeholder="无残疾可留空"
-          >
-            <el-option
-              v-for="item in DISABILITY_LEVEL_OPTIONS"
-              :key="item.value"
-              :label="item.label"
-              :value="item.value"
+        <div class="disease-row disease-row--full">
+          <label class="field">
+            <span class="field__label">前12个月个人医疗自付累计（元）</span>
+            <el-input-number
+              :model-value="basic.medicalSelfPaid12m"
+              :min="0"
+              :precision="2"
+              :controls="false"
+              placeholder="住院+门诊慢特病+高值药品累计自付；超上年度人均可支配收入按费用口径认定重病"
+              :disabled="isLocked"
+              @update:model-value="basic.medicalSelfPaid12m = $event ?? null"
             />
-          </el-select>
-        </label>
-
-        <label class="field field--full">
-          <span class="field__label">疾病名称</span>
-          <el-input
-            v-model="basic.diseaseName"
-            maxlength="60"
-            placeholder="无疾病可留空"
-            clearable
-          />
-        </label>
-
-        <label class="field field--full">
-          <span class="field__label">前 12 个月医疗自付（元）</span>
-          <el-input-number
-            :model-value="basic.medicalSelfPaid12m"
-            :min="0"
-            :precision="2"
-            :controls="false"
-            placeholder="0.00"
-            @update:model-value="basic.medicalSelfPaid12m = $event ?? null"
-          />
-        </label>
+          </label>
+        </div>
       </div>
     </NcCard>
 
@@ -550,6 +597,34 @@ defineExpose({ validate })
   grid-column: 1 / -1;
 }
 
+/* 旧版 Step1 疾病区：第一行 5 列只放 3 项，第二行 Auto+3 列，医疗自付整行 */
+.disease-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.disease-row {
+  display: grid;
+  gap: 16px 18px;
+}
+
+.disease-row--three {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.disease-row--four {
+  grid-template-columns: minmax(88px, auto) repeat(3, minmax(0, 1fr));
+}
+
+.disease-row--full {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.address-detail {
+  margin-top: 16px;
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -576,8 +651,29 @@ defineExpose({ validate })
   }
 }
 
+@media (max-width: 1100px) {
+  .disease-row--three {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .disease-row--four {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 767px) {
   .field-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 13px;
+  }
+
+  .disease-grid {
+    gap: 13px;
+  }
+
+  .disease-row--three,
+  .disease-row--four,
+  .disease-row--full {
     grid-template-columns: minmax(0, 1fr);
     gap: 13px;
   }
