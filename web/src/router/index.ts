@@ -280,6 +280,18 @@ const router = createRouter({
           meta: { title: '打印机绑定' },
         },
         {
+          path: 'archives/query',
+          name: 'archive-query',
+          component: () => import('@/views/archives/ArchiveQueryView.vue'),
+          meta: { title: '救助档案管理' },
+        },
+        {
+          path: 'archives/proof-templates',
+          name: 'archive-proof-templates',
+          component: () => import('@/views/archives/ProofUnitTemplateView.vue'),
+          meta: { title: '单位模板维护' },
+        },
+        {
           path: 'archives/production',
           name: 'archive-production',
           component: () => import('@/views/archives/ArchiveProductionView.vue'),

@@ -27,6 +27,7 @@ declare module 'vue' {
     ElInput: typeof import('element-plus/es/components/input/index')['ElInput']
     ElInputNumber: typeof import('element-plus/es/components/input-number/index')['ElInputNumber']
     ElOption: typeof import('element-plus/es/components/select/index')['ElOption']
+    ElOptionGroup: typeof import('element-plus/es/components/select/index')['ElOptionGroup']
     ElPagination: typeof import('element-plus/es/components/pagination/index')['ElPagination']
     ElProgress: typeof import('element-plus/es/components/progress/index')['ElProgress']
     ElRadioButton: typeof import('element-plus/es/components/radio/index')['ElRadioButton']

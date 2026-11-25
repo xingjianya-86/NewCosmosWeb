@@ -235,7 +235,7 @@ const moduleGroups: ModuleGroup[] = [
         iconBg: '#ECFDF5',
         iconColor: '#2e4738',
         buttonText: '进入模块',
-        to: '/coming-soon/archive',
+        to: '/archives/query',
       },
       {
         title: '死亡情况说明',

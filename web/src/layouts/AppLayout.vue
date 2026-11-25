@@ -42,8 +42,9 @@ interface NavGroup {
 
 /*
  * 侧栏目录 = legacy Pages/Main/MainPage.xaml（分组与文案逐项对齐）。
- * 已实现页面：首页 /、低收入人口救助帮扶 /applications、打印机绑定 /printers、
- * 档案制作 /archives/production；
+ * 已实现页面：首页 /、低收入人口救助帮扶 /social-assistance、高龄 /elderly、
+ * 救助档案管理 /archives/query、单位模板维护 /archives/proof-templates、
+ * 打印机绑定 /printers、档案制作 /archives/production；
  * 其余模块统一走 /coming-soon/:module 占位页，保持旧文案不变。
  */
 const navGroups: NavGroup[] = [
@@ -57,7 +58,7 @@ const navGroups: NavGroup[] = [
       { label: '低收入人口救助帮扶', icon: Coin, path: '/social-assistance' },
       { label: '高龄津贴发放', icon: UserFilled, path: '/elderly' },
       { label: '家庭经济状况核对', icon: Search, path: '/asset-verification' },
-      { label: '救助档案管理', icon: FolderOpened, path: '/coming-soon/archive' },
+      { label: '救助档案管理', icon: FolderOpened, path: '/archives/query' },
       { label: '档案制作', icon: Files, path: '/archives/production' },
       { label: '后补追缴', icon: Money, path: '/recovery' },
     ],
@@ -122,9 +123,18 @@ const activePath = computed(() => {
     return '/asset-verification'
   }
   if (route.path === '/printers' || route.path.startsWith('/printers/')) return '/printers'
-  if (route.path === '/archives/production' || route.path.startsWith('/archives/')) {
+  if (
+    route.path === '/archives/query' ||
+    route.path.startsWith('/archives/query/') ||
+    route.path === '/archives/proof-templates' ||
+    route.path.startsWith('/archives/proof-templates/')
+  ) {
+    return '/archives/query'
+  }
+  if (route.path === '/archives/production' || route.path.startsWith('/archives/production/')) {
     return '/archives/production'
   }
+  if (route.path.startsWith('/archives/')) return '/archives/query'
   return route.path
 })
 

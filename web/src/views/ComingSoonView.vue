@@ -30,6 +30,16 @@ const moduleCatalog: Record<string, ModuleMeta> = {
     category: '救助业务',
     description: '现存低收入人口历史档案查询',
   },
+  'archive-photos': {
+    title: '照片查询',
+    category: '救助档案管理',
+    description: '按人检索档案照片，支持连续采集与推送打印',
+  },
+  'archive-publicity': {
+    title: '每月公示文档输出',
+    category: '救助档案管理',
+    description: '按月生成并输出低收入人口公示文档',
+  },
   'death-statement': {
     title: '死亡情况说明',
     category: '救助业务',

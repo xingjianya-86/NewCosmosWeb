@@ -149,6 +149,7 @@ builder.Services.AddSingleton<IHouseholdSurveyService, HouseholdSurveyService>()
 builder.Services.AddSingleton<IVisitRecordService, VisitRecordService>();
 builder.Services.AddSingleton<IEconomicDetailService, EconomicDetailService>();
 builder.Services.AddSingleton<IApplicationService, ApplicationService>();
+builder.Services.AddSingleton<IImportedArchiveService, ImportedArchiveService>();
 builder.Services.AddSingleton<ISpecialApprovalService, SpecialApprovalService>();
 builder.Services.AddScoped<ApplicationFormService>();
 
@@ -158,6 +159,9 @@ builder.Services.AddScoped<AgentDeviceService>();
 // 档案制作页推送打印：数据装配 + Server 侧队列网关（不引用 Office，不在 Server 生成 PDF）。
 builder.Services.AddScoped<ArchivePrintDataService>();
 builder.Services.AddScoped<ArchivePrintQueueService>();
+// 档案查询/证明打印：字段装配 + 证明单位模板映射（证明打印任务复用上面的打印队列网关）。
+builder.Services.AddScoped<ArchiveProofDataService>();
+builder.Services.AddScoped<ProofUnitTemplateService>();
 // 资产核查推送打印：按 nc_biz_asset_checks.id 装配授权书/核查报告字段。
 builder.Services.AddScoped<AssetCheckPrintDataService>();
 builder.Services.AddScoped<ApplicationQueryService>();
@@ -195,6 +199,7 @@ app.MapNearRelativeEndpoints();
 app.MapQuickVerifyEndpoints();
 app.MapTempReliefEndpoints();
 app.MapRecoveryEndpoints();
+app.MapArchiveEndpoints();
 app.MapChangeManagementEndpoints();
 app.MapMonthlyReportEndpoints();
 app.MapApplicationWorkflowEndpoints();
