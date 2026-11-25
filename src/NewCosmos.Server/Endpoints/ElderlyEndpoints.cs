@@ -9,7 +9,6 @@ using NewCosmos.Services.Core;
 using NewCosmos.Services.Database;
 using NewCosmos.Services.Domain.ElderlyBenefits;
 using NewCosmos.Services.Domain.Reporting;
-using NewCosmos.Services.Domain.UserManagement;
 using NewCosmos.Services.System;
 using NewCosmos.Services.UserManagement;
 
@@ -459,15 +458,33 @@ public static class ElderlyEndpoints
             return Results.Json(empty);
         }
 
-        var services = context.RequestServices;
-        var organizationService = services.GetRequiredService<IOrganizationService>();
-        var organizationResult = await organizationService.GetByIdAsync(user.OrganizationId.Value, ct);
-        if (organizationResult.IsFailure || organizationResult.Value is null)
+        var database = context.RequestServices.GetRequiredService<IDatabaseService>();
+
+        // 直接按组织主键 JOIN 区划表：避免 IRegionService 首次全量预热导致表单地址等待数分钟。
+        const string orgSql = @"
+            SELECT o.province_id, o.city_id, o.county_id, o.town_id, o.village_id,
+                   COALESCE(rp.province_name, '') AS province_name,
+                   COALESCE(rcity.city_name, '') AS city_name,
+                   COALESCE(rc.county_name, '') AS county_name,
+                   COALESCE(rt.town_name, '') AS town_name,
+                   COALESCE(rv.village_name, '') AS village_name
+            FROM nc_sys_organizations o
+            LEFT JOIN nc_regions_provinces rp ON rp.id = o.province_id
+            LEFT JOIN nc_regions_cities rcity ON rcity.id = o.city_id
+            LEFT JOIN nc_regions_counties rc ON rc.id = o.county_id
+            LEFT JOIN nc_regions_towns rt ON rt.id = o.town_id
+            LEFT JOIN nc_regions_villages rv ON rv.id = o.village_id
+            WHERE o.id = $1
+            LIMIT 1";
+
+        var orgResult = await database.QuerySingleAsync<ElderlyOperatorAddressRow>(
+            orgSql, ct, user.OrganizationId.Value);
+        if (orgResult.IsFailure || orgResult.Value is null)
         {
             return Results.Json(empty);
         }
 
-        var org = organizationResult.Value;
+        var org = orgResult.Value;
         var lockLevel = ComputeAddressLockLevel(org);
         var scopeDescription = lockLevel switch
         {
@@ -482,8 +499,13 @@ public static class ElderlyEndpoints
         var villages = new List<ElderlyOperatorVillageDto>();
         if (org.TownId is > 0)
         {
-            var regionService = services.GetRequiredService<IRegionService>();
-            var villageResult = await regionService.GetVillagesByTownIdAsync(org.TownId.Value, ct);
+            const string villageSql = @"
+                SELECT id, village_name, village_code
+                FROM nc_regions_villages
+                WHERE town_id = $1 AND is_active = TRUE
+                ORDER BY sort_order, id";
+            var villageResult = await database.QueryAsync<ElderlyOperatorAddressVillageRow>(
+                villageSql, ct, org.TownId.Value);
             if (villageResult.IsSuccess)
             {
                 villages = (villageResult.Value ?? [])
@@ -509,7 +531,7 @@ public static class ElderlyEndpoints
             villages));
     }
 
-    private static int ComputeAddressLockLevel(Organization org)
+    private static int ComputeAddressLockLevel(ElderlyOperatorAddressRow org)
     {
         if (org.VillageId is > 0 && !string.IsNullOrWhiteSpace(org.VillageName)) return 5;
         if (org.TownId is > 0 && !string.IsNullOrWhiteSpace(org.TownName)) return 4;
@@ -517,6 +539,27 @@ public static class ElderlyEndpoints
         if (org.CityId is > 0 && !string.IsNullOrWhiteSpace(org.CityName)) return 2;
         if (org.ProvinceId is > 0 && !string.IsNullOrWhiteSpace(org.ProvinceName)) return 1;
         return 0;
+    }
+
+    private sealed class ElderlyOperatorAddressRow
+    {
+        public int? ProvinceId { get; set; }
+        public int? CityId { get; set; }
+        public int? CountyId { get; set; }
+        public int? TownId { get; set; }
+        public int? VillageId { get; set; }
+        public string? ProvinceName { get; set; }
+        public string? CityName { get; set; }
+        public string? CountyName { get; set; }
+        public string? TownName { get; set; }
+        public string? VillageName { get; set; }
+    }
+
+    private sealed class ElderlyOperatorAddressVillageRow
+    {
+        public long Id { get; set; }
+        public string? VillageName { get; set; }
+        public string? VillageCode { get; set; }
     }
 
     private static async Task<IResult> GetStopStatsAsync(
