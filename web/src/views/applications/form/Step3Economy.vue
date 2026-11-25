@@ -24,6 +24,7 @@ import {
   createLandConfirmationRecord,
   createLedgerRow,
   landRecordValue,
+  landStatusShouldCount,
   landUnitPrice,
   mergeLandConfirmationImports,
   mergeSubsidyImports,
@@ -134,6 +135,24 @@ function groupArea(group: LandConfirmationGroupRow): number {
   }, 0)
 }
 
+/** 旧版口径：人员面积 = 组总面积 ÷ 组有效份数 × 该人员份数。 */
+function syncLandPersonAreas(): void {
+  for (const group of landGroups()) {
+    const area = groupArea(group)
+    const shares = group.persons.reduce(
+      (sum, person) =>
+        sum + (landStatusShouldCount(person.landStatus) ? numberOrZero(person.sharesCount) : 0),
+      0,
+    )
+    for (const person of group.persons) {
+      person.totalLandArea =
+        shares > 0 && landStatusShouldCount(person.landStatus)
+          ? Math.round((area / shares) * numberOrZero(person.sharesCount) * 100) / 100
+          : 0
+    }
+  }
+}
+
 /** 空组按旧版口径补种户主 + 共同生活成员；已有人员的组保持原样。 */
 function seedLandPersons(group: LandConfirmationGroupRow): void {
   if (group.persons.length > 0) return
@@ -160,21 +179,25 @@ function addLandGroup(): void {
   const group = createLandConfirmationGroup(props.form.basic.applicantName)
   seedLandPersons(group)
   landGroups().push(group)
+  syncLandPersonAreas()
 }
 
 function removeLandGroup(group: LandConfirmationGroupRow): void {
   const groups = landGroups()
   const index = groups.indexOf(group)
   if (index >= 0) groups.splice(index, 1)
+  syncLandPersonAreas()
 }
 
 function addLandRecord(group: LandConfirmationGroupRow): void {
   group.records.push(createLandConfirmationRecord(group.contractorName))
+  syncLandPersonAreas()
 }
 
 function removeLandRecord(group: LandConfirmationGroupRow, record: LandConfirmationRecordRow): void {
   const index = group.records.indexOf(record)
   if (index >= 0) group.records.splice(index, 1)
+  syncLandPersonAreas()
 }
 
 function numberOrZero(value: number | null | undefined): number {
@@ -199,6 +222,7 @@ function batchSetLandUsage(usage: string): void {
 
 function addLandPerson(group: LandConfirmationGroupRow): void {
   group.persons.push(createLandConfirmationPerson())
+  syncLandPersonAreas()
 }
 
 function removeLandPerson(group: LandConfirmationGroupRow, person: LandConfirmationPersonRow): void {
@@ -206,15 +230,23 @@ function removeLandPerson(group: LandConfirmationGroupRow, person: LandConfirmat
   if (index < 0) return
   group.persons.splice(index, 1)
   const name = (person.name ?? '').trim()
-  if (!name) return
-  for (const remaining of group.persons) {
-    if ((remaining.landInheritTo ?? '').trim() === name) remaining.landInheritTo = ''
+  if (name) {
+    for (const remaining of group.persons) {
+      if ((remaining.landInheritTo ?? '').trim() === name) remaining.landInheritTo = ''
+    }
   }
+  syncLandPersonAreas()
 }
 
 function changeLandStatus(person: LandConfirmationPersonRow, status: string): void {
   person.landStatus = status
   if (status !== LAND_STATUS_DECEASED) person.landInheritTo = ''
+  syncLandPersonAreas()
+}
+
+function changeLandShares(person: LandConfirmationPersonRow, value: unknown): void {
+  person.sharesCount = numberOrZero(value as number | null | undefined)
+  syncLandPersonAreas()
 }
 
 function changeLandInherit(person: LandConfirmationPersonRow, value: unknown): void {
@@ -290,8 +322,13 @@ async function importSubsidies(): Promise<void> {
     subsidyOpenSignal.value += 1
 
     if (result.added > 0) {
+      const amountOnly = records.filter(
+        (record) => numberOrZero(record.area) === 0 && numberOrZero(record.amount) > 0,
+      ).length
+      const converted =
+        amountOnly > 0 ? `（金额型 ${amountOnly} 条已按标准单价折算面积）` : ''
       const skipped = result.skipped > 0 ? `，跳过重复 ${result.skipped} 条` : ''
-      ElMessage.success(`已导入 ${result.added} 条农业补贴${skipped}`)
+      ElMessage.success(`已导入 ${result.added} 条农业补贴${converted}${skipped}`)
     } else {
       ElMessage.info(`未新增补贴记录，${result.skipped} 条均已在台账中`)
     }
@@ -318,6 +355,7 @@ async function importLandConfirmation(): Promise<void> {
 
     // 导入后按旧版口径给空人员组补种户主 + 共同生活成员，避免家庭份额为 0。
     for (const group of groups) seedLandPersons(group)
+    syncLandPersonAreas()
 
     if (result.added > 0) {
       const skipped = result.skipped > 0 ? `，跳过重复 ${result.skipped} 条` : ''
@@ -479,7 +517,10 @@ async function importLandConfirmation(): Promise<void> {
                         :step="0.1"
                         :controls="false"
                         :disabled="busy"
-                        @update:model-value="record.landArea = numberOrZero($event)"
+                        @update:model-value="
+                          record.landArea = numberOrZero($event);
+                          syncLandPersonAreas()
+                        "
                       />
                       <em class="land-field__unit">亩</em>
                     </label>
@@ -598,14 +639,14 @@ async function importLandConfirmation(): Promise<void> {
                         :step="1"
                         :controls="false"
                         :disabled="busy"
-                        @update:model-value="person.sharesCount = numberOrZero($event)"
+                        @update:model-value="changeLandShares(person, $event)"
                       />
                       <em class="land-field__unit">份</em>
                     </label>
                   </div>
 
                   <label class="land-field">
-                    <span class="land-field__label">面积</span>
+                    <span class="land-field__label">面积（自动）</span>
                     <el-input-number
                       :model-value="person.totalLandArea"
                       class="land-field__control"
@@ -614,8 +655,7 @@ async function importLandConfirmation(): Promise<void> {
                       :precision="2"
                       :step="0.1"
                       :controls="false"
-                      :disabled="busy"
-                      @update:model-value="person.totalLandArea = numberOrZero($event)"
+                      :disabled="true"
                     />
                     <em class="land-field__unit">亩</em>
                   </label>

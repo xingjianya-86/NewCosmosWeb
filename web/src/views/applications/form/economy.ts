@@ -33,6 +33,12 @@ export interface LedgerColumn {
   memberIdKey?: string
   memberIdCardKey?: string
   memberAgeKey?: string
+  /** 下拉选项；配置后该列渲染为 el-select。 */
+  options?: { label: string; value: string }[]
+  /** 只读列（自动计算金额等）。 */
+  readonly?: boolean
+  /** 单元格值变化后的联动（补贴类型带价、金额重算等）。 */
+  onChange?: (row: Record<string, unknown>, value: unknown) => void
 }
 
 export interface LedgerConfig {
@@ -218,25 +224,99 @@ export const OTHER_INCOME_LEDGER: LedgerConfig = {
   }),
 }
 
+/** 与 Core SubsidyPriceConstants 同步：2026-10-15 起执行新价，之前执行旧价。 */
+export const SUBSIDY_PRICE_DATE = '2026-10-15'
+
+export const SUBSIDY_TYPE_OPTIONS = [
+  { label: '地力补贴', value: '地力补贴' },
+  { label: '大豆补贴', value: '大豆补贴' },
+  { label: '玉米补贴', value: '玉米补贴' },
+  { label: '轮作补贴', value: '轮作补贴' },
+  { label: '地表水水稻', value: '地表水水稻' },
+  { label: '地下水水稻', value: '地下水水稻' },
+  { label: '大豆品种补贴', value: '大豆品种补贴' },
+]
+
+const SUBSIDY_PRICES: Record<string, { legacy: number; current: number }> = {
+  地力补贴: { legacy: 75.6, current: 75.73 },
+  大豆补贴: { legacy: 350.73, current: 388.34 },
+  玉米补贴: { legacy: 16.73, current: 47.34 },
+  轮作补贴: { legacy: 150, current: 150 },
+  地表水水稻: { legacy: 156.53, current: 156.75 },
+  地下水水稻: { legacy: 106.53, current: 106.75 },
+  大豆品种补贴: { legacy: 0, current: 0 },
+}
+
+/** 按补贴类型和判价日期取标准单价；未登记类型返回 0。 */
+export function subsidyPrice(type: string, asOf: Date = new Date()): number {
+  const price = SUBSIDY_PRICES[type.trim()]
+  if (!price) return 0
+  return asOf >= new Date(`${SUBSIDY_PRICE_DATE}T00:00:00`) ? price.current : price.legacy
+}
+
+/**
+ * 与 Core Subsidy.CalculateAmount 同口径：
+ * 面积型：原始金额 = 面积 × 单价 × 数量；实际金额 = 原始金额 × 比例。
+ * 金额型：面积=0 且 单价=0 且 原始金额>0 时，实际金额 = 原始金额 × 比例。
+ */
+export function recalcSubsidyRow(row: Record<string, unknown>): void {
+  const area = numberOf(row.area)
+  const unitPrice = numberOf(row.unitPrice)
+  const count = Math.max(1, Math.trunc(numberOf(row.count)) || 1)
+  const ratioRaw = row.ratioFactor
+  const ratio =
+    ratioRaw === null || ratioRaw === undefined || ratioRaw === ''
+      ? 1
+      : numberOf(ratioRaw)
+  const original = numberOf(row.originalAmount)
+
+  if (area === 0 && unitPrice === 0 && original > 0) {
+    row.amount = round2(original * ratio)
+    return
+  }
+
+  const computed = round2(area * unitPrice * count)
+  row.originalAmount = computed
+  row.amount = round2(computed * ratio)
+}
+
 export const SUBSIDY_LEDGER: LedgerConfig = {
   key: 'subsidies',
   title: '农业补贴',
   hint: '按补贴类型逐条登记面积、单价与折算比例；实际金额由 Core 口径计算，可从补贴库按成员一键导入。',
   defaultOpen: true,
   columns: [
-    text('subsidyType', '补贴类型', { placeholder: '地力 / 大豆 / 玉米等', width: 160 }),
-    number('area', '面积', { unit: '亩', precision: 2, step: 0.1, width: 110 }),
-    money('unitPrice', '单价', { unit: '元/亩', width: 120 }),
-    number('count', '数量', { unit: '份', width: 90 }),
+    text('subsidyType', '补贴类型', {
+      width: 150,
+      options: SUBSIDY_TYPE_OPTIONS,
+      onChange: (row, value) => {
+        row.unitPrice = subsidyPrice(String(value ?? ''))
+        recalcSubsidyRow(row)
+      },
+    }),
+    number('area', '面积', {
+      unit: '亩',
+      precision: 2,
+      step: 0.1,
+      width: 100,
+      onChange: recalcSubsidyRow,
+    }),
+    money('unitPrice', '单价', {
+      unit: '元/亩',
+      width: 110,
+      onChange: recalcSubsidyRow,
+    }),
+    money('amount', '实际金额', { unit: '元', width: 110, readonly: true }),
+    number('count', '数量', { unit: '份', width: 80, onChange: recalcSubsidyRow }),
     number('ratioFactor', '比例系数', {
       unit: '0–1',
       precision: 4,
       step: 0.01,
       max: 1,
-      width: 120,
+      width: 110,
+      onChange: recalcSubsidyRow,
     }),
-    money('originalAmount', '原始金额', { unit: '元', width: 120 }),
-    money('amount', '实际金额', { unit: '元', width: 120 }),
+    money('originalAmount', '原始金额', { unit: '元', width: 110, readonly: true }),
     member({ label: '关联成员', memberIdCardKey: 'memberIdCard', width: 180 }),
   ],
   create: () => ({
@@ -559,17 +639,28 @@ export function subsidyImportKey(row: Record<string, unknown>): string {
 export function createSubsidyRowFromImport(
   record: SubsidyImportRecord,
 ): Record<string, unknown> {
-  const area = round2(numberOf(record.area))
+  const type = textOf(record.subsidyType)
+  let area = round2(numberOf(record.area))
   const amount = round2(numberOf(record.amount))
-  // 面积型：面积 × 单价 ≈ 导入金额；金额型（面积为 0）保留 OriginalAmount 供 Core 金额型分支计算。
-  const unitPrice = area > 0 && amount > 0 ? round2(amount / area) : 0
+  let unitPrice = subsidyPrice(type)
+
+  // 金额型导入：有标准单价的类型按「金额 ÷ 单价」反推面积，与旧版导入口径一致。
+  if (area === 0 && amount > 0 && unitPrice > 0) {
+    area = round2(amount / unitPrice)
+  }
+  // 面积型导入但源数据无单价：按金额/面积反推，保持金额可核对。
+  if (area > 0 && unitPrice <= 0 && amount > 0) {
+    unitPrice = round2(amount / area)
+  }
+
+  const originalAmount = area > 0 && unitPrice > 0 ? round2(area * unitPrice) : amount
   return {
-    subsidyType: textOf(record.subsidyType),
+    subsidyType: type,
     area,
     unitPrice,
     count: 1,
     ratioFactor: 1,
-    originalAmount: amount,
+    originalAmount,
     amount,
     memberName: textOf(record.name),
     memberIdCard: textOf(record.idCard),

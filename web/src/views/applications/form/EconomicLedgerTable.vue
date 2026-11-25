@@ -104,10 +104,11 @@ function numberValue(row: Record<string, unknown>, key: string): number | undefi
 
 function setText(
   row: Record<string, unknown>,
-  key: string,
+  column: LedgerColumn,
   value: string | undefined,
 ): void {
-  row[key] = value ?? ''
+  row[column.key] = value ?? ''
+  column.onChange?.(row, value)
 }
 
 function setNumber(
@@ -117,6 +118,16 @@ function setNumber(
 ): void {
   const empty = value === null || value === undefined || !Number.isFinite(value)
   row[column.key] = empty ? (column.nullable ? null : 0) : value
+  column.onChange?.(row, value)
+}
+
+function setSelect(
+  row: Record<string, unknown>,
+  column: LedgerColumn,
+  value: string | undefined,
+): void {
+  row[column.key] = value ?? ''
+  column.onChange?.(row, value)
 }
 
 function setBoolean(row: Record<string, unknown>, key: string, value: unknown): void {
@@ -285,7 +296,26 @@ function addRow(): void {
                 :style="cellStyle(column)"
               >
                 <el-select
-                  v-if="column.type === 'member'"
+                  v-if="column.options"
+                  class="cell-control"
+                  size="small"
+                  filterable
+                  clearable
+                  :model-value="textValue(row, column.key)"
+                  :disabled="busy || column.readonly"
+                  :placeholder="column.placeholder"
+                  @update:model-value="setSelect(row, column, $event)"
+                >
+                  <el-option
+                    v-for="option in column.options"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                  />
+                </el-select>
+
+                <el-select
+                  v-else-if="column.type === 'member'"
                   class="cell-control"
                   size="small"
                   filterable
@@ -321,7 +351,7 @@ function addRow(): void {
                   :precision="column.precision"
                   :step="stepFor(column)"
                   :controls="false"
-                  :disabled="busy"
+                  :disabled="busy || column.readonly"
                   :placeholder="column.placeholder ?? '0'"
                   :value-on-clear="column.nullable ? null : 0"
                   @update:model-value="setNumber(row, column, $event)"
@@ -334,8 +364,8 @@ function addRow(): void {
                   clearable
                   :model-value="displayText(row, column)"
                   :placeholder="column.placeholder"
-                  :disabled="busy"
-                  @update:model-value="setText(row, column.key, $event)"
+                  :disabled="busy || column.readonly"
+                  @update:model-value="setText(row, column, $event)"
                 />
               </td>
 
