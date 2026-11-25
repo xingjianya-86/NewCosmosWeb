@@ -1,3 +1,5 @@
+using NewCosmos.Models.Entities;
+
 namespace NewCosmos.Server.Contracts;
 
 #region 高龄津贴发放（只读查询）
@@ -148,5 +150,102 @@ public sealed record ElderlyReviewListResponse(
     int PageSize,
     long TotalCount,
     int TotalPages);
+
+#endregion
+
+#region 高龄津贴登记（表单/写接口/评估/导入名册/OCR）
+
+/// <summary>
+/// 高龄登记表单请求体（创建/更新共用）。
+/// 字段与官方登记表一一对应；评估结果、补发分段、区划 ID 均由服务端重新计算，不接受前端写入。
+/// </summary>
+public sealed class ElderlyApplicationFormRequest
+{
+    public string Name { get; set; } = string.Empty;
+    public string IdCard { get; set; } = string.Empty;
+    public string Gender { get; set; } = string.Empty;
+    public string Phone { get; set; } = string.Empty;
+
+    public DateTime? BirthDate { get; set; }
+    public DateTime? ApplyDate { get; set; }
+
+    public string HukouProvince { get; set; } = string.Empty;
+    public string HukouCity { get; set; } = string.Empty;
+    public string HukouCounty { get; set; } = string.Empty;
+    public string HukouTown { get; set; } = string.Empty;
+    public string HukouVillage { get; set; } = string.Empty;
+    public string HukouDetailAddress { get; set; } = string.Empty;
+
+    public string FamilyProvince { get; set; } = string.Empty;
+    public string FamilyCity { get; set; } = string.Empty;
+    public string FamilyCounty { get; set; } = string.Empty;
+    public string FamilyTown { get; set; } = string.Empty;
+    public string FamilyVillage { get; set; } = string.Empty;
+    public string DetailAddress { get; set; } = string.Empty;
+
+    public string BankName { get; set; } = string.Empty;
+    public string BankAccount { get; set; } = string.Empty;
+
+    public string AgentName { get; set; } = string.Empty;
+    public string AgentRelation { get; set; } = string.Empty;
+    public string AgentReceiveName { get; set; } = string.Empty;
+    public string AgentReceiveRelation { get; set; } = string.Empty;
+    public string AgentReceiveBankName { get; set; } = string.Empty;
+    public string AgentReceiveBankAccount { get; set; } = string.Empty;
+    public string AgentReceiveReason { get; set; } = string.Empty;
+
+    /// <summary>享受类别（IsCategoryManual=true 时生效）</summary>
+    public string Category { get; set; } = string.Empty;
+    public bool IsCategoryManual { get; set; }
+
+    /// <summary>补发起算月（yyyy-MM，特殊情况人工指定）</summary>
+    public string PaybackStartMonth { get; set; } = string.Empty;
+
+    /// <summary>补发止算月（yyyy-MM，特殊情况人工指定）</summary>
+    public string PaybackEndMonth { get; set; } = string.Empty;
+    public string PaybackReason { get; set; } = string.Empty;
+    public string SpecialReason { get; set; } = string.Empty;
+    public bool IsSpecialCase { get; set; }
+}
+
+/// <summary>
+/// 高龄登记表单回填：档案全字段 + 户籍/家庭四级区划名称 + 补发分段明细。
+/// </summary>
+public sealed class ElderlyApplicationFormResponse
+{
+    public ElderlyApplication Application { get; init; } = new();
+
+    public string HukouProvince { get; init; } = string.Empty;
+    public string HukouCity { get; init; } = string.Empty;
+    public string HukouCounty { get; init; } = string.Empty;
+    public string HukouTown { get; init; } = string.Empty;
+    public string HukouVillage { get; init; } = string.Empty;
+
+    public string FamilyProvince { get; init; } = string.Empty;
+    public string FamilyCity { get; init; } = string.Empty;
+    public string FamilyCounty { get; init; } = string.Empty;
+    public string FamilyTown { get; init; } = string.Empty;
+    public string FamilyVillage { get; init; } = string.Empty;
+
+    public IReadOnlyList<ElderlyPaybackSegment> Segments { get; init; } = Array.Empty<ElderlyPaybackSegment>();
+}
+
+/// <summary>新建高龄登记返回：主键 + 申请编号。</summary>
+public sealed record ElderlyApplicationCreatedDto(long Id, string ApplicationNo);
+
+/// <summary>特殊情况补发试算请求（人工指定起止月）。</summary>
+public sealed record ElderlySpecialEvaluationRequest(
+    string? IdCard,
+    string? StartMonth,
+    string? EndMonth);
+
+/// <summary>身份证 OCR 识别结果：姓名/证号/性别/出生日期/住址 + 原始字段表。</summary>
+public sealed record ElderlyOcrResponse(
+    string Name,
+    string IdCard,
+    string Gender,
+    DateTime? BirthDate,
+    string Address,
+    IReadOnlyDictionary<string, string> Fields);
 
 #endregion

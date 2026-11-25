@@ -1,35 +1,62 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Refresh, Search } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
-import { listElderlyApplications } from '@/api/elderly'
+import {
+  confirmElderlyApplication,
+  deleteElderlyApplication,
+  getElderlyApplication,
+  listElderlyApplications,
+} from '@/api/elderly'
 import NcCard from '@/components/NcCard.vue'
 import NcPageHeader from '@/components/NcPageHeader.vue'
-import NcStat from '@/components/NcStat.vue'
 import { useMediaQuery } from '@/composables/useMediaQuery'
 import type { ElderlyApplicationListItem } from '@/types/elderly'
 import ElderlyChip from './ElderlyChip.vue'
-import { applicationStatusTone, formatAge, formatDate, formatMoney, formatMonth } from './display'
+import type { ChipTone } from './display'
+import { formatDate, formatMonth } from './display'
+
+type TabStatus = 'Draft' | 'Confirmed' | 'Stopped'
+
+const TABS: Array<{ value: TabStatus; label: string }> = [
+  { value: 'Draft', label: '草稿' },
+  { value: 'Confirmed', label: '已确认' },
+  { value: 'Stopped', label: '已停发' },
+]
+
+const TAB_META: Record<TabStatus, { text: string; tone: ChipTone }> = {
+  Draft: { text: '草稿', tone: 'amber' },
+  Confirmed: { text: '在享', tone: 'pine' },
+  Stopped: { text: '已停发', tone: 'seal' },
+}
+
+const EMPTY_TEXT: Record<TabStatus, string> = {
+  Draft: '暂无草稿记录',
+  Confirmed: '暂无已确认（在享）记录',
+  Stopped: '暂无已停发记录',
+}
+
+interface StopInfo {
+  date: string | null
+  reason: string
+}
 
 const route = useRoute()
 const router = useRouter()
 const isNarrow = useMediaQuery('(max-width: 960px)')
 
-const STATUS_TABS = [
-  { label: '全部', value: '' },
-  { label: '草稿', value: 'Draft' },
-  { label: '在享', value: 'Confirmed' },
-  { label: '已停发', value: 'Stopped' },
-]
-const VALID_STATUSES = ['Draft', 'Confirmed', 'Stopped']
-
+// 旧版默认进入「已确认」Tab。
+const activeTab = ref<TabStatus>('Confirmed')
 const keyword = ref('')
-const status = ref('')
 const page = ref(1)
-const pageSize = ref(20)
+// 已确认每页 10 条，草稿 / 已停发每页 20 条（旧版固定分页）。
+const pageSize = computed(() => (activeTab.value === 'Confirmed' ? 10 : 20))
 
 const items = ref<ElderlyApplicationListItem[]>([])
+const counts = ref<Record<TabStatus, number>>({ Draft: 0, Confirmed: 0, Stopped: 0 })
+const stopInfo = ref<Record<number, StopInfo>>({})
 const totalCount = ref(0)
 const totalPages = ref(0)
 const loading = ref(false)
@@ -37,35 +64,27 @@ const loadError = ref('')
 
 let requestTicket = 0
 
-const hasFilters = computed(() => keyword.value.trim().length > 0 || status.value !== '')
 const displayTotalPages = computed(() => Math.max(totalPages.value, 1))
+const emptyText = computed(() => EMPTY_TEXT[activeTab.value])
+const tabMeta = computed(() => TAB_META[activeTab.value])
+const hasKeyword = computed(() => keyword.value.trim().length > 0)
 const paginationLayout = computed(() =>
-  isNarrow.value ? 'prev, pager, next' : 'total, sizes, prev, pager, next, jumper',
+  isNarrow.value ? 'prev, pager, next' : 'prev, pager, next, jumper',
 )
 
-const listSubtitle = computed(() => {
-  if (loadError.value) return '数据加载失败'
-  if (loading.value && items.value.length === 0) return '正在读取高龄津贴档案…'
-  const suffix = hasFilters.value ? ' · 已应用筛选' : ''
-  return `共 ${totalCount.value} 条记录${suffix}`
-})
-
-const emptyDescription = computed(() =>
-  hasFilters.value ? '没有找到匹配的高龄津贴档案' : '暂无高龄津贴登记记录',
-)
-
-function readStatusFromQuery(): string {
+function readStatusFromQuery(): TabStatus | null {
   const raw = route.query.status
   const value = Array.isArray(raw) ? raw[0] : raw
-  return typeof value === 'string' && VALID_STATUSES.includes(value) ? value : ''
+  return value === 'Draft' || value === 'Confirmed' || value === 'Stopped' ? value : null
 }
 
 function syncStatusQuery(): void {
-  void router.replace({ query: { ...route.query, status: status.value || undefined } })
+  void router.replace({ query: { ...route.query, status: activeTab.value } })
 }
 
 async function load(): Promise<void> {
   const ticket = ++requestTicket
+  const tab = activeTab.value
   loading.value = true
   loadError.value = ''
 
@@ -74,15 +93,18 @@ async function load(): Promise<void> {
       page: page.value,
       pageSize: pageSize.value,
       keyword: keyword.value.trim() || undefined,
-      status: status.value || undefined,
+      status: tab,
     })
     if (ticket !== requestTicket) return
 
     items.value = response.items ?? []
     page.value = response.pageIndex || page.value
-    pageSize.value = response.pageSize || pageSize.value
     totalCount.value = response.totalCount ?? 0
     totalPages.value = response.totalPages ?? 0
+
+    if (tab === 'Stopped') {
+      void loadStopInfo(ticket, items.value)
+    }
   } catch (error) {
     if (ticket !== requestTicket) return
     items.value = []
@@ -94,22 +116,65 @@ async function load(): Promise<void> {
   }
 }
 
+/**
+ * 列表接口不含停发时间/原因，已停发卡片按需补详情。
+ * 单页最多 20 条，并发读取后回填；失败项保持「—」。
+ */
+async function loadStopInfo(
+  ticket: number,
+  rows: ElderlyApplicationListItem[],
+): Promise<void> {
+  stopInfo.value = {}
+  if (rows.length === 0) return
+
+  const results = await Promise.allSettled(
+    rows.map(async (row) => {
+      const detail = await getElderlyApplication(row.id)
+      return {
+        id: row.id,
+        info: {
+          date: detail.actualStopDate,
+          reason: detail.stopReasonText || detail.stopReason || '',
+        } as StopInfo,
+      }
+    }),
+  )
+  if (ticket !== requestTicket) return
+
+  const next: Record<number, StopInfo> = {}
+  for (const result of results) {
+    if (result.status === 'fulfilled') next[result.value.id] = result.value.info
+  }
+  stopInfo.value = next
+}
+
+async function loadCounts(): Promise<void> {
+  const statuses: TabStatus[] = ['Draft', 'Confirmed', 'Stopped']
+  await Promise.allSettled(
+    statuses.map(async (status) => {
+      const response = await listElderlyApplications({ page: 1, pageSize: 1, status })
+      counts.value[status] = response.totalCount ?? 0
+    }),
+  )
+}
+
+function switchTab(next: TabStatus): void {
+  if (activeTab.value === next) return
+  activeTab.value = next
+  page.value = 1
+  keyword.value = ''
+  syncStatusQuery()
+  void load()
+}
+
 function handleSearch(): void {
   page.value = 1
   void load()
 }
 
-function handleStatusChange(): void {
-  page.value = 1
-  syncStatusQuery()
-  void load()
-}
-
 function handleReset(): void {
   keyword.value = ''
-  status.value = ''
   page.value = 1
-  syncStatusQuery()
   void load()
 }
 
@@ -118,30 +183,94 @@ function handlePageChange(value: number): void {
   void load()
 }
 
-function handleSizeChange(value: number): void {
-  pageSize.value = value
-  page.value = 1
-  void load()
+function handleCreate(): void {
+  void router.push('/elderly/applications/new')
 }
 
-function openDetail(row: ElderlyApplicationListItem): void {
-  void router.push({ name: 'elderly-application-detail', params: { id: row.id } })
+function handleView(row: ElderlyApplicationListItem): void {
+  void router.push(`/elderly/applications/${row.id}`)
+}
+
+function handleEdit(row: ElderlyApplicationListItem): void {
+  void router.push(`/elderly/applications/${row.id}/edit`)
+}
+
+function handleStop(row: ElderlyApplicationListItem): void {
+  // 停发页下一阶段实现，先保留入口。
+  void router.push(`/elderly/stops/${row.id}`)
+}
+
+/**
+ * TODO(照片模块): 下一阶段替换为统一档案照片对话框，按身份证检索
+ * （对应旧版 ArchivePhotoQueryPage 的预填身份证行为）。
+ */
+function handlePhotos(_row: ElderlyApplicationListItem): void {
+  ElMessage.info('照片查询随档案照片模块接入')
+}
+
+async function handleConfirm(row: ElderlyApplicationListItem): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `确认要确认 [${row.applicationNo}] ${row.name} 的高龄补贴登记生效？`,
+      '确认生效',
+      { confirmButtonText: '确认', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+
+  try {
+    await confirmElderlyApplication(row.id)
+    ElMessage.success('登记已确认生效')
+    await Promise.all([load(), loadCounts()])
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '确认登记生效失败'))
+  }
+}
+
+async function handleDelete(row: ElderlyApplicationListItem): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `确认要删除登记 [${row.applicationNo}] ${row.name} 吗？\n此操作不可恢复。`,
+      '确认删除',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+
+  try {
+    await deleteElderlyApplication(row.id)
+    await Promise.all([load(), loadCounts()])
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '删除登记失败'))
+  }
+}
+
+function stopDate(row: ElderlyApplicationListItem): string {
+  return formatDate(stopInfo.value[row.id]?.date ?? null)
+}
+
+function stopReason(row: ElderlyApplicationListItem): string {
+  return stopInfo.value[row.id]?.reason || '—'
 }
 
 watch(
   () => route.query.status,
   () => {
-    const next = readStatusFromQuery()
-    if (next === status.value) return
-    status.value = next
+    const next = readStatusFromQuery() ?? 'Confirmed'
+    if (next === activeTab.value) return
+    activeTab.value = next
     page.value = 1
+    keyword.value = ''
     void load()
   },
 )
 
 onMounted(() => {
-  status.value = readStatusFromQuery()
+  activeTab.value = readStatusFromQuery() ?? 'Confirmed'
   void load()
+  void loadCounts()
 })
 </script>
 
@@ -149,31 +278,35 @@ onMounted(() => {
   <div class="nc-page elderly-list-page">
     <NcPageHeader
       title="高龄津贴申请登记"
-      description="高龄津贴受理登记、审核确认与停发管理。支持按姓名、身份证号或申请编号检索。"
-      kicker="普惠高龄 · 登记档案"
+      description="高龄津贴受理登记、审核确认与停发管理"
     >
       <template #actions>
         <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
+        <el-button type="primary" :icon="Plus" @click="handleCreate">新增登记</el-button>
       </template>
     </NcPageHeader>
 
-    <div class="summary">
-      <NcStat label="筛选结果" :value="totalCount" tone="ink" compact />
-      <NcStat label="本页记录" :value="items.length" tone="pine" compact />
-      <NcStat label="当前页" :value="`${page} / ${displayTotalPages}`" tone="seal" compact />
-    </div>
-
     <NcCard padding="none" class="filter-card">
       <div class="status-tabs" role="tablist" aria-label="按状态筛选">
-        <el-radio-group v-model="status" @change="handleStatusChange">
-          <el-radio-button
-            v-for="tab in STATUS_TABS"
-            :key="tab.value || 'all'"
-            :value="tab.value"
+        <button
+          v-for="tab in TABS"
+          :key="tab.value"
+          type="button"
+          role="tab"
+          class="status-tab"
+          :class="{ 'is-active': activeTab === tab.value }"
+          :aria-selected="activeTab === tab.value"
+          @click="switchTab(tab.value)"
+        >
+          <span>{{ tab.label }}</span>
+          <span
+            v-if="counts[tab.value] > 0"
+            class="status-tab__count"
+            :class="`status-tab__count--${tab.value.toLowerCase()}`"
           >
-            {{ tab.label }}
-          </el-radio-button>
-        </el-radio-group>
+            {{ counts[tab.value] }}
+          </span>
+        </button>
       </div>
 
       <form class="filter-bar" @submit.prevent="handleSearch">
@@ -182,14 +315,14 @@ onMounted(() => {
           class="filter-search"
           clearable
           :prefix-icon="Search"
-          placeholder="搜索姓名 / 身份证号 / 申请编号"
+          placeholder="搜索姓名、身份证号..."
           @clear="handleSearch"
         />
         <div class="filter-actions">
           <el-button type="primary" :icon="Search" native-type="submit" :loading="loading">
             查询
           </el-button>
-          <el-button v-if="hasFilters" text native-type="button" @click="handleReset">
+          <el-button v-if="hasKeyword" text native-type="button" @click="handleReset">
             重置
           </el-button>
         </div>
@@ -207,157 +340,107 @@ onMounted(() => {
       <el-button link type="primary" @click="load()">重新加载</el-button>
     </el-alert>
 
-    <NcCard title="登记列表" :subtitle="listSubtitle" padding="none" class="list-card">
-      <div
-        v-loading="loading && items.length > 0"
-        class="list-area"
-        :class="{ 'is-cards': isNarrow }"
-      >
+    <NcCard padding="none" class="list-card">
+      <div v-loading="loading && items.length > 0" class="list-area">
         <el-skeleton v-if="loading && items.length === 0" :rows="5" animated class="list-skeleton" />
 
-        <template v-else-if="items.length > 0">
-          <el-table
-            v-if="!isNarrow"
-            :data="items"
-            row-key="id"
-            class="app-table"
-            @row-click="openDetail"
-          >
-            <el-table-column label="申请编号" min-width="140">
-              <template #default="{ row }">
-                <span class="app-no">{{ row.applicationNo }}</span>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="姓名" min-width="96">
-              <template #default="{ row }">
-                <div class="person-cell">
-                  <strong>{{ row.name }}</strong>
-                  <span>{{ row.gender || '—' }} · {{ formatAge(row.age) }}</span>
-                </div>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="身份证（脱敏）" min-width="150">
-              <template #default="{ row }">
-                <span class="mono">{{ row.idCardMasked || '—' }}</span>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="享受类别" min-width="190">
-              <template #default="{ row }">
-                <span class="category" :title="row.categoryText">{{ row.categoryText || '—' }}</span>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="状态" width="96">
-              <template #default="{ row }">
-                <ElderlyChip
-                  :text="row.statusText || row.status"
-                  :tone="applicationStatusTone(row.status)"
-                />
-              </template>
-            </el-table-column>
-
-            <el-table-column label="受理日期" width="108">
-              <template #default="{ row }">{{ formatDate(row.applyDate) }}</template>
-            </el-table-column>
-
-            <el-table-column label="计发年月" width="108">
-              <template #default="{ row }">{{ formatMonth(row.issueStartMonth) }}</template>
-            </el-table-column>
-
-            <el-table-column label="月标准（元）" width="112" align="right">
-              <template #default="{ row }">
-                <span class="mono">{{ formatMoney(row.issueAmount) }}</span>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="操作" width="64" align="right">
-              <template #default="{ row }">
-                <el-button link type="primary" @click.stop="openDetail(row as ElderlyApplicationListItem)">
-                  查看
-                </el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-
-          <div v-else class="app-cards">
-            <article
-              v-for="row in items"
-              :key="row.id"
-              class="app-card"
-              role="button"
-              tabindex="0"
-              @click="openDetail(row)"
-              @keydown.enter="openDetail(row)"
-            >
-              <header class="card-head">
-                <span class="app-no">{{ row.applicationNo }}</span>
-                <ElderlyChip
-                  :text="row.statusText || row.status"
-                  :tone="applicationStatusTone(row.status)"
-                />
-              </header>
-
+        <div v-else-if="items.length > 0" class="app-cards">
+          <article v-for="row in items" :key="row.id" class="app-card">
+            <header class="card-head">
               <div class="card-person">
                 <strong>{{ row.name }}</strong>
-                <span class="mono">{{ row.idCardMasked || '—' }}</span>
+                <ElderlyChip :text="tabMeta.text" :tone="tabMeta.tone" />
               </div>
 
-              <div class="card-meta-grid">
-                <div>
-                  <span>性别 / 年龄</span>
-                  <strong>{{ row.gender || '—' }} · {{ formatAge(row.age) }}</strong>
-                </div>
-                <div>
-                  <span>享受类别</span>
-                  <strong>{{ row.categoryText || '—' }}</strong>
-                </div>
-                <div>
-                  <span>受理日期</span>
-                  <strong>{{ formatDate(row.applyDate) }}</strong>
-                </div>
-                <div>
-                  <span>计发年月</span>
-                  <strong>{{ formatMonth(row.issueStartMonth) }}</strong>
-                </div>
-                <div>
-                  <span>月标准</span>
-                  <strong>{{ formatMoney(row.issueAmount) }} 元</strong>
-                </div>
+              <div v-if="activeTab === 'Draft'" class="card-actions">
+                <el-button size="small" type="info" plain @click="handlePhotos(row)">
+                  照片
+                </el-button>
+                <el-button size="small" type="success" @click="handleConfirm(row)">
+                  确认
+                </el-button>
+                <el-button size="small" type="warning" @click="handleEdit(row)">
+                  编辑
+                </el-button>
+                <el-button size="small" type="danger" @click="handleDelete(row)">
+                  删除
+                </el-button>
               </div>
 
-              <button class="card-foot" type="button" @click.stop="openDetail(row)">
-                查看档案
-              </button>
-            </article>
-          </div>
-        </template>
+              <div v-else-if="activeTab === 'Confirmed'" class="card-actions">
+                <el-button size="small" type="primary" @click="handleView(row)">
+                  查看档案
+                </el-button>
+                <el-button size="small" type="info" plain @click="handlePhotos(row)">
+                  照片
+                </el-button>
+                <el-button size="small" type="warning" @click="handleStop(row)">
+                  停发
+                </el-button>
+              </div>
+            </header>
+
+            <p class="card-id mono">{{ row.idCardMasked || '—' }}</p>
+            <p class="card-no">
+              编号: <span class="mono">{{ row.applicationNo || '—' }}</span>
+            </p>
+
+            <dl class="card-meta">
+              <template v-if="activeTab === 'Draft'">
+                <div>
+                  <dt>受理日期</dt>
+                  <dd>{{ formatDate(row.applyDate) }}</dd>
+                </div>
+                <div>
+                  <dt>享受类别</dt>
+                  <dd>{{ row.categoryText || '—' }}</dd>
+                </div>
+              </template>
+
+              <template v-else-if="activeTab === 'Confirmed'">
+                <div>
+                  <dt>计发年月</dt>
+                  <dd>{{ formatMonth(row.issueStartMonth) }}</dd>
+                </div>
+                <div>
+                  <dt>享受类别</dt>
+                  <dd>{{ row.categoryText || '—' }}</dd>
+                </div>
+              </template>
+
+              <template v-else>
+                <div>
+                  <dt>停发时间</dt>
+                  <dd>{{ stopDate(row) }}</dd>
+                </div>
+                <div>
+                  <dt>停发原因</dt>
+                  <dd :title="stopReason(row)">{{ stopReason(row) }}</dd>
+                </div>
+              </template>
+            </dl>
+          </article>
+        </div>
 
         <div v-else-if="!loading && !loadError" class="empty-wrap">
-          <el-empty :description="emptyDescription">
-            <el-button v-if="hasFilters" :icon="Refresh" @click="handleReset">清除筛选</el-button>
-          </el-empty>
+          <el-empty :description="emptyText" />
         </div>
       </div>
 
       <template #footer>
-        <div v-if="items.length > 0" class="pagination">
+        <div v-if="totalCount > 0" class="pagination">
           <span class="pagination-note">
             第 {{ page }} / {{ displayTotalPages }} 页 · 共 {{ totalCount }} 条
           </span>
           <el-pagination
             :current-page="page"
             :page-size="pageSize"
-            :page-sizes="[10, 20, 50]"
             :total="totalCount"
             :layout="paginationLayout"
             :pager-count="isNarrow ? 5 : 7"
             :small="isNarrow"
             background
             @current-change="handlePageChange"
-            @size-change="handleSizeChange"
           />
         </div>
       </template>
@@ -372,19 +455,64 @@ onMounted(() => {
   gap: 15px;
 }
 
-.summary {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.filter-card {
+.filter-card,
+.list-card {
   overflow: hidden;
 }
 
 .status-tabs {
-  padding: 12px 16px 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--nc-line-faint);
+}
+
+.status-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 12px;
+  border: 1px solid var(--nc-line);
+  border-radius: var(--nc-radius-xs);
+  background-color: var(--nc-paper-3);
+  color: var(--nc-muted);
+  font-family: inherit;
+  font-size: var(--nc-text-sm);
+  cursor: pointer;
+}
+
+.status-tab.is-active {
+  border-color: var(--nc-seal);
+  background-color: var(--nc-seal-soft);
+  color: var(--nc-ink);
+  font-weight: 700;
+}
+
+.status-tab__count {
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: #fff;
+  font-family: var(--nc-font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+
+.status-tab__count--draft {
+  background-color: var(--nc-seal);
+}
+
+.status-tab__count--confirmed {
+  background-color: var(--nc-pine);
+}
+
+.status-tab__count--stopped {
+  background-color: var(--nc-seal-soft);
+  color: var(--nc-seal);
 }
 
 .filter-bar {
@@ -411,10 +539,6 @@ onMounted(() => {
   margin: 0;
 }
 
-.list-card {
-  overflow: hidden;
-}
-
 .list-card :deep(.nc-card__foot) {
   margin-top: 0;
   padding-top: 0;
@@ -423,103 +547,39 @@ onMounted(() => {
 
 .list-area {
   min-height: 220px;
-}
-
-.list-area.is-cards {
   padding: 10px;
 }
 
 .list-skeleton {
-  padding: 22px;
-}
-
-.app-table {
-  width: 100%;
-}
-
-.app-table :deep(.el-table__row) {
-  cursor: pointer;
-}
-
-.app-no {
-  color: var(--nc-ink-2);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-sm);
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-}
-
-.person-cell {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.45;
-}
-
-.person-cell strong {
-  color: var(--nc-ink);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.person-cell span {
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-}
-
-.mono {
-  color: var(--nc-ink-2);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-sm);
-}
-
-.category {
-  display: block;
-  overflow: hidden;
-  color: var(--nc-ink-2);
-  font-size: var(--nc-text-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  padding: 12px;
 }
 
 .app-cards {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 
 .app-card {
-  padding: 14px 15px;
+  padding: 14px 16px;
   border: 1px solid var(--nc-line);
   border-radius: var(--nc-radius-sm);
   background-color: var(--nc-paper-soft);
-  cursor: pointer;
-  transition:
-    border-color var(--nc-transition),
-    box-shadow var(--nc-transition);
-}
-
-.app-card:hover {
-  border-color: var(--nc-line-strong);
-  box-shadow: var(--nc-shadow-sm);
-}
-
-.app-card:focus-visible {
-  outline: 2px solid var(--nc-seal);
-  outline-offset: 1px;
 }
 
 .card-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
 }
 
 .card-person {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 10px;
+  gap: 8px;
+  min-width: 0;
 }
 
 .card-person strong {
@@ -530,55 +590,68 @@ onMounted(() => {
   letter-spacing: 0.03em;
 }
 
-.card-person .mono {
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
+.card-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
-.card-meta-grid {
+.card-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.card-id {
+  margin: 8px 0 0;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-sm);
+}
+
+.card-no {
+  margin: 4px 0 0;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-sm);
+}
+
+.mono {
+  color: var(--nc-ink-2);
+  font-family: var(--nc-font-mono);
+  font-size: var(--nc-text-sm);
+}
+
+.card-no .mono {
+  color: var(--nc-muted);
+}
+
+.card-meta {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 14px;
-  margin-top: 12px;
-  padding-top: 11px;
+  gap: 8px 16px;
+  margin: 10px 0 0;
+  padding-top: 9px;
   border-top: 1px solid var(--nc-line-faint);
 }
 
-.card-meta-grid div {
-  display: flex;
-  flex-direction: column;
+.card-meta div {
   min-width: 0;
-  line-height: 1.45;
 }
 
-.card-meta-grid span {
+.card-meta dt {
   color: var(--nc-muted);
   font-family: var(--nc-font-mono);
   font-size: 10px;
   letter-spacing: 0.08em;
 }
 
-.card-meta-grid strong {
+.card-meta dd {
+  margin: 2px 0 0;
   overflow: hidden;
   color: var(--nc-ink-2);
   font-size: var(--nc-text-sm);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.card-foot {
-  width: 100%;
-  margin-top: 10px;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--nc-seal);
-  font-family: inherit;
-  font-size: var(--nc-text-sm);
-  font-weight: 600;
-  text-align: right;
-  cursor: pointer;
 }
 
 .empty-wrap {
@@ -602,10 +675,6 @@ onMounted(() => {
 }
 
 @media (max-width: 767px) {
-  .summary {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .filter-bar {
     padding: 12px;
   }
@@ -622,6 +691,19 @@ onMounted(() => {
 
   .filter-actions .el-button {
     flex: 1;
+  }
+
+  .card-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .card-actions {
+    justify-content: flex-start;
+  }
+
+  .card-meta {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .pagination {

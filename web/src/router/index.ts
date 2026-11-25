@@ -86,10 +86,22 @@ const router = createRouter({
           meta: { title: '津贴申请登记' },
         },
         {
+          path: 'elderly/applications/new',
+          name: 'elderly-application-new',
+          component: () => import('@/views/elderly/ElderlyApplicationFormView.vue'),
+          meta: { title: '新增高龄津贴登记' },
+        },
+        {
           path: 'elderly/applications/:id',
           name: 'elderly-application-detail',
-          component: () => import('@/views/elderly/ElderlyApplicationDetailView.vue'),
+          component: () => import('@/views/elderly/ElderlyApplicationFormView.vue'),
           meta: { title: '高龄津贴档案' },
+        },
+        {
+          path: 'elderly/applications/:id/edit',
+          name: 'elderly-application-edit',
+          component: () => import('@/views/elderly/ElderlyApplicationFormView.vue'),
+          meta: { title: '编辑高龄津贴登记' },
         },
         {
           path: 'elderly/pending',

@@ -1,6 +1,12 @@
 import type {
+  ElderlyApplicationCreated,
   ElderlyApplicationDetail,
+  ElderlyApplicationFormRequest,
+  ElderlyApplicationFormResponse,
   ElderlyApplicationListResponse,
+  ElderlyEvaluateResult,
+  ElderlyIdCardOcrResult,
+  ElderlyImportedItem,
   ElderlyPendingResponse,
   ElderlyReviewListResponse,
   ElderlySummary,
@@ -59,5 +65,99 @@ export function listElderlyReviews(
 ): Promise<ElderlyReviewListResponse> {
   return apiHttp
     .get<ElderlyReviewListResponse>('/elderly/reviews', { params })
+    .then((response) => response.data)
+}
+
+/** 登记表单全字段（编辑/查看）。 */
+export function getElderlyApplicationForm(
+  id: number | string,
+): Promise<ElderlyApplicationFormResponse> {
+  return apiHttp
+    .get<ElderlyApplicationFormResponse>(
+      `/elderly/applications/${encodeURIComponent(String(id))}/form`,
+    )
+    .then((response) => response.data)
+}
+
+/** 判类 + 补发评估。 */
+export function evaluateElderly(
+  idCard: string,
+  applyDate: string,
+): Promise<ElderlyEvaluateResult> {
+  return apiHttp
+    .get<ElderlyEvaluateResult>('/elderly/evaluate', { params: { idCard, applyDate } })
+    .then((response) => response.data)
+}
+
+/** 特殊补发区间重算（手动起止月）。 */
+export function evaluateElderlySpecial(
+  idCard: string,
+  startMonth: string,
+  endMonth: string,
+): Promise<ElderlyEvaluateResult['payback']> {
+  return apiHttp
+    .post<ElderlyEvaluateResult['payback']>('/elderly/evaluate/special', {
+      idCard,
+      startMonth,
+      endMonth,
+    })
+    .then((response) => response.data)
+}
+
+/** 身份证精确查导入名册。 */
+export function getElderlyImportedByIdCard(
+  idCard: string,
+): Promise<ElderlyImportedItem | null> {
+  return apiHttp
+    .get<ElderlyImportedItem | null>('/elderly/imported', { params: { idCard } })
+    .then((response) => response.data ?? null)
+}
+
+/** 姓名/身份证检索导入名册。 */
+export function searchElderlyImported(keyword: string): Promise<ElderlyImportedItem[]> {
+  return apiHttp
+    .get<ElderlyImportedItem[]>('/elderly/imported/search', { params: { keyword } })
+    .then((response) => response.data ?? [])
+}
+
+/** 新增登记。 */
+export function createElderlyApplication(
+  request: ElderlyApplicationFormRequest,
+): Promise<ElderlyApplicationCreated> {
+  return apiHttp
+    .post<ElderlyApplicationCreated>('/elderly/applications', request)
+    .then((response) => response.data)
+}
+
+/** 更新登记/补全。 */
+export function updateElderlyApplication(
+  id: number | string,
+  request: ElderlyApplicationFormRequest,
+): Promise<void> {
+  return apiHttp
+    .put(`/elderly/applications/${encodeURIComponent(String(id))}`, request)
+    .then(() => undefined)
+}
+
+/** 确认登记生效。 */
+export function confirmElderlyApplication(id: number | string): Promise<void> {
+  return apiHttp
+    .post(`/elderly/applications/${encodeURIComponent(String(id))}/confirm`)
+    .then(() => undefined)
+}
+
+/** 删除草稿。 */
+export function deleteElderlyApplication(id: number | string): Promise<void> {
+  return apiHttp
+    .delete(`/elderly/applications/${encodeURIComponent(String(id))}`)
+    .then(() => undefined)
+}
+
+/** 身份证 OCR。 */
+export function ocrElderlyIdCard(file: File): Promise<ElderlyIdCardOcrResult> {
+  const form = new FormData()
+  form.append('file', file)
+  return apiHttp
+    .post<ElderlyIdCardOcrResult>('/elderly/ocr/idcard', form, { timeout: 120_000 })
     .then((response) => response.data)
 }
