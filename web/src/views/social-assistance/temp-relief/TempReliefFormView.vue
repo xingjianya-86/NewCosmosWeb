@@ -303,15 +303,6 @@ function normalizeFamilyCategory(value: string): string {
   return text
 }
 
-/** 兼容旧档：standard_tier 为空时从旧文本档位（50%/75%/100%）反推。 */
-function legacyTierCode(level: string | null | undefined): string {
-  const text = (level ?? '').trim()
-  if (text.includes('100')) return 'S100'
-  if (text.includes('75')) return 'S75'
-  if (text.includes('50')) return 'S50'
-  return ''
-}
-
 function normalizeDifficulty(value: string | null | undefined): DifficultyType {
   const text = (value ?? '').trim()
   return (DIFFICULTY_TYPES as readonly string[]).includes(text)
@@ -557,6 +548,11 @@ const isEditable = computed(() => {
   return form.status === 'Draft' || form.status === 'Returned'
 })
 const isSmall = computed(() => form.reliefType === 'Small')
+
+/** 历史小额档案未记录档位：不自动猜档，提示重新选择；金额按原值展示。 */
+const legacyTierMissing = computed(
+  () => !isCreate.value && isSmall.value && !form.standardTier && Boolean(detail.value?.id),
+)
 const effectiveChannel = computed<PaymentChannel>(
   () => (isSmall.value ? 'Reserve' : form.paymentChannel),
 )
@@ -1003,7 +999,7 @@ function applyDetail(current: TempReliefDetail): void {
   form.familyMemberStatus = current.familyMemberStatus
   form.verifyResult = current.verifyResult
   form.acceptancePerson = current.acceptancePerson
-  form.standardTier = current.standardTier || legacyTierCode(current.smallAmountLevel)
+  form.standardTier = current.standardTier ?? ''
   form.confirmAmount = current.confirmAmount ?? undefined
   form.reliefPersonCount = Math.max(
     current.reliefPersonCount || current.familySize || 1,
@@ -1218,11 +1214,12 @@ async function loadSmallTiers(): Promise<void> {
     if (form.standardTier && !smallTiers.value.some((tier) => tier.code === form.standardTier)) {
       form.standardTier = ''
     }
-    if (!form.standardTier && smallTiers.value.length > 0) {
+    if (!form.standardTier && smallTiers.value.length > 0 && isCreate.value) {
       form.standardTier = smallTiers.value[0].code
       form.confirmAmount = smallTiers.value[0].ceilingAmount
     } else if (!form.standardTier) {
-      form.confirmAmount = undefined
+      // 历史档位缺失时不猜档，保留已存金额供核对；用户重新选档后再按档位校准。
+      form.confirmAmount = detail.value?.confirmAmount ?? undefined
     } else {
       const tier = smallTiers.value.find((item) => item.code === form.standardTier)
       if (tier && (
@@ -3194,6 +3191,15 @@ onBeforeUnmount(() => {
         />
 
         <NcCard v-if="isSmall" title="救助金额（小额快救）">
+          <el-alert
+            v-if="legacyTierMissing"
+            class="amount-alert"
+            type="warning"
+            :closable="false"
+            show-icon
+            title="该历史档案未记录政策档位"
+            description="请重新选择 50%/75%/100% 档位后再保存；确定金额已按原值显示。"
+          />
           <div class="form-grid form-grid--3">
             <label class="field">
               <span class="field-label">遇困人数（含户主） *</span>
