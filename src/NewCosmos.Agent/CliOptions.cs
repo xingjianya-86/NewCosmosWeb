@@ -25,6 +25,10 @@ public sealed class CliOptions
 
     public int? HeartbeatSeconds { get; private set; }
 
+    public int? JobPollSeconds { get; private set; }
+
+    public string? PrintJobsDirectory { get; private set; }
+
     public static bool TryParse(string[] args, out CliOptions options, out string? error)
     {
         options = new CliOptions();
@@ -67,6 +71,10 @@ public sealed class CliOptions
 
                 case "--heartbeat-once":
                     if (!SetCommand(options, "heartbeat-once", ref commandSet, out error)) return false;
+                    break;
+
+                case "--worker":
+                    if (!SetCommand(options, "worker", ref commandSet, out error)) return false;
                     break;
 
                 case "--render":
@@ -126,10 +134,25 @@ public sealed class CliOptions
                     options.HeartbeatSeconds = seconds;
                     break;
 
+                case "--job-poll-seconds":
+                    if (!TryReadValue(args, ref i, inlineValue, arg, out var pollText, out error)) return false;
+                    if (!int.TryParse(pollText, out var pollSeconds) || pollSeconds < 2 || pollSeconds > 300)
+                    {
+                        error = "--job-poll-seconds 必须是 2..300 的整数";
+                        return false;
+                    }
+                    options.JobPollSeconds = pollSeconds;
+                    break;
+
+                case "--print-jobs-dir":
+                    if (!TryReadValue(args, ref i, inlineValue, arg, out var jobsDir, out error)) return false;
+                    options.PrintJobsDirectory = jobsDir;
+                    break;
+
                 default:
-                    // 允许直接写命令名（register / heartbeat / render ...）
+                    // 允许直接写命令名（register / heartbeat / worker / render ...）
                     var tokenCommand = arg.ToLowerInvariant();
-                    if (tokenCommand is "register" or "heartbeat" or "heartbeat-once" or "render" or "printers" or "probe-office")
+                    if (tokenCommand is "register" or "heartbeat" or "heartbeat-once" or "worker" or "render" or "printers" or "probe-office")
                     {
                         if (!SetCommand(options, tokenCommand, ref commandSet, out error)) return false;
                         break;
@@ -151,10 +174,11 @@ NewCosmos.Agent — Windows 固定 PC 的 Office/打印代理（P0）
 用法:
   NewCosmos.Agent.exe [命令] [选项]
 
-命令（缺省 = heartbeat 循环）:
+命令（缺省 = heartbeat + worker 并行）:
   --register            向服务端注册本机，保存 deviceKey 后退出
-  --heartbeat           持续心跳（默认 30 秒，Ctrl+C 退出）
+  --heartbeat           心跳 + 任务轮询并行（Ctrl+C 退出）
   --heartbeat-once      只发一次心跳
+  --worker              只轮询/执行打印任务（不关心跳）
   --printers            列出本机打印机（默认打印机标 [默认]）
   --probe-office        探测 Microsoft Office / WPS 可用性
   --render              用 Office 模板渲染一次 PDF（真实 COM）
@@ -170,6 +194,8 @@ NewCosmos.Agent — Windows 固定 PC 的 Office/打印代理（P0）
   --register-token <t>  一次性注册令牌（覆盖配置；更推荐环境变量）
   --machine-name <name> 上报机器名（默认 Environment.MachineName）
   --heartbeat-seconds <n> 心跳间隔 5..3600（默认 30）
+  --job-poll-seconds <n>  任务轮询间隔 2..300（默认 3）
+  --print-jobs-dir <dir>  打印任务临时目录（默认 %TEMP%\NewCosmos\PrintJobs）
   --help                显示本帮助
   --version             显示版本
 
@@ -181,12 +207,14 @@ NewCosmos.Agent — Windows 固定 PC 的 Office/打印代理（P0）
 示例:
   NewCosmos.Agent.exe --server https://cosmos-static.sua17.cn:20000 --register
   NewCosmos.Agent.exe --heartbeat-once
+  NewCosmos.Agent.exe --worker
   NewCosmos.Agent.exe --render --template C:\tpl\低保审核审批表.docx --data C:\tpl\data.json --out C:\out\result.pdf
 
 说明:
   - 仓库/源码不包含任何密码或令牌；注册令牌只从环境变量/配置文件/命令行读取。
   - deviceKey 默认 DPAPI(CurrentUser) 加密；DPAPI 不可用时降级为当前用户 ACL 文件并记警告。
-  - 任务队列认领（/api/agent/jobs/*）服务端 P0 尚未提供，当前只做注册与心跳。
+  - worker 轮询 /api/agent/jobs/*：Preview 任务用默认 PDF 阅读器打开；其他任务渲染 PDF 并打印。
+  - 打印与渲染依赖 Windows + Microsoft Office 桌面版；Linux 服务端不运行 Agent。
 """);
     }
 

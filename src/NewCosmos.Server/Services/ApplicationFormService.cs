@@ -101,9 +101,11 @@ public sealed class ApplicationFormService(
         }
 
         // 赡养行由 supporters 块承载，members 只返回户主 + 共同生活成员，避免前端重复展示。
-        var members = (membersResult.Value ?? [])
-            .Where(m => !IsSupportMember(m))
-            .ToList();
+        // SupporterService 是赡养行的权威读取口（member_category='Support'）；它不映射
+        // 疾病/残疾等全列，故按行 ID 从同一批 FamilyMember 行取全量字段后映射。
+        var allMembers = membersResult.Value ?? [];
+        var members = allMembers.Where(m => !IsSupportMember(m)).ToList();
+        var memberById = allMembers.ToDictionary(m => m.Id);
         // 年赡养费乘数 = 申请表家庭人口；主表 family_size 尚未回填时按成员行现算。
         var familySize = ResolveApplicationFamilySize(app.FamilySize, members);
 
@@ -119,7 +121,9 @@ public sealed class ApplicationFormService(
             basicDto,
             members.Select(m => ToMemberDto(m, basicDto)).ToList(),
             (supportersResult.Value ?? [])
-                .Select(supporter => ToSupporterDto(supporter, familySize))
+                .Select(supporter => memberById.TryGetValue(supporter.Id, out var supportMember)
+                    ? ToSupporterDto(supportMember, familySize)
+                    : ToSupporterFallbackDto(supporter, familySize))
                 .ToList(),
             ToEconomyDto(app),
             ToSurveyDto(surveyResult.Value),
@@ -1051,7 +1055,9 @@ public sealed class ApplicationFormService(
     /// 保存赡养/抚养/扶养义务人。年赡养费是只读派生值：
     /// <c>round(月费 × 月数 × 申请表家庭人口, 2)</c>，前端传来的 annualSupportFee 一律忽略；
     /// 月数落在 nc_biz_family_members.support_months（supporter 行，member_category='Support'），
-    /// 家庭人口乘数取申请表 family_size（由成员行解析），赡养人自家人口 family_size 列沿用旧值。
+    /// 家庭人口乘数取申请表 family_size（由成员行解析），赡养人自家人口落 family_size 列。
+    /// 基础列与地址由 SupporterService 写入；疾病/残疾列不在 Supporter 实体中，
+    /// 保存后按行 ID 用一次批量 UPDATE 补齐（同事务，失败整体回滚）。
     /// </summary>
     private async Task<Result> SaveSupportersAsync(
         long applicationId,
@@ -1076,6 +1082,26 @@ public sealed class ApplicationFormService(
             }
         }
 
+        // 疾病/残疾/地址文本列不在 Supporter 实体中：先取旧值，供旧客户端未传字段时保持原值。
+        // 不按 member_category 过滤：历史行可能是中文分类值，按 id 命中即可（仅本申请范围）。
+        var healthById = new Dictionary<long, SupporterHealthRow>();
+        const string healthSql = @"SELECT id, disease_code, disease_category, disease_name,
+                secondary_disease, is_severe_disease, medical_self_paid_12m,
+                disability_type, disability_level, disability_certificate_no,
+                is_disabled, is_severe_disability, hukou_address
+            FROM nc_biz_family_members
+            WHERE application_id = $1 AND deleted_at IS NULL";
+        var healthResult = await database.QueryAsync<SupporterHealthRow>(healthSql, ct, applicationId);
+        if (healthResult.IsFailure)
+        {
+            return Result.Failure(healthResult.ErrorCode!, healthResult.Message!);
+        }
+
+        foreach (var row in healthResult.Value ?? [])
+        {
+            healthById[row.Id] = row;
+        }
+
         // 部分保存（只传 supporters、不带 members）时 familySize 可能为 0：从已落库成员行补算。
         if (familySize <= 0)
         {
@@ -1091,6 +1117,7 @@ public sealed class ApplicationFormService(
 
         var multiplier = familySize > 0 ? familySize : 1;
         var list = new List<Supporter>(supporterDtos.Count);
+        var healthUpdates = new List<SupporterHealthUpdate>(supporterDtos.Count);
 
         foreach (var dto in supporterDtos)
         {
@@ -1107,11 +1134,18 @@ public sealed class ApplicationFormService(
                 existingById.TryGetValue(id, out existing);
             }
 
+            healthById.TryGetValue(id, out var existingHealth);
+
             // 月数：本次有值优先；否则沿用旧行；旧行也没有则按旧版默认 12。
             var months = dto.SupportMonths is > 0
                 ? dto.SupportMonths.Value
                 : existing is { SupportMonths: > 0 } ? existing.SupportMonths : 12;
             var monthly = ResolveMonthlySupportFee(dto);
+
+            // 赡养人自家人口（family_size 列）：本次有值优先，否则沿用旧值，最低 1。
+            var supporterFamilySize = dto.SupporterFamilySize is > 0
+                ? dto.SupporterFamilySize.Value
+                : existing is { SupporterFamilySize: > 0 } ? existing.SupporterFamilySize : 1;
 
             var supporter = new Supporter
             {
@@ -1125,37 +1159,51 @@ public sealed class ApplicationFormService(
                 MonthlySupportFee = monthly,
                 IsSupportAbility = dto.IsSupportAbility,
                 SupportMonths = months,
-                SupporterFamilySize = 1
+                SupporterFamilySize = supporterFamilySize
             };
 
-            if (existing is not null)
-            {
-                // 表单未建模的赡养人字段（地址、自家人口、收入能力等）沿用旧值；
-                // 本次显式传入的新增字段优先（GET 回传同一份快照，等价于原样保留）。
-                supporter.SupporterFamilySize = existing.SupporterFamilySize > 0
-                    ? existing.SupporterFamilySize
-                    : 1;
-                supporter.AnnualIncome = existing.AnnualIncome;
-                supporter.Ethnicity = existing.Ethnicity;
-                supporter.HukouType = existing.HukouType;
-                supporter.MaritalStatus = existing.MaritalStatus;
-                supporter.EducationLevel = existing.EducationLevel;
-                supporter.PoliticalStatus = existing.PoliticalStatus;
-                supporter.HealthStatus = existing.HealthStatus;
-                supporter.WorkUnit = existing.WorkUnit;
-                supporter.EmploymentStatus = existing.EmploymentStatus;
-                supporter.MainIncomeSource = existing.MainIncomeSource;
-                supporter.WorkCapacity = existing.WorkCapacity;
-                supporter.HomeProvince = existing.HomeProvince;
-                supporter.HomeCity = existing.HomeCity;
-                supporter.HomeDistrict = existing.HomeDistrict;
-                supporter.HomeTown = existing.HomeTown;
-                supporter.HomeVillage = existing.HomeVillage;
-                supporter.HukouProvince = existing.HukouProvince;
-                supporter.HukouCity = existing.HukouCity;
-                supporter.HukouDistrict = existing.HukouDistrict;
-                supporter.HukouTown = existing.HukouTown;
-            }
+            // 表单未建模的赡养人字段沿用旧值；新增字段以 null 区分“旧客户端未传”（保持旧值）
+            // 与“用户显式清空”（空字符串落库）。
+            supporter.AnnualIncome = existing?.AnnualIncome ?? 0m;
+            supporter.WorkCapacity = existing?.WorkCapacity ?? string.Empty;
+
+            supporter.Ethnicity = dto.Ethnicity ?? existing?.Ethnicity ?? string.Empty;
+            supporter.HukouType = dto.HukouType ?? existing?.HukouType ?? string.Empty;
+            supporter.WorkUnit = dto.WorkUnit ?? existing?.WorkUnit ?? string.Empty;
+            supporter.MainIncomeSource = dto.MainIncomeSource ?? existing?.MainIncomeSource ?? string.Empty;
+
+            supporter.MaritalStatus = dto.MaritalStatus is null
+                ? existing?.MaritalStatus ?? string.Empty
+                : ToCoreMaritalStatus(dto.MaritalStatus);
+            supporter.EducationLevel = dto.EducationLevel is null
+                ? existing?.EducationLevel ?? string.Empty
+                : ToCoreEducationLevel(dto.EducationLevel);
+            supporter.PoliticalStatus = dto.PoliticalStatus is null
+                ? existing?.PoliticalStatus ?? string.Empty
+                : ToCorePoliticalStatus(dto.PoliticalStatus);
+            supporter.HealthStatus = dto.HealthStatus is null
+                ? existing?.HealthStatus ?? string.Empty
+                : ToCoreHealthStatus(dto.HealthStatus);
+            supporter.EmploymentStatus = dto.EmploymentStatus is null
+                ? existing?.EmploymentStatus ?? string.Empty
+                : ToCoreEmploymentStatus(dto.EmploymentStatus);
+
+            supporter.HomeProvince = dto.HomeProvince ?? existing?.HomeProvince ?? string.Empty;
+            supporter.HomeCity = dto.HomeCity ?? existing?.HomeCity ?? string.Empty;
+            supporter.HomeDistrict = dto.HomeDistrict ?? existing?.HomeDistrict ?? string.Empty;
+            supporter.HomeTown = dto.HomeTown ?? existing?.HomeTown ?? string.Empty;
+            supporter.HomeVillage = dto.HomeVillage ?? existing?.HomeVillage ?? string.Empty;
+            supporter.HukouProvince = dto.HukouProvince ?? existing?.HukouProvince ?? string.Empty;
+            supporter.HukouCity = dto.HukouCity ?? existing?.HukouCity ?? string.Empty;
+            supporter.HukouDistrict = dto.HukouDistrict ?? existing?.HukouDistrict ?? string.Empty;
+            supporter.HukouTown = dto.HukouTown ?? existing?.HukouTown ?? string.Empty;
+
+            // HomeAddress 新字段优先；旧客户端只传 Address 时回退。null=未传（保持旧值），
+            // 空字符串=用户显式清空。
+            var homeAddress = dto.HomeAddress ?? dto.Address;
+            supporter.HomeAddress = homeAddress is null
+                ? existing?.HomeAddress ?? string.Empty
+                : homeAddress.Trim();
 
             if (!string.IsNullOrWhiteSpace(dto.PersonType))
             {
@@ -1175,18 +1223,58 @@ public sealed class ApplicationFormService(
                 supporter.Phone = existing.Phone;
             }
 
-            if (!string.IsNullOrWhiteSpace(dto.Address))
-            {
-                supporter.HomeAddress = dto.Address.Trim();
-            }
-            else if (existing is not null)
-            {
-                supporter.HomeAddress = existing.HomeAddress;
-            }
-
             supporter.MonthlyIncomeCapacity = dto.MonthlyIncomeCapacity
                 ?? existing?.MonthlyIncomeCapacity
                 ?? 0m;
+
+            // 疾病/残疾列：与 Step1/Step2 成员同口径。
+            var (previousCategory, previousSecondary) = NormalizeDiseaseFields(
+                existingHealth?.DiseaseCategory,
+                existingHealth?.DiseaseName,
+                existingHealth?.SecondaryDisease);
+            var diseaseCategory = dto.DiseaseCategory is null
+                ? previousCategory
+                : dto.DiseaseCategory.Trim();
+            var secondaryDisease = dto.SecondaryDiseaseName is null
+                ? previousSecondary
+                : dto.SecondaryDiseaseName.Trim();
+            var diseaseCode = dto.DiseaseCode ?? existingHealth?.DiseaseCode ?? string.Empty;
+            var isSevereDisease = dto.IsSevereDisease ?? existingHealth?.IsSevereDisease ?? false;
+            var medicalSelfPaid = dto.MedicalSelfPaid12m ?? existingHealth?.MedicalSelfPaid12m;
+
+            var disabilityType = dto.DisabilityType is null
+                ? existingHealth?.DisabilityType ?? string.Empty
+                : ToCoreDisabilityType(dto.DisabilityType);
+            var disabilityLevel = dto.DisabilityLevel is null
+                ? existingHealth?.DisabilityLevel ?? string.Empty
+                : ToCoreDisabilityLevel(dto.DisabilityLevel);
+            var disabilityCertificateNo = dto.DisabilityCertificateNo
+                ?? existingHealth?.DisabilityCertificateNo
+                ?? string.Empty;
+
+            // 户籍文本列：SUPPORTER 表没有 hukou_address 明细字段，按四级名称拼接；
+            // 本次未传户籍（旧客户端）时沿用旧文本，避免清空历史地址。
+            var hukouAddress = ComposeRegionAddress(
+                [supporter.HukouProvince, supporter.HukouCity, supporter.HukouDistrict, supporter.HukouTown],
+                null);
+            if (hukouAddress.Length == 0)
+            {
+                hukouAddress = existingHealth?.HukouAddress ?? string.Empty;
+            }
+
+            healthUpdates.Add(new SupporterHealthUpdate(
+                diseaseCode,
+                diseaseCategory,
+                diseaseCategory,
+                secondaryDisease,
+                isSevereDisease,
+                medicalSelfPaid,
+                disabilityType,
+                disabilityLevel,
+                disabilityCertificateNo,
+                disabilityType.Length > 0 || disabilityLevel.Length > 0,
+                ClassificationConstants.DisabilityLevel.IsSevereForAssistance(disabilityLevel, disabilityType),
+                hukouAddress));
 
             // 年费最后赋值：避免 ObservableObject 的月费/月数/人数联动覆盖本次公式结果。
             supporter.CalcFamilySize = multiplier;
@@ -1195,10 +1283,147 @@ public sealed class ApplicationFormService(
         }
 
         var saveResult = await supporters.SaveAsync(applicationId, list, ct);
-        return saveResult.IsFailure
-            ? Result.Failure(saveResult.ErrorCode!, saveResult.Message!)
+        if (saveResult.IsFailure)
+        {
+            return Result.Failure(saveResult.ErrorCode!, saveResult.Message!);
+        }
+
+        return await SaveSupporterHealthAsync(applicationId, list, healthUpdates, ct);
+    }
+
+    /// <summary>
+    /// 补齐 SupporterService 未覆盖的疾病/残疾/户籍文本列。savedSupporters 与 updates 一一对应，
+    /// 只更新本次写库成功（Id 已回填）的行；空集合直接跳过。
+    /// </summary>
+    private async Task<Result> SaveSupporterHealthAsync(
+        long applicationId,
+        IReadOnlyList<Supporter> savedSupporters,
+        IReadOnlyList<SupporterHealthUpdate> updates,
+        CancellationToken ct)
+    {
+        var ids = new List<long>(savedSupporters.Count);
+        var diseaseCodes = new List<string>(savedSupporters.Count);
+        var diseaseCategories = new List<string>(savedSupporters.Count);
+        var diseaseNames = new List<string>(savedSupporters.Count);
+        var secondaryDiseases = new List<string>(savedSupporters.Count);
+        var severeDiseases = new List<bool>(savedSupporters.Count);
+        var medicalSelfPaids = new List<decimal?>(savedSupporters.Count);
+        var disabilityTypes = new List<string>(savedSupporters.Count);
+        var disabilityLevels = new List<string>(savedSupporters.Count);
+        var disabilityCertificateNos = new List<string>(savedSupporters.Count);
+        var disabledFlags = new List<bool>(savedSupporters.Count);
+        var severeDisabilityFlags = new List<bool>(savedSupporters.Count);
+        var hukouAddresses = new List<string>(savedSupporters.Count);
+
+        for (var i = 0; i < savedSupporters.Count && i < updates.Count; i++)
+        {
+            var id = savedSupporters[i].Id;
+            if (id <= 0)
+            {
+                continue;
+            }
+
+            var update = updates[i];
+            ids.Add(id);
+            diseaseCodes.Add(update.DiseaseCode);
+            diseaseCategories.Add(update.DiseaseCategory);
+            diseaseNames.Add(update.DiseaseName);
+            secondaryDiseases.Add(update.SecondaryDisease);
+            severeDiseases.Add(update.IsSevereDisease);
+            medicalSelfPaids.Add(update.MedicalSelfPaid12m);
+            disabilityTypes.Add(update.DisabilityType);
+            disabilityLevels.Add(update.DisabilityLevel);
+            disabilityCertificateNos.Add(update.DisabilityCertificateNo);
+            disabledFlags.Add(update.IsDisabled);
+            severeDisabilityFlags.Add(update.IsSevereDisability);
+            hukouAddresses.Add(update.HukouAddress);
+        }
+
+        if (ids.Count == 0)
+        {
+            return Result.Success();
+        }
+
+        const string sql = @"UPDATE nc_biz_family_members m SET
+                disease_code = v.disease_code,
+                disease_category = v.disease_category,
+                disease_name = v.disease_name,
+                secondary_disease = v.secondary_disease,
+                is_severe_disease = v.is_severe_disease,
+                medical_self_paid_12m = v.medical_self_paid_12m,
+                disability_type = v.disability_type,
+                disability_level = v.disability_level,
+                disability_certificate_no = v.disability_certificate_no,
+                is_disabled = v.is_disabled,
+                is_severe_disability = v.is_severe_disability,
+                hukou_address = v.hukou_address,
+                updated_at = NOW()
+            FROM (
+                SELECT * FROM unnest(
+                    $1::bigint[], $2::text[], $3::text[], $4::text[], $5::text[], $6::boolean[],
+                    $7::numeric[], $8::text[], $9::text[], $10::text[], $11::boolean[], $12::boolean[],
+                    $13::text[]
+                ) AS t(id, disease_code, disease_category, disease_name, secondary_disease,
+                       is_severe_disease, medical_self_paid_12m, disability_type, disability_level,
+                       disability_certificate_no, is_disabled, is_severe_disability, hukou_address)
+            ) v
+            WHERE m.id = v.id AND m.application_id = $14";
+
+        var result = await database.ExecuteNonQueryAsync(
+            sql,
+            ct,
+            ids,
+            diseaseCodes,
+            diseaseCategories,
+            diseaseNames,
+            secondaryDiseases,
+            severeDiseases,
+            medicalSelfPaids,
+            disabilityTypes,
+            disabilityLevels,
+            disabilityCertificateNos,
+            disabledFlags,
+            severeDisabilityFlags,
+            hukouAddresses,
+            applicationId);
+
+        return result.IsFailure
+            ? Result.Failure(result.ErrorCode!, result.Message!)
             : Result.Success();
     }
+
+    /// <summary>nc_biz_family_members 中 SupporterService 未映射的疾病/残疾/户籍文本列（读旧值用）。</summary>
+    private sealed class SupporterHealthRow
+    {
+        public long Id { get; set; }
+        public string? DiseaseCode { get; set; }
+        public string? DiseaseCategory { get; set; }
+        public string? DiseaseName { get; set; }
+        public string? SecondaryDisease { get; set; }
+        public bool IsSevereDisease { get; set; }
+        public decimal? MedicalSelfPaid12m { get; set; }
+        public string? DisabilityType { get; set; }
+        public string? DisabilityLevel { get; set; }
+        public string? DisabilityCertificateNo { get; set; }
+        public bool IsDisabled { get; set; }
+        public bool IsSevereDisability { get; set; }
+        public string? HukouAddress { get; set; }
+    }
+
+    /// <summary>单个赡养行待补齐的健康/残疾列值（与 Supporter 列表同序）。</summary>
+    private sealed record SupporterHealthUpdate(
+        string DiseaseCode,
+        string DiseaseCategory,
+        string DiseaseName,
+        string SecondaryDisease,
+        bool IsSevereDisease,
+        decimal? MedicalSelfPaid12m,
+        string DisabilityType,
+        string DisabilityLevel,
+        string DisabilityCertificateNo,
+        bool IsDisabled,
+        bool IsSevereDisability,
+        string HukouAddress);
 
     private async Task<Result> SaveSurveyAsync(
         long applicationId,
@@ -1550,19 +1775,8 @@ public sealed class ApplicationFormService(
         // 新数据：disease_category 与 disease_name 同为一级、secondary_disease 为二级；
         // 旧数据：disease_category=一级、disease_name=二级、secondary_disease 为空。
         // 两者都按“一级→DiseaseCategory、二级→DiseaseName/SecondaryDiseaseName”归一，不反向。
-        var category = string.IsNullOrWhiteSpace(member.DiseaseCategory)
-            ? (member.DiseaseName ?? string.Empty).Trim()
-            : member.DiseaseCategory.Trim();
-        var secondary = (member.SecondaryDisease ?? string.Empty).Trim();
-        if (secondary.Length == 0
-            && !string.IsNullOrWhiteSpace(member.DiseaseCategory)
-            && !string.IsNullOrWhiteSpace(member.DiseaseName)
-            && !string.Equals(member.DiseaseCategory.Trim(), member.DiseaseName.Trim(),
-                StringComparison.Ordinal))
-        {
-            // 旧版行：disease_category=一级、disease_name=二级；仅在两者不同时兜底。
-            secondary = member.DiseaseName.Trim();
-        }
+        var (category, secondary) = NormalizeDiseaseFields(
+            member.DiseaseCategory, member.DiseaseName, member.SecondaryDisease);
 
         return new(
             member.Id,
@@ -1620,8 +1834,74 @@ public sealed class ApplicationFormService(
     /// 赡养人回填。年费 = 月费 × 月数 × 申请表家庭人口（familySize 参数）；
     /// 旧数据年费 &gt; 0、月费 = 0（且仍有赡养能力）时按旧版回退月费 = 年费 / 12、月数 = 12，
     /// 避免打开卡片就显示 0 导致保存后赡养收入被清零。
+    /// 字段来源是 nc_biz_family_members 的 Support 行（FamilyMember 读取含疾病/残疾全列）。
     /// </summary>
-    private static ApplicationFormSupporterDto ToSupporterDto(Supporter supporter, int familySize)
+    private static ApplicationFormSupporterDto ToSupporterDto(FamilyMember member, int familySize)
+    {
+        var monthly = member.MonthlySupportFee;
+        var months = member.SupportMonths is > 0 ? member.SupportMonths.Value : 12;
+
+        if (member.IsSupportAbility && monthly <= 0 && member.AnnualSupportFee > 0)
+        {
+            monthly = Math.Round(member.AnnualSupportFee / 12m, 2);
+            months = 12;
+        }
+
+        var (diseaseCategory, secondaryDisease) = NormalizeDiseaseFields(
+            member.DiseaseCategory, member.DiseaseName, member.SecondaryDisease);
+
+        return new ApplicationFormSupporterDto(
+            member.Id,
+            member.Name ?? string.Empty,
+            member.IdCard ?? string.Empty,
+            ToFormRelationship(member.RelationshipToHead),
+            member.Gender ?? string.Empty,
+            member.Age,
+            member.AnnualSupportFee,
+            monthly,
+            member.IsSupportAbility,
+            member.PersonType ?? string.Empty,
+            member.MonthlyIncomeCapacity,
+            months,
+            familySize > 0 ? familySize : 1,
+            member.Phone ?? string.Empty,
+            // Address 是旧字段，语义=家庭详细地址，保持与 HomeAddress 同步。
+            member.HomeAddress ?? string.Empty,
+            member.Ethnicity ?? string.Empty,
+            ToFormMaritalStatus(member.MaritalStatus),
+            ToFormEducationLevel(member.EducationLevel),
+            ToFormPoliticalStatus(member.PoliticalStatus),
+            member.HukouType ?? string.Empty,
+            ToFormHealthStatus(member.HealthStatus),
+            ToFormEmploymentStatus(member.EmploymentStatus),
+            member.WorkUnit ?? string.Empty,
+            member.MainIncomeSource ?? string.Empty,
+            member.HukouProvince ?? string.Empty,
+            member.HukouCity ?? string.Empty,
+            member.HukouDistrict ?? string.Empty,
+            member.HukouTown ?? string.Empty,
+            member.HomeProvince ?? string.Empty,
+            member.HomeCity ?? string.Empty,
+            member.HomeDistrict ?? string.Empty,
+            member.HomeTown ?? string.Empty,
+            member.HomeVillage ?? string.Empty,
+            member.HomeAddress ?? string.Empty,
+            member.DiseaseCode ?? string.Empty,
+            diseaseCategory,
+            secondaryDisease,
+            member.IsSevereDisease,
+            member.MedicalSelfPaid12m,
+            ToFormDisabilityType(member.DisabilityType),
+            ToFormDisabilityLevel(member.DisabilityLevel),
+            member.DisabilityCertificateNo ?? string.Empty,
+            member.FamilySize is > 0 ? member.FamilySize : 1);
+    }
+
+    /// <summary>
+    /// 兜底映射：FamilyMember 中找不到同 Id 的赡养行时（正常不应发生，两表同源），
+    /// 仅返回 Supporter 实体已有的基础字段，避免整单 GET 失败。
+    /// </summary>
+    private static ApplicationFormSupporterDto ToSupporterFallbackDto(Supporter supporter, int familySize)
     {
         var monthly = supporter.MonthlySupportFee;
         var months = supporter.SupportMonths > 0 ? supporter.SupportMonths : 12;
@@ -1647,7 +1927,35 @@ public sealed class ApplicationFormService(
             months,
             familySize > 0 ? familySize : 1,
             supporter.Phone ?? string.Empty,
-            supporter.HomeAddress ?? string.Empty);
+            supporter.HomeAddress ?? string.Empty,
+            supporter.Ethnicity ?? string.Empty,
+            ToFormMaritalStatus(supporter.MaritalStatus),
+            ToFormEducationLevel(supporter.EducationLevel),
+            ToFormPoliticalStatus(supporter.PoliticalStatus),
+            supporter.HukouType ?? string.Empty,
+            ToFormHealthStatus(supporter.HealthStatus),
+            ToFormEmploymentStatus(supporter.EmploymentStatus),
+            supporter.WorkUnit ?? string.Empty,
+            supporter.MainIncomeSource ?? string.Empty,
+            supporter.HukouProvince ?? string.Empty,
+            supporter.HukouCity ?? string.Empty,
+            supporter.HukouDistrict ?? string.Empty,
+            supporter.HukouTown ?? string.Empty,
+            supporter.HomeProvince ?? string.Empty,
+            supporter.HomeCity ?? string.Empty,
+            supporter.HomeDistrict ?? string.Empty,
+            supporter.HomeTown ?? string.Empty,
+            supporter.HomeVillage ?? string.Empty,
+            supporter.HomeAddress ?? string.Empty,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            supporter.SupporterFamilySize > 0 ? supporter.SupporterFamilySize : 1);
     }
 
     private static FamilyMemberCreateRequest ToMemberCreateRequest(
@@ -2843,6 +3151,31 @@ public sealed class ApplicationFormService(
         }
 
         return string.Empty;
+    }
+
+    /// <summary>
+    /// 疾病字段归一：一级疾病取 disease_category（空则回退 disease_name），二级疾病取
+    /// secondary_disease；旧版行 disease_category=一级、disease_name=二级 时把 disease_name 兜底为二级。
+    /// 成员与赡养人共用同一口径。
+    /// </summary>
+    private static (string Category, string Secondary) NormalizeDiseaseFields(
+        string? category,
+        string? diseaseName,
+        string? secondaryDisease)
+    {
+        var normalizedCategory = string.IsNullOrWhiteSpace(category)
+            ? (diseaseName ?? string.Empty).Trim()
+            : category.Trim();
+        var secondary = (secondaryDisease ?? string.Empty).Trim();
+        if (secondary.Length == 0
+            && !string.IsNullOrWhiteSpace(category)
+            && !string.IsNullOrWhiteSpace(diseaseName)
+            && !string.Equals(category.Trim(), diseaseName.Trim(), StringComparison.Ordinal))
+        {
+            secondary = diseaseName.Trim();
+        }
+
+        return (normalizedCategory, secondary);
     }
 
     private static Result ToFailure(Result source)

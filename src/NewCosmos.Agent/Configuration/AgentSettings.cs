@@ -26,6 +26,18 @@ public sealed class AgentSettings
     /// <summary>心跳间隔秒数（服务端注册响应可覆盖），默认 30 秒。</summary>
     public int HeartbeatSeconds { get; set; } = 30;
 
+    /// <summary>任务队列轮询间隔秒数（2–300），默认 3 秒。</summary>
+    public int JobPollSeconds { get; set; } = 3;
+
+    /// <summary>
+    /// 打印任务临时目录（模板/渲染源/预览 PDF）。
+    /// 默认 %TEMP%\NewCosmos\PrintJobs；支持环境变量，如 %TEMP%。
+    /// </summary>
+    public string PrintJobsDirectory { get; set; } = @"%TEMP%\NewCosmos\PrintJobs";
+
+    /// <summary>预览 PDF 保留最近 N 个（默认 10），更早的尽力删除。</summary>
+    public int PreviewKeepCount { get; set; } = 10;
+
     /// <summary>上报的机器名，缺省取 Environment.MachineName。</summary>
     public string MachineName { get; set; } = string.Empty;
 
@@ -60,6 +72,14 @@ public sealed class AgentSettings
         RegisterToken = (RegisterToken ?? string.Empty).Trim();
         MachineName = string.IsNullOrWhiteSpace(MachineName) ? Environment.MachineName : MachineName.Trim();
         HeartbeatSeconds = Math.Clamp(HeartbeatSeconds <= 0 ? 30 : HeartbeatSeconds, 5, 3600);
+        JobPollSeconds = Math.Clamp(JobPollSeconds <= 0 ? 3 : JobPollSeconds, 2, 300);
+        PreviewKeepCount = Math.Clamp(PreviewKeepCount <= 0 ? 10 : PreviewKeepCount, 1, 100);
+
+        var printJobsDirectory = string.IsNullOrWhiteSpace(PrintJobsDirectory)
+            ? Path.Combine(Path.GetTempPath(), "NewCosmos", "PrintJobs")
+            : Environment.ExpandEnvironmentVariables(PrintJobsDirectory.Trim());
+        PrintJobsDirectory = Path.GetFullPath(printJobsDirectory);
+
         DeviceKeyFile = ResolveDeviceKeyFile(configFilePath);
     }
 }

@@ -35,16 +35,85 @@ const props = defineProps<{
 }>()
 
 /**
- * 赡养卡新增字段（supportMonths/familySize）由后端 DTO 末尾追加，
+ * 赡养卡全量字段由后端 DTO 末尾追加（个人信息/地址/健康残疾/就业收入/自家人口），
  * 共享 types.ts 不在本次改动范围，这里做局部扩展读取。
+ * 旧数据缺字段时运行时为 undefined，模板按空值展示，不报错。
  */
 type SupporterRow = ApplicationFormSupporter & {
-  supportMonths?: number | null
-  familySize?: number | null
-  personType?: string | null
-  monthlyIncomeCapacity?: number | null
-  phone?: string | null
-  address?: string | null
+  personType: string
+  phone: string
+  ethnicity: string
+  maritalStatus: string
+  educationLevel: string
+  politicalStatus: string
+  hukouType: string
+  healthStatus: string
+  employmentStatus: string
+  workUnit: string
+  mainIncomeSource: string
+  monthlyIncomeCapacity: number | null
+  supportMonths: number | null
+  supporterFamilySize: number | null
+  address: string
+  hukouProvince: string
+  hukouCity: string
+  hukouDistrict: string
+  hukouTown: string
+  homeProvince: string
+  homeCity: string
+  homeDistrict: string
+  homeTown: string
+  homeVillage: string
+  homeAddress: string
+  diseaseCode: string
+  diseaseCategory: string
+  secondaryDiseaseName: string
+  isSevereDisease: boolean
+  medicalSelfPaid12m: number | null
+  disabilityType: string
+  disabilityLevel: string
+  disabilityCertificateNo: string
+}
+
+/** 新增赡养人时补齐全量默认值；已加载行由后端返回的字段覆盖。 */
+function createSupporterRow(overrides: Partial<SupporterRow> = {}): SupporterRow {
+  return {
+    ...createSupporter(),
+    personType: '赡养',
+    phone: '',
+    ethnicity: 'Han',
+    maritalStatus: '',
+    educationLevel: '',
+    politicalStatus: '',
+    hukouType: 'Rural',
+    healthStatus: '健康',
+    employmentStatus: '',
+    workUnit: '',
+    mainIncomeSource: '',
+    monthlyIncomeCapacity: null,
+    supportMonths: 12,
+    supporterFamilySize: null,
+    address: '',
+    hukouProvince: '',
+    hukouCity: '',
+    hukouDistrict: '',
+    hukouTown: '',
+    homeProvince: '',
+    homeCity: '',
+    homeDistrict: '',
+    homeTown: '',
+    homeVillage: '',
+    homeAddress: '',
+    diseaseCode: '',
+    diseaseCategory: '',
+    secondaryDiseaseName: '',
+    isSevereDisease: false,
+    medicalSelfPaid12m: null,
+    disabilityType: '',
+    disabilityLevel: '',
+    disabilityCertificateNo: '',
+    ...overrides,
+  }
 }
 
 /**
@@ -170,6 +239,29 @@ function optionText(options: { label: string; value: string }[], value: string |
   const raw = (value ?? '').trim()
   if (!raw) return '—'
   return options.find((item) => item.value === raw)?.label ?? raw
+}
+
+/** 赡养卡「性别+年龄」只读展示（与 legacy GenderAgeDisplay 同口径）。 */
+function supporterGenderAgeText(supporter: SupporterRow): string {
+  const gender = (supporter.gender ?? '').trim()
+  const age = supporter.age
+  const hasAge = typeof age === 'number' && Number.isFinite(age)
+  if (gender && hasAge) return `${gender} ${age}岁`
+  if (gender) return gender
+  if (hasAge) return `${age}岁`
+  return '—'
+}
+
+/** 身份证 blur：规范化并自动解析性别/年龄（赡养卡无出生日期字段）。 */
+function handleSupporterIdBlur(supporter: SupporterRow): void {
+  supporter.idCard = normalizeIdCard(supporter.idCard)
+  const info = parseIdCard(supporter.idCard)
+  if (info) {
+    supporter.gender = info.gender
+    supporter.age = info.age
+  }
+  const issue = getIdCardError(supporter.idCard, false)
+  if (issue) ElMessage.warning(issue)
 }
 
 const duplicateIdCards = computed<Set<string>>(() => {
@@ -299,10 +391,18 @@ function ensureHouseholdHead(): void {
 }
 
 function addSupporter(): void {
-  supporters.value.push(createSupporter())
+  supporters.value.push(
+    createSupporterRow({
+      // 赡养人独立户籍：默认带出申请人户籍，用户可改。
+      hukouProvince: props.form.basic.hukouProvince,
+      hukouCity: props.form.basic.hukouCity,
+      hukouDistrict: props.form.basic.hukouDistrict,
+      hukouTown: props.form.basic.hukouTown,
+    }),
+  )
 }
 
-async function removeSupporter(supporter: ApplicationFormSupporter): Promise<void> {
+async function removeSupporter(supporter: SupporterRow): Promise<void> {
   try {
     await ElMessageBox.confirm(
       `确定删除赡养人「${supporter.name || '未命名'}」吗？`,
@@ -841,11 +941,11 @@ onMounted(() => {
 
     <NcCard title="赡养抚养扶养">
       <template #actions>
-        <el-button type="primary" :icon="Plus" @click="addSupporter">新增人员</el-button>
+        <el-button type="primary" :icon="Plus" :disabled="isReadonly" @click="addSupporter">新增人员</el-button>
       </template>
 
       <el-empty v-if="supporters.length === 0" description="暂无赡养抚养扶养人员，点击右上角“新增人员”添加">
-        <el-button type="primary" :icon="Plus" @click="addSupporter">新增人员</el-button>
+        <el-button type="primary" :icon="Plus" :disabled="isReadonly" @click="addSupporter">新增人员</el-button>
       </el-empty>
 
       <div v-else class="supporter-list">
@@ -857,9 +957,18 @@ onMounted(() => {
           <header class="member-card__head">
             <div class="member-card__title">
               <span class="member-index">赡养人 {{ index + 1 }}</span>
+              <span v-if="supporter.isSevereDisease" class="badge badge--warn">重病</span>
+              <span v-if="supporter.disabilityType || supporter.disabilityLevel" class="badge badge--warn">残疾</span>
               <strong class="member-name">{{ supporter.name || '未命名' }}</strong>
             </div>
-            <el-button size="small" text type="danger" :icon="Delete" @click="removeSupporter(supporter)">
+            <el-button
+              size="small"
+              text
+              type="danger"
+              :icon="Delete"
+              :disabled="isReadonly"
+              @click="removeSupporter(supporter)"
+            >
               删除
             </el-button>
           </header>
@@ -868,18 +977,15 @@ onMounted(() => {
             <h4 class="member-section__title">个人信息</h4>
             <div class="supporter-grid">
               <label class="field">
-                <span class="field__label">姓名</span>
-                <el-input v-model="supporter.name" maxlength="30" placeholder="请输入姓名" clearable />
-              </label>
-
-              <label class="field">
-                <span class="field__label">身份证号</span>
-                <el-input v-model="supporter.idCard" maxlength="18" placeholder="请输入 18 位身份证号" clearable />
-              </label>
-
-              <label class="field">
-                <span class="field__label">关系</span>
-                <el-select v-model="supporter.relation" filterable allow-create default-first-option>
+                <span class="field__label">家庭关系</span>
+                <el-select
+                  v-model="supporter.relation"
+                  filterable
+                  allow-create
+                  default-first-option
+                  placeholder="请选择家庭关系"
+                  :disabled="isReadonly"
+                >
                   <el-option
                     v-for="item in SUPPORT_RELATION_OPTIONS"
                     :key="item.value"
@@ -890,10 +996,62 @@ onMounted(() => {
               </label>
 
               <label class="field">
-                <span class="field__label">性别</span>
-                <el-select v-model="supporter.gender" clearable placeholder="请选择性别">
+                <span class="field__label">姓名</span>
+                <el-input
+                  v-model="supporter.name"
+                  maxlength="30"
+                  placeholder="请输入姓名"
+                  clearable
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">身份证号</span>
+                <el-input
+                  v-model="supporter.idCard"
+                  maxlength="18"
+                  placeholder="请输入 18 位身份证号"
+                  clearable
+                  :disabled="isReadonly"
+                  @blur="handleSupporterIdBlur(supporter)"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">性别+年龄</span>
+                <el-input
+                  :model-value="supporterGenderAgeText(supporter)"
+                  readonly
+                  class="field--readonly"
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">联系方式</span>
+                <el-input
+                  v-model="supporter.phone"
+                  maxlength="20"
+                  placeholder="请输入手机号或固定电话"
+                  clearable
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">民族</span>
+                <el-select
+                  v-model="supporter.ethnicity"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入民族"
+                  :disabled="isReadonly"
+                >
                   <el-option
-                    v-for="item in GENDER_OPTIONS"
+                    v-for="item in ETHNICITY_OPTIONS"
                     :key="item.value"
                     :label="item.label"
                     :value="item.value"
@@ -902,22 +1060,353 @@ onMounted(() => {
               </label>
 
               <label class="field">
-                <span class="field__label">年龄</span>
-                <el-input-number
-                  :model-value="supporter.age"
-                  :min="0"
-                  :max="130"
-                  :controls="false"
-                  placeholder="岁"
-                  @update:model-value="supporter.age = $event ?? null"
+                <span class="field__label">婚姻状况</span>
+                <el-select
+                  v-model="supporter.maritalStatus"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入婚姻状况"
+                  :disabled="isReadonly"
+                >
+                  <el-option
+                    v-for="item in MARITAL_STATUS_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">户口性质</span>
+                <el-select
+                  v-model="supporter.hukouType"
+                  placeholder="请选择户口性质"
+                  :disabled="isReadonly"
+                >
+                  <el-option
+                    v-for="item in HUKOU_TYPE_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">文化程度</span>
+                <el-select
+                  v-model="supporter.educationLevel"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入文化程度"
+                  :disabled="isReadonly"
+                >
+                  <el-option
+                    v-for="item in EDUCATION_LEVEL_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">政治面貌</span>
+                <el-select
+                  v-model="supporter.politicalStatus"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入政治面貌"
+                  :disabled="isReadonly"
+                >
+                  <el-option
+                    v-for="item in POLITICAL_STATUS_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">残疾证号</span>
+                <el-input
+                  v-model="supporter.disabilityCertificateNo"
+                  maxlength="30"
+                  placeholder="无残疾可留空"
+                  clearable
+                  :disabled="isReadonly"
                 />
               </label>
             </div>
           </section>
 
           <section class="member-section">
+            <h4 class="member-section__title">家庭住址</h4>
+            <div class="supporter-grid">
+              <div class="field field--full">
+                <AddressCascader
+                  :province="supporter.homeProvince ?? ''"
+                  :city="supporter.homeCity ?? ''"
+                  :district="supporter.homeDistrict ?? ''"
+                  :town="supporter.homeTown ?? ''"
+                  :village="supporter.homeVillage ?? ''"
+                  :disabled="isReadonly"
+                  @update:province="supporter.homeProvince = $event"
+                  @update:city="supporter.homeCity = $event"
+                  @update:district="supporter.homeDistrict = $event"
+                  @update:town="supporter.homeTown = $event"
+                  @update:village="supporter.homeVillage = $event"
+                />
+              </div>
+
+              <label class="field field--full">
+                <span class="field__label">详细地址</span>
+                <el-input
+                  v-model="supporter.homeAddress"
+                  maxlength="120"
+                  placeholder="请输入详细地址（门牌号、楼栋等）"
+                  clearable
+                  :disabled="isReadonly"
+                />
+              </label>
+            </div>
+          </section>
+
+          <section class="member-section">
+            <h4 class="member-section__title">户籍地址</h4>
+            <div class="supporter-grid">
+              <!-- 赡养人独立户籍：省/市/区县/乡镇四级；成员表无 hukou_village 列，第 5 级隐藏。 -->
+              <div class="field field--full hukou-cascader">
+                <AddressCascader
+                  :province="supporter.hukouProvince ?? ''"
+                  :city="supporter.hukouCity ?? ''"
+                  :district="supporter.hukouDistrict ?? ''"
+                  :town="supporter.hukouTown ?? ''"
+                  village=""
+                  :disabled="isReadonly"
+                  @update:province="supporter.hukouProvince = $event"
+                  @update:city="supporter.hukouCity = $event"
+                  @update:district="supporter.hukouDistrict = $event"
+                  @update:town="supporter.hukouTown = $event"
+                />
+              </div>
+            </div>
+            <p class="field-note">赡养人独立户籍，可与户主不一致。</p>
+          </section>
+
+          <section class="member-section">
+            <h4 class="member-section__title">健康与残疾信息</h4>
+            <div class="supporter-grid">
+              <label class="field">
+                <span class="field__label">健康状况</span>
+                <el-input
+                  :model-value="optionText(HEALTH_STATUS_OPTIONS, supporter.healthStatus)"
+                  readonly
+                  class="field--readonly"
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">残疾类型</span>
+                <el-select
+                  v-model="supporter.disabilityType"
+                  clearable
+                  placeholder="无残疾可留空"
+                  :disabled="isReadonly"
+                >
+                  <el-option
+                    v-for="item in DISABILITY_TYPE_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">残疾等级</span>
+                <el-select
+                  v-model="supporter.disabilityLevel"
+                  clearable
+                  placeholder="无残疾可留空"
+                  :disabled="isReadonly"
+                >
+                  <el-option
+                    v-for="item in DISABILITY_LEVEL_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field field--switch">
+                <span class="field__label">是否重病</span>
+                <el-checkbox v-model="supporter.isSevereDisease" :disabled="isReadonly" />
+              </label>
+
+              <label class="field">
+                <span class="field__label">疾病编码（ICD-10）</span>
+                <el-input
+                  v-model="supporter.diseaseCode"
+                  maxlength="20"
+                  placeholder="如 A00.900"
+                  clearable
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">一级疾病</span>
+                <el-select
+                  v-model="supporter.diseaseCategory"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入一级疾病"
+                  :disabled="isReadonly"
+                >
+                  <el-option
+                    v-for="item in DISEASE_CATEGORY_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">二级疾病</span>
+                <el-input
+                  v-model="supporter.secondaryDiseaseName"
+                  maxlength="60"
+                  placeholder="可手工填写具体疾病名称"
+                  clearable
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">前 12 个月个人医疗自付累计（元）</span>
+                <el-input-number
+                  :model-value="supporter.medicalSelfPaid12m"
+                  :min="0"
+                  :precision="2"
+                  :controls="false"
+                  placeholder="0.00"
+                  :disabled="isReadonly"
+                  @update:model-value="supporter.medicalSelfPaid12m = $event ?? null"
+                />
+              </label>
+            </div>
+          </section>
+
+          <section class="member-section">
+            <h4 class="member-section__title">就业与收入</h4>
+            <div class="supporter-grid">
+              <label class="field">
+                <span class="field__label">就业状况</span>
+                <el-select
+                  v-model="supporter.employmentStatus"
+                  filterable
+                  allow-create
+                  default-first-option
+                  clearable
+                  placeholder="请选择或输入就业状况"
+                  :disabled="isReadonly"
+                >
+                  <el-option
+                    v-for="item in EMPLOYMENT_STATUS_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
+              <label class="field">
+                <span class="field__label">工作单位</span>
+                <el-input
+                  v-model="supporter.workUnit"
+                  maxlength="60"
+                  placeholder="无工作单位可留空"
+                  clearable
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">主要收入来源</span>
+                <el-input
+                  v-model="supporter.mainIncomeSource"
+                  maxlength="60"
+                  placeholder="如：务农、务工、养老金"
+                  clearable
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">月收入（元）</span>
+                <el-input-number
+                  :model-value="supporter.monthlyIncomeCapacity"
+                  :min="0"
+                  :precision="2"
+                  :controls="false"
+                  placeholder="0.00"
+                  :disabled="isReadonly"
+                  @update:model-value="supporter.monthlyIncomeCapacity = $event ?? null"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">赡养人家庭人口</span>
+                <el-input-number
+                  :model-value="supporter.supporterFamilySize"
+                  :min="1"
+                  :precision="0"
+                  :controls="false"
+                  placeholder="1"
+                  :disabled="isReadonly"
+                  @update:model-value="supporter.supporterFamilySize = $event ?? null"
+                />
+              </label>
+            </div>
+            <p class="field-note">赡养人家庭人口是赡养人自家人口，不参与年赡养费计算。</p>
+          </section>
+
+          <section class="member-section">
             <h4 class="member-section__title">赡养费用</h4>
             <div class="supporter-grid">
+              <label class="field">
+                <span class="field__label">人员类型</span>
+                <el-select
+                  v-model="supporter.personType"
+                  filterable
+                  allow-create
+                  default-first-option
+                  placeholder="请选择人员类型"
+                  :disabled="isReadonly"
+                >
+                  <el-option
+                    v-for="item in PERSON_TYPE_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </label>
+
               <label class="field">
                 <span class="field__label">月赡养费（元）</span>
                 <el-input-number
@@ -926,6 +1415,7 @@ onMounted(() => {
                   :precision="2"
                   :controls="false"
                   placeholder="0.00"
+                  :disabled="isReadonly"
                   @update:model-value="handleMonthlySupportFeeChange(supporter, $event)"
                 />
               </label>
@@ -939,6 +1429,7 @@ onMounted(() => {
                   :precision="0"
                   :controls="false"
                   placeholder="12"
+                  :disabled="isReadonly"
                   @update:model-value="handleSupportMonthsChange(supporter, $event)"
                 />
               </label>
@@ -950,7 +1441,7 @@ onMounted(() => {
 
               <label class="field">
                 <span class="field__label">年赡养费（元，自动计算）</span>
-                <el-input :model-value="formatMoney(supporter.annualSupportFee)" readonly />
+                <el-input :model-value="formatMoney(annualSupportFeeOf(supporter))" readonly />
               </label>
 
               <label class="field field--switch">
@@ -960,6 +1451,7 @@ onMounted(() => {
                   active-text="有"
                   inactive-text="无"
                   inline-prompt
+                  :disabled="isReadonly"
                   @change="handleSupportAbilityChange(supporter, $event)"
                 />
               </label>
@@ -1125,6 +1617,11 @@ onMounted(() => {
 /** 户籍地址/健康状态等只读展示：与旧版灰色只读输入框一致。 */
 .field--readonly :deep(.el-input__wrapper) {
   background-color: var(--nc-paper-3);
+}
+
+/** 赡养人户籍四级：隐藏 AddressCascader 的第 5 级村社区（成员表无 hukou_village 列）。 */
+.hukou-cascader :deep(.address-cascader__field:nth-child(5)) {
+  display: none;
 }
 
 .field--readonly :deep(.el-input__inner) {

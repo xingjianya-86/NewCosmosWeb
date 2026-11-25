@@ -112,7 +112,13 @@ public sealed record ApplicationFormMemberDto(
 /// 口径：AnnualSupportFee 为只读派生值，服务端按
 /// <c>round(MonthlySupportFee × SupportMonths × FamilySize, 2)</c> 重算并忽略前端传值；
 /// FamilySize 是**申请表家庭人口**（含户主，年费乘数，只读展示），不是赡养人自家人口——
-/// 后者落在 nc_biz_family_members.family_size，服务端沿用旧值、不在表单编辑。
+/// 后者落在 nc_biz_family_members.family_size，经 SupporterFamilySize 读写。
+/// </para>
+/// <para>
+/// 2026-11 赡养卡全量字段：个人信息/地址/健康残疾/就业收入与共同生活成员同口径。
+/// 健康与残疾字段写 nc_biz_family_members 的 disease_*/disability_*/medical_self_paid_12m 列；
+/// 疾病口径：DiseaseCategory = 一级疾病（落 disease_name/disease_category），
+/// SecondaryDiseaseName = 二级疾病（落 secondary_disease），DiseaseCode 落 disease_code。
 /// </para>
 /// </summary>
 public sealed record ApplicationFormSupporterDto(
@@ -130,7 +136,38 @@ public sealed record ApplicationFormSupporterDto(
     int? SupportMonths = null,
     int? FamilySize = null,
     string? Phone = null,
-    string? Address = null);
+    string? Address = null,
+    // 2026-11 赡养卡补齐：以下字段均追加在末尾并带默认值，保持旧客户端反序列化兼容。
+    string? Ethnicity = null,
+    string? MaritalStatus = null,
+    string? EducationLevel = null,
+    string? PoliticalStatus = null,
+    string? HukouType = null,
+    string? HealthStatus = null,
+    string? EmploymentStatus = null,
+    string? WorkUnit = null,
+    string? MainIncomeSource = null,
+    string? HukouProvince = null,
+    string? HukouCity = null,
+    string? HukouDistrict = null,
+    string? HukouTown = null,
+    string? HomeProvince = null,
+    string? HomeCity = null,
+    string? HomeDistrict = null,
+    string? HomeTown = null,
+    string? HomeVillage = null,
+    string? HomeAddress = null,
+    string? DiseaseCode = null,
+    string? DiseaseCategory = null,
+    string? SecondaryDiseaseName = null,
+    // 可空 bool：null = 旧客户端未传，服务端沿用旧值；false = 用户显式取消勾选。
+    bool? IsSevereDisease = null,
+    decimal? MedicalSelfPaid12m = null,
+    string? DisabilityType = null,
+    string? DisabilityLevel = null,
+    string? DisabilityCertificateNo = null,
+    // 赡养人自家人口（nc_biz_family_members.family_size，不参与年费计算）。
+    int? SupporterFamilySize = null);
 
 /// <summary>
 /// 家庭经济收入（Step4）。月项：work/business/property/transfer/other/rigidExpenditure；

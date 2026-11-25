@@ -3,5 +3,8 @@
   "registerToken": "",
   "deviceKeyFile": "",
   "heartbeatSeconds": 30,
+  "jobPollSeconds": 3,
+  "printJobsDirectory": "%TEMP%\\NewCosmos\\PrintJobs",
+  "previewKeepCount": 10,
   "machineName": ""
 }

@@ -60,7 +60,12 @@ try
             return await HeartbeatRunner.RunAsync(settings, configPath, client, once: true, logger, cts.Token);
 
         case "heartbeat":
-            return await HeartbeatRunner.RunAsync(settings, configPath, client, once: false, logger, cts.Token);
+            // 缺省命令：心跳与任务轮询并行；任一退出即全部停止。
+            return await AgentServiceRunner.RunHeartbeatAndWorkerAsync(
+                settings, configPath, client, client, logger, cts);
+
+        case "worker":
+            return await WorkerRunner.RunAsync(settings, configPath, client, logger, cts.Token);
 
         case "printers":
             return PrintPrinters(logger);
@@ -102,6 +107,12 @@ static void ApplyOverrides(AgentSettings settings, CliOptions options)
 
     if (options.HeartbeatSeconds is { } seconds)
         settings.HeartbeatSeconds = seconds;
+
+    if (options.JobPollSeconds is { } pollSeconds)
+        settings.JobPollSeconds = pollSeconds;
+
+    if (!string.IsNullOrWhiteSpace(options.PrintJobsDirectory))
+        settings.PrintJobsDirectory = options.PrintJobsDirectory.Trim();
 }
 
 static int PrintPrinters(NewCosmos.Services.Core.ILoggerService logger)

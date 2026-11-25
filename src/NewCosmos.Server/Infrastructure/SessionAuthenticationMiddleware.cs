@@ -11,7 +11,7 @@ namespace NewCosmos.Server.Infrastructure;
 /// 1. Authorization: Bearer &lt;sessionId&gt; + X-NC-Device 必须同时存在；
 /// 2. 会话必须为 active、未过期且设备标识匹配；
 /// 3. 通过后设置 CurrentUserContext 快照并 Arm 会话闸门。
-/// 登录/健康检查/Agent 注册与心跳走匿名路径。
+/// 登录/健康检查/Agent 注册、心跳与任务队列（设备密钥自校验）走匿名路径。
 /// </summary>
 public sealed class SessionAuthenticationMiddleware(RequestDelegate next, ILoggerService logger)
 {
@@ -20,6 +20,7 @@ public sealed class SessionAuthenticationMiddleware(RequestDelegate next, ILogge
         new("/api/auth/login"),
         new("/api/agent/register"),
         new("/api/agent/heartbeat"),
+        new("/api/agent/jobs"),
         new("/health"),
         new("/info")
     ];

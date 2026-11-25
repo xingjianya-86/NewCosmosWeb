@@ -21,11 +21,13 @@ public interface IAgentClient
         AgentHeartbeatRequest request,
         CancellationToken ct = default);
 
-    // TODO(P0+): 任务队列认领/回写接口待服务端提供后补入 IAgentJobClient（见 IAgentJobClient.cs）。
 }
 
-/// <summary>基于 HttpClient 的最小 P0 实现。</summary>
-public sealed class HttpAgentClient : IAgentClient, IDisposable
+/// <summary>
+/// 基于 HttpClient 的最小实现：注册/心跳 + 任务队列认领/回写。
+/// 任务接口在 <c>AgentJobClient.cs</c> 的 partial 中实现，复用同一个 HttpClient 与错误处理。
+/// </summary>
+public sealed partial class HttpAgentClient : IAgentClient, IAgentJobClient, IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

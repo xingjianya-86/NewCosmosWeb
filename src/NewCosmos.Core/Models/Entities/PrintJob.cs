@@ -110,6 +110,12 @@ public static class PrintJobConstants
     /// <summary>任务类型：照片（手机采集照片，PC 代理直接打印图片）</summary>
     public const string JobKindPhoto = "Photo";
 
+    /// <summary>
+    /// 任务类型：预览（Web 档案制作页推送，PC 代理只渲染/预览，不直接送打印机）。
+    /// 与 Template 共用同一套模板/字段/表格数据，仅执行侧按 jobKind 区分是否出纸。
+    /// </summary>
+    public const string JobKindPreview = "Preview";
+
     public static string GetStatusName(string? status) => status switch
     {
         StatusPending => "待打印",
@@ -122,6 +128,7 @@ public static class PrintJobConstants
     public static string GetJobKindName(string? jobKind) => jobKind switch
     {
         JobKindPhoto => "照片",
+        JobKindPreview => "预览",
         _ => "模板文书",
     };
 }

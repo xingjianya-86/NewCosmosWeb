@@ -6,7 +6,7 @@ Windows 固定 PC 上的文档/打印代理（P0 控制台版）。职责：
 - 每 30 秒上报心跳、机器名、Agent 版本、本机打印机列表
 - 探测 Microsoft Office / 本机打印机
 - 提供一条真实 Office COM 的模板渲染命令（模板 → PDF）
-- 预留任务队列认领接口（服务端 P0 尚未提供）
+- 轮询服务端打印/预览任务，在本地渲染 PDF、打开预览或打印，并回写状态
 
 > 后续可在此项目上加托盘/Windows 服务宿主；当前是 `OutputType=Exe` 的控制台程序。
 > Linux 服务端不运行本项目，也不运行 Office COM。
@@ -41,6 +41,9 @@ dotnet publish src\NewCosmos.Agent\NewCosmos.Agent.csproj -c Release -r win-x64 
   "registerToken": "",
   "deviceKeyFile": "",
   "heartbeatSeconds": 30,
+  "jobPollSeconds": 3,
+  "printJobsDirectory": "%TEMP%\\NewCosmos\\PrintJobs",
+  "previewKeepCount": 10,
   "machineName": "MZ-01"
 }
 ```
@@ -51,6 +54,9 @@ dotnet publish src\NewCosmos.Agent\NewCosmos.Agent.csproj -c Release -r win-x64 
 | `registerToken` | 一次性注册令牌；注册成功后会从配置中清除 | 空 |
 | `deviceKeyFile` | 设备密钥文件；空 = 与 `agent.json` 同路径 | `%APPDATA%\NewCosmos\agent.json` |
 | `heartbeatSeconds` | 心跳间隔（注册响应可覆盖），5–3600 | `30` |
+| `jobPollSeconds` | 任务轮询间隔，2–300 | `3` |
+| `printJobsDirectory` | 打印任务临时目录（模板/渲染源/预览 PDF），支持 `%TEMP%` | `%TEMP%\NewCosmos\PrintJobs` |
+| `previewKeepCount` | 预览 PDF 保留最近 N 个 | `10` |
 | `machineName` | 上报机器名 | `Environment.MachineName` |
 
 优先级（高 → 低）：
@@ -96,10 +102,10 @@ NewCosmos.Agent.exe --register
 ## 4. 心跳
 
 ```powershell
-# 持续心跳（默认 30 秒，Ctrl+C 退出）
+# 持续心跳（默认 30 秒）+ 任务轮询，Ctrl+C 退出
 NewCosmos.Agent.exe
 
-# 只发一次，便于排障/部署校验
+# 只发心跳，便于排障/部署校验
 NewCosmos.Agent.exe --heartbeat-once
 ```
 
@@ -170,6 +176,46 @@ NewCosmos.Agent.exe --render `
   不会用 WPS 兜底（`WordEngine`/`ExcelEngine` 的 COM 路径只接受 MS Office ProgID）；
 - 输出一定是 PDF（`--out` 无 `.pdf` 后缀会自动补上）。
 
+## 6.3 任务队列（worker）
+
+```powershell
+# 只做任务轮询（不关心跳）
+NewCosmos.Agent.exe --worker
+
+# 缺省命令 / --heartbeat：心跳 + 任务轮询并行
+NewCosmos.Agent.exe
+```
+
+轮询流程：
+
+1. `POST /api/agent/jobs/claim`（header `X-NC-Device-Key`，body `{ "max": 1 }`）；
+2. `GET /api/agent/jobs/{id}/payload` 取模板 Base64 与字段/表格数据；
+3. 模板写入 `%TEMP%\NewCosmos\PrintJobs\{jobNo}.{fileType}`；
+4. 用 `WordEngine` / `ExcelEngine` 从文件渲染 PDF（**不访问数据库**）：
+   `fields`/`tableRows` 的键是 `FieldKeys`，Agent 按 payload 里的 `templateConfigJson`
+   （`fields[].fieldKey/placeholder`、`tables[].columns/startMarker/endMarker`、`indexShifts`）
+   映射到模板占位符，与 `PrintExecuteService` 的口径一致；
+5. `jobKind == "Preview"` → 写 PDF 并用系统默认阅读器打开，视为完成；
+   其他任务 → 先渲染源文档与 PDF，再用 Office COM 打印（支持 `printerName` / `copies` / `isDuplex`）；
+6. 成功 `POST /complete`；失败 `POST /fail` 并带截断后的错误摘要。
+
+失败处理：
+
+- 单个任务失败只回写 `fail`，轮询继续；
+- 认领失败（网络/服务端错误）记录日志后按间隔重试；
+- 设备被禁用（401/403）时停止任务轮询并退出。
+
+打印降级：Office COM 打印失败时，尝试 ShellExecute `printto`（指定打印机）/`print`
+（默认打印机）。降级路径依赖系统已注册的 PDF 阅读器，**无法保证份数与双面**
+（由阅读器/打印机默认值决定）。
+
+临时文件：
+
+- 打印成功：模板、渲染源、PDF 全部删除；
+- 预览成功：PDF 不立即删除（用户可能还开着），保留最近 `previewKeepCount` 个；
+- 任务失败：本地模板/渲染源/PDF 一并清理，避免敏感文书滞留在 `%TEMP%`。
+- 日志只记录任务号、模板名、字节数、份数、错误摘要，不写字段值、姓名或身份证。
+
 ## 7. 账户绑定说明（部署必读）
 
 - 打印任务按 `user_id + device_id + printer_name` 绑定，任务固化目标，只有对应 Agent 能认领。
@@ -186,6 +232,7 @@ NewCosmos.Agent.exe --render `
 | 配置文件 | `%APPDATA%\NewCosmos\agent.json`（可用 `--config` 覆盖） |
 | 日志 | `%APPDATA%\NewCosmos\Logs\app_.log`（Serilog 按日滚动） |
 | 渲染临时文件 | `%TEMP%\NewCosmos\PrintTemp\` |
+| 打印任务临时文件 | `%TEMP%\NewCosmos\PrintJobs\`（可用 `printJobsDirectory` 覆盖） |
 | 渲染输出 | `--out` 指定路径 |
 
 日志不会写入 `deviceKey`、`registerToken` 或公文个人敏感字段（打印/渲染日志只记录路径、字节数、错误）。
@@ -211,13 +258,16 @@ NewCosmos.Agent.exe --render `
 - 心跳循环 / 单次心跳，Ctrl+C 退出
 - 打印机枚举、Office 探测
 - 单次模板渲染（Word/Excel → PDF，真实 Office COM）
+- 任务队列 claim/payload/complete/fail + 预览/打印执行 + 临时文件清理
 
 未实现（预留接口 + TODO）：
 
-- 任务队列认领/回写：见 `Services/JobWorker.cs` 的 `IAgentJobClient` / `IJobWorker`。
-  服务端 P0 未提供 `/api/agent/jobs/*`，当前不启动轮询。
 - 托盘/开机自启/自动更新：后续在 Agent 宿主层补齐。
-- 批量打印、补打、打印记录回传：依赖服务端任务 API 与 `PrintAgentService` 接线。
+- 照片任务（JobKind=Photo）：`/api/agent/jobs/payload` 当前只下发模板，Agent 会以明确错误回写失败。
+- 索引槽分页：当 `tableRows` 数量超过模板 `FAMILY_MEMBER_NAME_1..N` 槽位容量时，
+  Agent 只填充可用槽位（legacy `PrintExecuteService` 会分页并合并 PDF）；当前服务端仅支持
+  FamilyApplication，家庭人数通常低于模板槽位。表格类模板（`tables[]`）不受此限制。
+- 批量打印、补打、打印记录回传：依赖服务端任务 API 后续扩展。
 
 ## 11. 手工验证清单
 

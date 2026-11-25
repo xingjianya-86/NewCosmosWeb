@@ -130,6 +130,9 @@ builder.Services.AddScoped<ApplicationFormService>();
 // Server 侧聚合服务。
 builder.Services.AddScoped<PrinterBindingService>();
 builder.Services.AddScoped<AgentDeviceService>();
+// 档案制作页推送打印：数据装配 + Server 侧队列网关（不引用 Office，不在 Server 生成 PDF）。
+builder.Services.AddScoped<ArchivePrintDataService>();
+builder.Services.AddScoped<ArchivePrintQueueService>();
 builder.Services.AddScoped<ApplicationQueryService>();
 builder.Services.AddScoped<ApplicationWorkflowQueryService>();
 builder.Services.AddScoped<DataScopeFilterBuilder>();
@@ -156,6 +159,7 @@ app.UseMiddleware<SessionAuthenticationMiddleware>();
 app.MapAuthEndpoints();
 app.MapPrinterEndpoints();
 app.MapAgentEndpoints();
+app.MapPrintJobEndpoints();
 app.MapApplicationEndpoints();
 app.MapDashboardEndpoints();
 app.MapSocialAssistanceEndpoints();

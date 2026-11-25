@@ -116,6 +116,12 @@ const router = createRouter({
           meta: { title: '打印机绑定' },
         },
         {
+          path: 'archives/production',
+          name: 'archive-production',
+          component: () => import('@/views/archives/ArchiveProductionView.vue'),
+          meta: { title: '档案制作' },
+        },
+        {
           path: 'coming-soon/:module',
           name: 'coming-soon',
           component: () => import('@/views/ComingSoonView.vue'),

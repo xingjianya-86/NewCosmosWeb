@@ -1,0 +1,116 @@
+using System.Net.Http.Json;
+using NewCosmos.Agent.Models;
+
+namespace NewCosmos.Agent.Services;
+
+/// <summary>
+/// 任务队列 HTTP 调用（partial <see cref="HttpAgentClient"/>）：
+/// claim / payload / complete / fail，统一使用 X-NC-Device-Key 与既有错误处理。
+/// </summary>
+public sealed partial class HttpAgentClient
+{
+    private const string JobsPath = "/api/agent/jobs";
+
+    public async Task<IReadOnlyList<AgentJob>> ClaimAsync(
+        string serverBaseUrl,
+        string deviceKey,
+        int max,
+        CancellationToken ct = default)
+    {
+        EnsureDeviceKey(deviceKey);
+
+        var request = new AgentJobClaimRequest { Max = Math.Clamp(max, 1, 10) };
+        using var message = new HttpRequestMessage(HttpMethod.Post, CombineUrl(serverBaseUrl, JobsPath + "/claim"))
+        {
+            Content = CreateJsonContent(request)
+        };
+        message.Headers.Add("X-NC-Device-Key", deviceKey);
+
+        using var response = await _http.SendAsync(message, ct).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
+
+        var jobs = await response.Content
+            .ReadFromJsonAsync<List<AgentJob>>(JsonOptions, ct)
+            .ConfigureAwait(false);
+
+        return jobs ?? new List<AgentJob>();
+    }
+
+    public async Task<AgentJobPayload> GetPayloadAsync(
+        string serverBaseUrl,
+        string deviceKey,
+        long jobId,
+        CancellationToken ct = default)
+    {
+        EnsureDeviceKey(deviceKey);
+
+        using var message = new HttpRequestMessage(
+            HttpMethod.Get,
+            CombineUrl(serverBaseUrl, $"{JobsPath}/{jobId}/payload"));
+        message.Headers.Add("X-NC-Device-Key", deviceKey);
+
+        using var response = await _http.SendAsync(message, ct).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
+
+        return await response.Content
+                   .ReadFromJsonAsync<AgentJobPayload>(JsonOptions, ct)
+                   .ConfigureAwait(false)
+               ?? throw new AgentApiException((int)response.StatusCode, "AGENT_JOB_PAYLOAD_EMPTY", "任务负载为空");
+    }
+
+    public async Task CompleteAsync(
+        string serverBaseUrl,
+        string deviceKey,
+        long jobId,
+        CancellationToken ct = default)
+    {
+        EnsureDeviceKey(deviceKey);
+
+        using var message = new HttpRequestMessage(
+            HttpMethod.Post,
+            CombineUrl(serverBaseUrl, $"{JobsPath}/{jobId}/complete"));
+        message.Headers.Add("X-NC-Device-Key", deviceKey);
+
+        using var response = await _http.SendAsync(message, ct).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
+    }
+
+    public async Task FailAsync(
+        string serverBaseUrl,
+        string deviceKey,
+        long jobId,
+        string errorMessage,
+        CancellationToken ct = default)
+    {
+        EnsureDeviceKey(deviceKey);
+
+        var body = new AgentJobFailRequest
+        {
+            ErrorMessage = Truncate(errorMessage, 1000)
+        };
+
+        using var message = new HttpRequestMessage(
+            HttpMethod.Post,
+            CombineUrl(serverBaseUrl, $"{JobsPath}/{jobId}/fail"))
+        {
+            Content = CreateJsonContent(body)
+        };
+        message.Headers.Add("X-NC-Device-Key", deviceKey);
+
+        using var response = await _http.SendAsync(message, ct).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
+    }
+
+    private static void EnsureDeviceKey(string deviceKey)
+    {
+        if (string.IsNullOrWhiteSpace(deviceKey))
+            throw new AgentApiException(0, "AGENT_DEVICE_KEY_MISSING", "缺少设备密钥，请先运行 --register");
+    }
+
+    internal static string Truncate(string? text, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+        var trimmed = text.Trim();
+        return trimmed.Length <= maxLength ? trimmed : trimmed[..maxLength] + "…";
+    }
+}
