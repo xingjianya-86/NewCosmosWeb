@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     将 Web 构建产物拆分发布到 .1（index.html）与 .2（assets）。
 
