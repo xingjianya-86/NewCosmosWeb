@@ -1,10 +1,11 @@
-using NewCosmos.Constants;
+﻿using NewCosmos.Constants;
 using NewCosmos.Helpers;
 using NewCosmos.Models.Entities;
 using NewCosmos.Models.Results;
 using NewCosmos.Services.Core;
 using NewCosmos.Services.Database;
 using NewCosmos.Services.System;
+using NewCosmos.Services.Utilities;
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 
@@ -27,14 +28,16 @@ public class TempReliefService : BaseService, ITempReliefService
     private readonly IStandardConfigService _standardConfigService;
     private readonly IDictCacheService _dictCache;
     private readonly UserManagement.IOrganizationService _organizationService;
+    private readonly IBusinessTimelineService _timelineService;
 
-    public TempReliefService(IDatabaseService db, IStandardConfigService standardConfigService, IDictCacheService dictCache, UserManagement.IOrganizationService organizationService, ILoggerService logger)
+    public TempReliefService(IDatabaseService db, IStandardConfigService standardConfigService, IDictCacheService dictCache, UserManagement.IOrganizationService organizationService, IBusinessTimelineService timelineService, ILoggerService logger)
         : base(logger)
     {
         _db = db;
         _standardConfigService = standardConfigService;
         _dictCache = dictCache;
         _organizationService = organizationService;
+        _timelineService = timelineService;
     }
 
     /// <summary>
@@ -388,6 +391,56 @@ public class TempReliefService : BaseService, ITempReliefService
             LogException(ex, "获取候选人详情失败");
             return Result.FromException<TempReliefCandidate>(ex);
         }
+    }
+
+    /// <summary>
+    /// 「保障人群」自动判定（唯一口径）：按身份证反查四类在册台账（家庭表户主 + 人员表成员）。
+    /// 命中任一即 Insured（展示命中台账，按 特困 &gt; 低保 &gt; 边缘 &gt; 刚性支出 排序），未命中即 Uninsured。
+    /// 查询失败如实返回 Failure（禁止静默判成非在册）。
+    /// </summary>
+    public async Task<Result<TempReliefInsuredIdentity>> ResolveInsuredIdentityAsync(
+        string? idCard, CancellationToken ct = default)
+    {
+        var id = (idCard ?? string.Empty).Trim();
+        if (id.Length == 0)
+            return Result.Success(new TempReliefInsuredIdentity());
+
+        // 10 个 EXISTS 一次往返；表名均为硬编码常量，身份证走位置参数。
+        const string sql = @"
+            SELECT
+                (EXISTS (SELECT 1 FROM nc_biz_rural_subsistence_families WHERE applicant_id_card = $1)
+                 OR EXISTS (SELECT 1 FROM nc_biz_rural_subsistence_persons  WHERE id_card = $1)) AS rural_subsistence,
+                (EXISTS (SELECT 1 FROM nc_biz_urban_subsistence_families WHERE applicant_id_card = $1)
+                 OR EXISTS (SELECT 1 FROM nc_biz_urban_subsistence_persons  WHERE id_card = $1)) AS urban_subsistence,
+                (EXISTS (SELECT 1 FROM nc_biz_destitute_families WHERE applicant_id_card = $1)
+                 OR EXISTS (SELECT 1 FROM nc_biz_destitute_persons  WHERE id_card = $1)) AS destitute,
+                (EXISTS (SELECT 1 FROM nc_biz_low_income_edge_families WHERE applicant_id_card = $1)
+                 OR EXISTS (SELECT 1 FROM nc_biz_low_income_edge_persons  WHERE id_card = $1)) AS low_income_edge,
+                (EXISTS (SELECT 1 FROM nc_biz_rigid_expenditure_families WHERE applicant_id_card = $1)
+                 OR EXISTS (SELECT 1 FROM nc_biz_rigid_expenditure_persons  WHERE id_card = $1)) AS rigid_expenditure";
+
+        var result = await _db.QuerySingleAsync<TempReliefInsuredLedgerRow>(sql, ct, id);
+        if (result.IsFailure)
+            return Result.Failure<TempReliefInsuredIdentity>(result.ErrorCode!, result.Message!);
+
+        var row = result.Value;
+        if (row == null)
+            return Result.Failure<TempReliefInsuredIdentity>(ErrorCodes.DB_QUERY_ERROR, "保障人群判定查询未返回结果");
+
+        var matched = new List<string>();
+        if (row.RuralSubsistence) matched.Add("nc_biz_rural_subsistence_families");
+        if (row.UrbanSubsistence) matched.Add("nc_biz_urban_subsistence_families");
+        if (row.Destitute) matched.Add("nc_biz_destitute_families");
+        if (row.LowIncomeEdge) matched.Add("nc_biz_low_income_edge_families");
+        if (row.RigidExpenditure) matched.Add("nc_biz_rigid_expenditure_families");
+
+        var identity = new TempReliefInsuredIdentity
+        {
+            IsInsured = matched.Count > 0,
+            LedgerNames = TempReliefConstants.ResolveInsuredLedgerNames(matched)
+        };
+        LogInfo($"保障人群判定: 身份证={DataMasker.MaskIdCard(id)}, 在册={identity.IsInsured}, 台账={string.Join(",", identity.LedgerNames)}");
+        return Result.Success(identity);
     }
 
     /// <summary>
@@ -763,7 +816,7 @@ public class TempReliefService : BaseService, ITempReliefService
                 ApplicationStatusCodes.DRAFT, ApplicationStatusCodes.SUBMITTED,
                 ApplicationStatusCodes.APPROVED, ApplicationStatusCodes.COMPLETED
             };
-            var cls = await _db.QuerySingleAsync<PolicyClassRow>(classSql, ct, idCard, activeStatuses);
+            var cls = await _db.QuerySingleAsync<PolicyClassRow>(classSql, ct, idCard, (object)activeStatuses);
             if (cls.HasValue && !string.IsNullOrWhiteSpace(cls.Value.ClassificationResult))
             {
                 var isEnjoying = cls.Value.Status is ApplicationStatusCodes.APPROVED or ApplicationStatusCodes.COMPLETED;
@@ -956,6 +1009,33 @@ public class TempReliefService : BaseService, ITempReliefService
 
     #endregion
 
+    #region 政策基数（城市低保标准）
+
+    /// <summary>
+    /// 临时救助金额基数：当前有效的城市低保月标准最高值（政策第十条）。
+    /// 不按户籍分流；未配置显式失败，禁止静默归零。
+    /// </summary>
+    public async Task<Result<decimal>> GetReliefBaseStandardAsync(CancellationToken ct = default)
+    {
+        const string sql = @"
+            SELECT MAX(standard_value) FROM nc_config_standards
+            WHERE standard_type = $1
+              AND is_active = TRUE
+              AND effective_start_date <= CURRENT_DATE
+              AND (effective_end_date IS NULL OR effective_end_date >= CURRENT_DATE)";
+        var result = await _db.ExecuteScalarAsync<decimal>(sql, ct, TempReliefConstants.SubsistenceStandardUrban);
+        if (result.IsFailure)
+            return Result.Failure<decimal>(result.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
+                result.Message ?? "读取城市低保月标准失败");
+        if (result.Value <= 0)
+            return Result.Failure<decimal>(ErrorCodes.CONFIG_NOT_FOUND,
+                "未配置当前生效的城市低保月标准，无法核定救助金额");
+
+        return Result.Success(result.Value);
+    }
+
+    #endregion
+
     #region 查询
 
     public async Task<Result<TempReliefApplication>> GetByIdAsync(long id, CancellationToken ct = default)
@@ -1015,14 +1095,23 @@ public class TempReliefService : BaseService, ITempReliefService
         return Result.Success(result.Value);
     }
 
-    public async Task<Result<PagedResult<TempReliefApplication>>> GetPagedAsync(string keyword, string status, int pageIndex, int pageSize, CancellationToken ct = default)
+    public Task<Result<PagedResult<TempReliefApplication>>> GetPagedAsync(
+        string keyword, string status, int pageIndex, int pageSize, CancellationToken ct = default)
+        => GetPagedAsync(keyword, status, null, null, null, pageIndex, pageSize, ct);
+
+    public async Task<Result<PagedResult<TempReliefApplication>>> GetPagedAsync(
+        string keyword, string? status, string? populationStatus, string? reliefType, string? paymentChannel,
+        int pageIndex, int pageSize, CancellationToken ct = default)
     {
-        LogInfo($"分页查询: keywordLength={keyword.Length}, status={status}, 第{pageIndex}页, 每页{pageSize}条");
+        LogInfo($"分页查询: keywordLength={keyword?.Length ?? 0}, status={status}, 人群={populationStatus}, 类型={reliefType}, 渠道={paymentChannel}, 第{pageIndex}页, 每页{pageSize}条");
 
         var conditions = new SqlConditionBuilder()
             .Add("deleted_at IS NULL")
             .AddIf(!string.IsNullOrEmpty(status), "status = {0}", status)
-            .AddIf(!string.IsNullOrWhiteSpace(keyword), "(applicant_name ILIKE {0} OR applicant_id_card ILIKE {0})", $"%{keyword}%");
+            .AddIf(!string.IsNullOrEmpty(populationStatus), "population_status = {0}", populationStatus)
+            .AddIf(!string.IsNullOrEmpty(reliefType), "relief_type = {0}", reliefType)
+            .AddIf(!string.IsNullOrEmpty(paymentChannel), "payment_channel = {0}", paymentChannel)
+            .AddIf(!string.IsNullOrWhiteSpace(keyword), "(applicant_name ILIKE {0} OR applicant_id_card ILIKE {0} OR application_no ILIKE {0})", $"%{keyword}%");
 
         var where = conditions.ToWhereClause();
         var countSql = $"SELECT COUNT(*) FROM nc_biz_temp_relief_applications{where}";
@@ -1042,14 +1131,50 @@ public class TempReliefService : BaseService, ITempReliefService
         return Result.Success(PagedResult<TempReliefApplication>.FromList(listResult.Value, pageIndex, pageSize, Convert.ToInt32(countResult.Value)));
     }
 
+    public Task<Result<PagedResult<TempReliefApplication>>> GetPagedByStatusesAsync(
+        string keyword, string[] statuses, int pageIndex, int pageSize, CancellationToken ct = default)
+        => GetPagedByStatusesAsync(keyword, statuses, null, null, null, pageIndex, pageSize, ct);
+
+    public async Task<Result<PagedResult<TempReliefApplication>>> GetPagedByStatusesAsync(
+        string keyword, string[] statuses, string? populationStatus, string? reliefType, string? paymentChannel,
+        int pageIndex, int pageSize, CancellationToken ct = default)
+    {
+        var conditions = new SqlConditionBuilder()
+            .Add("deleted_at IS NULL")
+            .Add("status = ANY({0}::text[])", (object)statuses)
+            .AddIf(!string.IsNullOrEmpty(populationStatus), "population_status = {0}", populationStatus)
+            .AddIf(!string.IsNullOrEmpty(reliefType), "relief_type = {0}", reliefType)
+            .AddIf(!string.IsNullOrEmpty(paymentChannel), "payment_channel = {0}", paymentChannel)
+            .AddIf(!string.IsNullOrWhiteSpace(keyword),
+                "(applicant_name ILIKE {0} OR applicant_id_card ILIKE {0} OR application_no ILIKE {0})", $"%{keyword}%");
+
+        var where = conditions.ToWhereClause();
+        var countSql = $"SELECT COUNT(*) FROM nc_biz_temp_relief_applications{where}";
+        var countResult = await _db.ExecuteScalarAsync<long>(countSql, ct, conditions.GetParameters());
+        if (countResult.IsFailure)
+            return Result.Failure<PagedResult<TempReliefApplication>>(countResult.ErrorCode!, countResult.Message!);
+
+        var offset = (pageIndex - 1) * pageSize;
+        var querySql = $"SELECT {WideTableColumns.TempReliefApplicationsColumns} FROM nc_biz_temp_relief_applications{where}" +
+            $" ORDER BY updated_at DESC LIMIT ${conditions.ParamCount + 1} OFFSET ${conditions.ParamCount + 2}";
+        var pageParams = new List<object?>(conditions.GetParameters()) { pageSize, offset };
+
+        var listResult = await _db.QueryAsync<TempReliefApplication>(querySql, ct, pageParams.ToArray());
+        if (listResult.IsFailure)
+            return Result.Failure<PagedResult<TempReliefApplication>>(listResult.ErrorCode!, listResult.Message!);
+
+        return Result.Success(PagedResult<TempReliefApplication>.FromList(
+            listResult.Value, pageIndex, pageSize, Convert.ToInt32(countResult.Value)));
+    }
+
     public async Task<Result<PagedResult<TempReliefApplication>>> GetArchivedPagedAsync(string? keyword, int pageIndex, int pageSize, CancellationToken ct = default)
     {
         LogInfo($"已完结分页查询: keywordLength={keyword?.Length ?? 0}, 第{pageIndex}页, 每页{pageSize}条");
 
         var conditions = new SqlConditionBuilder()
             .Add("deleted_at IS NULL")
-            .Add("status IN ({0}, {1})", TempReliefConstants.StatusConfirmed, TempReliefConstants.StatusStopped)
-            .AddIf(!string.IsNullOrWhiteSpace(keyword), "(applicant_name ILIKE {0} OR applicant_id_card ILIKE {0})", $"%{keyword}%");
+            .Add("status IN ({0}, {1}, {2})", TempReliefConstants.StatusConfirmed, TempReliefConstants.StatusStopped, TempReliefConstants.StatusRejected)
+            .AddIf(!string.IsNullOrWhiteSpace(keyword), "(applicant_name ILIKE {0} OR applicant_id_card ILIKE {0} OR application_no ILIKE {0})", $"%{keyword}%");
 
         var where = conditions.ToWhereClause();
         var countSql = $"SELECT COUNT(*) FROM nc_biz_temp_relief_applications{where}";
@@ -1105,6 +1230,91 @@ public class TempReliefService : BaseService, ITempReliefService
 
     #region 写操作
 
+    /// <summary>
+    /// 救助金额/分类后端单点：
+    /// ① 人群状态按身份证反查四类在册台账判定（命中即 Insured，人工不可改判）；
+    /// ② 渠道归一（小额固定备用金）；
+    /// ③ 小额 = 人数 × 城市低保 × 档位（进一法）；常规·上级不填；常规·备用金必填且 ≤ 备用金上限。
+    /// </summary>
+    private async Task<Result> PrepareReliefAmountsAsync(TempReliefApplication application, CancellationToken ct)
+    {
+        application.ReliefPersonCount = TempReliefConstants.ResolveReliefPersonCount(
+            application.ReliefPersonCount, application.FamilySize);
+
+        var insuredResult = await ResolveInsuredIdentityAsync(application.ApplicantIdCard, ct);
+        if (insuredResult.IsFailure)
+            return Result.Failure(insuredResult.ErrorCode!, insuredResult.Message!);
+
+        var insured = insuredResult.Value;
+        // 手工登记不应产生「在册」档案：命中四类台账必须改从检索结果选择（可带出成员/银行快照）。
+        if (insured.IsInsured
+            && string.Equals(application.SourceType, TempReliefConstants.SourceManual, StringComparison.Ordinal))
+        {
+            return Result.Failure(ErrorCodes.VALIDATION_FAILED,
+                $"该身份证命中《{insured.PrimaryLedgerName}》，请改用检索选择该申请人，不可手工登记");
+        }
+
+        application.PopulationStatus = insured.PopulationStatus;
+        application.PaymentChannel = TempReliefConstants.ResolvePaymentChannel(
+            application.ReliefType, application.PaymentChannel);
+
+        if (application.ReliefPersonCount <= 0)
+            return Result.Failure(ErrorCodes.VALIDATION_FAILED, "家庭遇困人数（含户主）须大于 0");
+        if (application.FamilySize is > 0 && application.ReliefPersonCount > application.FamilySize.Value)
+            return Result.Failure(ErrorCodes.VALIDATION_FAILED,
+                $"家庭遇困人数（{application.ReliefPersonCount}）不能大于家庭人口（{application.FamilySize}）");
+
+        // 常规·上级发放：金额由上级核定，系统不计算、不落库
+        if (application.ReliefType != TempReliefConstants.ReliefTypeSmall
+            && application.PaymentChannel != TempReliefConstants.PaymentReserve)
+        {
+            application.StandardTier = null;
+            application.StandardMultiplier = null;
+            application.ConfirmAmount = null;
+            return Result.Success();
+        }
+
+        var baseResult = await GetReliefBaseStandardAsync(ct);
+        if (baseResult.IsFailure)
+            return Result.Failure(baseResult.ErrorCode!, baseResult.Message!);
+
+        // 常规·备用金发放：手工填金额，只校验上限
+        if (application.ReliefType != TempReliefConstants.ReliefTypeSmall)
+        {
+            application.StandardTier = null;
+            application.StandardMultiplier = null;
+            if (application.ConfirmAmount is null or <= 0)
+                return Result.Failure(ErrorCodes.VALIDATION_FAILED, "备用金发放请填写救助金额");
+
+            var cap = TempReliefConstants.GetReserveCap(baseResult.Value, application.ReliefPersonCount);
+            if (cap > 0 && application.ConfirmAmount > cap)
+                return Result.Failure(ErrorCodes.VALIDATION_FAILED,
+                    $"备用金发放金额不能超过上限 {cap:F2} 元（{application.ReliefPersonCount} 人 × 城市低保标准 {baseResult.Value:F2} × 6）");
+
+            return Result.Success();
+        }
+
+        // 小额快救：档位 + 公式计算
+        if (TempReliefConstants.TierMultiplier(application.StandardTier) <= 0)
+            return Result.Failure(ErrorCodes.VALIDATION_FAILED, "请选择小额快救档位（50%/75%/100%）");
+
+        application.StandardMultiplier = TempReliefConstants.TierMultiplier(application.StandardTier);
+        var ceiling = TempReliefConstants.ComputeSmallTotal(
+            application.ReliefPersonCount, baseResult.Value, application.StandardTier);
+
+        if (application.ConfirmAmount is null or <= 0)
+        {
+            application.ConfirmAmount = ceiling;
+        }
+        else if (application.ConfirmAmount > ceiling)
+        {
+            return Result.Failure(ErrorCodes.VALIDATION_FAILED,
+                $"确定金额不能超过{TempReliefConstants.GetTierLabel(application.StandardTier)}档上限 {ceiling:F2} 元");
+        }
+
+        return Result.Success();
+    }
+
     public async Task<Result<long>> CreateAsync(TempReliefApplication application, List<TempReliefMember> members, CancellationToken ct = default)
     {
         ValidateNotNull(application, nameof(application));
@@ -1117,6 +1327,9 @@ public class TempReliefService : BaseService, ITempReliefService
         try
         {
             var applyDate = application.ApplyDate ?? DateTime.Today;
+            var dateError = ValidateApplyDateRange(applyDate);
+            if (dateError != null)
+                return Result.Failure<long>(ErrorCodes.VALIDATION_FAILED, dateError);
             var applyYear = applyDate.Year.ToString();
             application.ApplyYear = applyYear;
 
@@ -1132,7 +1345,11 @@ public class TempReliefService : BaseService, ITempReliefService
             if (existsResult.Value)
                 return Result.Failure<long>(ErrorCodes.ANNUAL_LIMIT_EXCEEDED, $"该申请人 {applyYear} 年已申请过临时救助，每年仅限一次");
 
-            var appNoResult = await GetNextApplicationNoAsync(ct);
+            var amountResult = await PrepareReliefAmountsAsync(application, ct);
+            if (amountResult.IsFailure)
+                return Result.Failure<long>(amountResult.ErrorCode!, amountResult.Message!);
+
+            var appNoResult = await GetNextApplicationNoAsync(applyDate, ct);
             if (appNoResult.IsFailure)
                 return Result.Failure<long>(appNoResult.ErrorCode!, appNoResult.Message!);
 
@@ -1149,12 +1366,14 @@ public class TempReliefService : BaseService, ITempReliefService
                  report_unit, report_time, small_amount_level, confirm_amount,
                  publicize_start_date, publicize_end_date, verify_result, acceptance_person,
                  beneficiary_name, beneficiary_id_card, beneficiary_gender, beneficiary_age, beneficiary_relation,
-                 status, created_by, hukou_type, bank_name, bank_account, created_at, updated_at)
+                 status, created_by, hukou_type, bank_name, bank_account,
+                 relief_person_count, standard_tier, standard_multiplier,
+                 population_status, payment_channel, accepted_at, created_at, updated_at)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
                         $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,
                         $31,$32,$33,$34,$35,$36,$37,$38,
                         $39,$40,$41,$42,$43,
-                        $44,$45,$46,$47,$48,$49,NOW(), NOW())
+                        $44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,NOW(), NOW())
                 RETURNING id";
 
             var insertResult = await _db.ExecuteScalarAsync<long>(sql, ct,
@@ -1185,7 +1404,11 @@ public class TempReliefService : BaseService, ITempReliefService
                 application.Status ?? TempReliefConstants.StatusDraft,
                 application.CreatedBy ?? "System",
                 application.HukouType ?? "",
-                application.BankName ?? "", application.BankAccount ?? "");
+                application.BankName ?? "", application.BankAccount ?? "",
+                TempReliefConstants.ResolveReliefPersonCount(application.ReliefPersonCount, application.FamilySize),
+                application.StandardTier ?? "", (object?)application.StandardMultiplier,
+                application.PopulationStatus, application.PaymentChannel ?? "",
+                applyDate);
 
             if (insertResult.IsFailure)
                 return Result.Failure<long>(insertResult.ErrorCode!, insertResult.Message!);
@@ -1237,6 +1460,9 @@ public class TempReliefService : BaseService, ITempReliefService
         try
         {
             var applyDate = application.ApplyDate ?? DateTime.Today;
+            var dateError = ValidateApplyDateRange(applyDate);
+            if (dateError != null)
+                return Result.Failure(ErrorCodes.VALIDATION_FAILED, dateError);
             var applyYear = applyDate.Year.ToString();
             application.ApplyYear = applyYear;
 
@@ -1250,6 +1476,10 @@ public class TempReliefService : BaseService, ITempReliefService
             }
             if (existsResult.Value)
                 return Result.Failure(ErrorCodes.ANNUAL_LIMIT_EXCEEDED, $"该申请人 {applyYear} 年已申请过临时救助，每年仅限一次");
+
+            var amountResult = await PrepareReliefAmountsAsync(application, ct);
+            if (amountResult.IsFailure)
+                return Result.Failure(amountResult.ErrorCode!, amountResult.Message!);
 
             const string sql = @"
                  UPDATE nc_biz_temp_relief_applications SET
@@ -1268,8 +1498,11 @@ public class TempReliefService : BaseService, ITempReliefService
                  beneficiary_name = $39, beneficiary_id_card = $40, beneficiary_gender = $41,
                  beneficiary_age = $42, beneficiary_relation = $43,
                  hukou_type = $44, bank_name = $45, bank_account = $46,
-                 updated_by = $47, updated_at = NOW()
-                 WHERE id = $48 AND deleted_at IS NULL";
+                 relief_person_count = $47, standard_tier = $48, standard_multiplier = $49,
+                 population_status = $50, payment_channel = $51,
+                 updated_by = $52, updated_at = NOW(),
+                 accepted_at = COALESCE(accepted_at, $54)
+                 WHERE id = $53 AND deleted_at IS NULL";
 
              var updateResult = await _db.ExecuteNonQueryAsync(sql, ct,
                  application.ReliefType, application.ApplyYear,
@@ -1297,8 +1530,12 @@ public class TempReliefService : BaseService, ITempReliefService
                  application.BeneficiaryRelation ?? "",
                  application.HukouType ?? "",
                  application.BankName ?? "", application.BankAccount ?? "",
+                 TempReliefConstants.ResolveReliefPersonCount(application.ReliefPersonCount, application.FamilySize),
+                 application.StandardTier ?? "", (object?)application.StandardMultiplier,
+                 application.PopulationStatus, application.PaymentChannel ?? "",
                  application.UpdatedBy ?? "System",
-                 application.Id);
+                 application.Id,
+                 applyDate);
 
             if (updateResult.IsFailure)
                 return Result.Failure(updateResult.ErrorCode!, updateResult.Message!);
@@ -1332,20 +1569,242 @@ public class TempReliefService : BaseService, ITempReliefService
         }
     }
 
+    /// <summary>申请日期上限校验（唯一实现）：过去不设下限，未来最多提前 <see cref="TempReliefConstants.ApplyDateFutureMonths"/> 个月。</summary>
+    private static string? ValidateApplyDateRange(DateTime applyDate)
+    {
+        var upper = TempReliefConstants.GetApplyDateUpperBound(DateTime.Today);
+        return applyDate.Date <= upper
+            ? null
+            : $"申请日期最多只能提前 {TempReliefConstants.ApplyDateFutureMonths} 个月（最晚 {upper:yyyy-MM-dd}）";
+    }
+
+    /// <summary>
+    /// 修改申请日期并重编号（仅草稿/退回补正）：单事务完成
+    /// ① 状态闸 + 范围闸 + 年度唯一校验（排除自身）；
+    /// ② 按新日期重取 LZ 编号（同日 MAX+1，排除自身，唯一索引兜底并发）；
+    /// ③ 同步 apply_date/apply_year/accepted_at 与公示起止（小额清空公示）；
+    /// ④ updated_at/by 与业务审计。
+    /// created_at 不改写（临时救助不以创建时间作档案锚点）。
+    /// </summary>
+    public async Task<Result<string>> ChangeApplyDateAsync(long applicationId, DateTime newDate,
+        string operatorName, CancellationToken ct = default)
+    {
+        var newDay = newDate.Date;
+        var rangeError = ValidateApplyDateRange(newDay);
+        if (rangeError != null)
+            return Result.Failure<string>(ErrorCodes.VALIDATION_FAILED, rangeError);
+
+        LogInfo($"修改临时救助申请日期: id={applicationId}, 新日期={newDay:yyyy-MM-dd}");
+
+        await using var tx = await _db.BeginTransactionScopeAsync(ct);
+        try
+        {
+            var appResult = await GetByIdAsync(applicationId, ct);
+            if (appResult.IsFailure || appResult.Value == null)
+            {
+                await tx.RollbackAsync(ct);
+                return Result.Failure<string>(
+                    appResult.ErrorCode ?? ErrorCodes.RECORD_NOT_FOUND,
+                    appResult.Message ?? "申请不存在");
+            }
+
+            var app = appResult.Value;
+            var canChange = string.Equals(app.Status, TempReliefConstants.StatusDraft, StringComparison.Ordinal)
+                            || string.Equals(app.Status, TempReliefConstants.StatusReturned, StringComparison.Ordinal);
+            if (!canChange)
+            {
+                await tx.RollbackAsync(ct);
+                return Result.Failure<string>(ErrorCodes.INVALID_TRANSITION,
+                    "仅草稿或退回补正的申请可以修改日期");
+            }
+
+            var oldDay = (app.ApplyDate ?? app.CreatedAt ?? DateTime.Today).Date;
+            if (newDay == oldDay)
+            {
+                await tx.CommitAsync(ct);
+                return Result.Success(app.ApplicationNo);
+            }
+
+            var applyYear = newDay.Year.ToString();
+            var existsResult = await CheckAnnualExistsAsync(app.ApplicantIdCard, applyYear, applicationId, ct);
+            if (existsResult.IsFailure)
+            {
+                await tx.RollbackAsync(ct);
+                return Result.Failure<string>(existsResult.ErrorCode!, existsResult.Message!);
+            }
+            if (existsResult.Value)
+            {
+                await tx.RollbackAsync(ct);
+                return Result.Failure<string>(ErrorCodes.ANNUAL_LIMIT_EXCEEDED,
+                    $"该申请人 {applyYear} 年已申请过临时救助，每年仅限一次");
+            }
+
+            // 目标日取号：前缀内 MAX+1，排除自身防自撞；application_no 有唯一索引，撞号给出明确提示。
+            var prefix = $"{TempReliefConstants.ApplicationNoPrefix}{newDay:yyyyMMdd}";
+            const string seqSql = @"SELECT COALESCE(MAX(CAST(SUBSTRING(application_no FROM 11) AS INTEGER)), 0) + 1
+                                    FROM nc_biz_temp_relief_applications
+                                    WHERE application_no LIKE $1 AND application_no <> $2";
+            var seqResult = await _db.ExecuteScalarAsync<long>(seqSql, ct, $"{prefix}%", app.ApplicationNo);
+            if (seqResult.IsFailure)
+            {
+                await tx.RollbackAsync(ct);
+                return Result.Failure<string>(seqResult.ErrorCode!, seqResult.Message!);
+            }
+            var newNo = TempReliefConstants.BuildApplicationNo(newDay, seqResult.Value);
+
+            // 公示起止与申请日期同源：大额按逐笔 5 天曲线重算；小额免公示清空。
+            DateTime? publicizeStart = null;
+            DateTime? publicizeEnd = null;
+            if (!string.Equals(app.ReliefType, TempReliefConstants.ReliefTypeSmall, StringComparison.Ordinal))
+            {
+                var curve = _timelineService.BuildTempReliefCurve(newDay);
+                publicizeStart = curve.PublicityStartDate;
+                publicizeEnd = curve.PublicityEndDate;
+            }
+
+            const string updateSql = @"UPDATE nc_biz_temp_relief_applications
+                                       SET application_no = $1, apply_date = $2, apply_year = $3,
+                                           accepted_at = $2, publicize_start_date = $4, publicize_end_date = $5,
+                                           updated_at = NOW(), updated_by = $6
+                                       WHERE id = $7 AND application_no = $8 AND deleted_at IS NULL";
+            var updateResult = await _db.ExecuteNonQueryAsync(updateSql, ct,
+                newNo, newDay, applyYear, publicizeStart, publicizeEnd,
+                operatorName, applicationId, app.ApplicationNo);
+            if (updateResult.IsFailure)
+            {
+                await tx.RollbackAsync(ct);
+                if (string.Equals(updateResult.ErrorCode, ErrorCodes.DB_UNIQUE_VIOLATION, StringComparison.Ordinal))
+                    return Result.Failure<string>(ErrorCodes.DB_UNIQUE_VIOLATION,
+                        "申请编号撞号（同日序号被并发占用），请重试");
+                return Result.Failure<string>(updateResult.ErrorCode!, updateResult.Message!);
+            }
+            if (updateResult.Value == 0)
+            {
+                await tx.RollbackAsync(ct);
+                return Result.Failure<string>(ErrorCodes.CONCURRENCY_CONFLICT,
+                    "该申请正在被其他操作修改，请刷新后重试");
+            }
+
+            await tx.CommitAsync(ct);
+            Logger.LogBusiness("修改临时救助申请日期",
+                ("ApplicationId", applicationId),
+                ("OldNo", app.ApplicationNo),
+                ("NewNo", newNo),
+                ("NewDate", newDay.ToString("yyyy-MM-dd")));
+            return Result.Success(newNo);
+        }
+        catch (Exception ex)
+        {
+            LogException(ex, "修改临时救助申请日期失败");
+            return Result.FromException<string>(ex);
+        }
+    }
+
     public async Task<Result> ConfirmAsync(long id, string operatorName, CancellationToken ct = default)
     {
         LogInfo($"确认临时救助: id={id}, operator={operatorName}");
 
+        // 兼容「保存并确认」：草稿或已提交都可确认；上级渠道登记县确认件并置备案待办。
+        // 备用金渠道由乡镇确认，不写县确认/备案字段。
         var sql = @"UPDATE nc_biz_temp_relief_applications SET
-                    status = $1, confirmed_at = NOW(), confirmed_by = $2, updated_at = NOW()
-                    WHERE id = $3 AND deleted_at IS NULL AND status = $4";
-        var result = await _db.ExecuteNonQueryAsync(sql, ct, TempReliefConstants.StatusConfirmed, operatorName ?? "System", id, TempReliefConstants.StatusDraft);
+                    status = $1,
+                    accepted_at = COALESCE(accepted_at, NOW()),
+                    confirmed_at = NOW(), confirmed_by = $2,
+                    county_confirmed_at = CASE WHEN payment_channel = $5 THEN NOW() ELSE county_confirmed_at END,
+                    county_confirmed_by = CASE WHEN payment_channel = $5 THEN $2 ELSE county_confirmed_by END,
+                    filing_status = CASE WHEN payment_channel = $5 THEN $6 ELSE filing_status END,
+                    updated_at = NOW()
+                    WHERE id = $3 AND deleted_at IS NULL AND status = ANY($4)";
+        var result = await _db.ExecuteNonQueryAsync(sql, ct,
+            TempReliefConstants.StatusConfirmed, operatorName ?? "System", id,
+            (object)new[] { TempReliefConstants.StatusDraft, TempReliefConstants.StatusSubmitted },
+            TempReliefConstants.PaymentCounty, TempReliefConstants.FilingPending);
         if (result.IsFailure)
             return Result.Failure(result.ErrorCode!, result.Message!);
         if (result.Value == 0)
-            return Result.Failure(ErrorCodes.INVALID_TRANSITION, "仅草稿状态可确认");
+            return Result.Failure(ErrorCodes.INVALID_TRANSITION, "仅草稿或已提交状态可确认");
 
         Logger.LogBusiness("确认临时救助申请", ("ApplicationId", id));
+        return Result.Success();
+    }
+
+    /// <summary>提交（草稿/退回补正 → 已提交），写受理时间作为时限起点。</summary>
+    public async Task<Result> SubmitAsync(long id, string operatorName, CancellationToken ct = default)
+    {
+        var sql = @"UPDATE nc_biz_temp_relief_applications SET
+                    status = $1, accepted_at = COALESCE(accepted_at, NOW()), updated_at = NOW()
+                    WHERE id = $2 AND deleted_at IS NULL AND status = ANY($3)";
+        var result = await _db.ExecuteNonQueryAsync(sql, ct,
+            TempReliefConstants.StatusSubmitted, id,
+            (object)new[] { TempReliefConstants.StatusDraft, TempReliefConstants.StatusReturned });
+        if (result.IsFailure)
+            return Result.Failure(result.ErrorCode!, result.Message!);
+        if (result.Value == 0)
+            return Result.Failure(ErrorCodes.INVALID_TRANSITION, "仅草稿或退回补正状态可提交");
+
+        Logger.LogBusiness("提交临时救助申请", ("ApplicationId", id), ("Operator", operatorName ?? "System"));
+        return Result.Success();
+    }
+
+    /// <summary>不予救助（草稿/已提交 → 不予救助），理由与告知时间必填。</summary>
+    public async Task<Result> RejectAsync(long id, string reason, string operatorName, DateTime? notifiedAt,
+        string? noticeMethod, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+            return Result.Failure(ErrorCodes.VALIDATION_FAILED, "请填写不予救助理由");
+
+        var sql = @"UPDATE nc_biz_temp_relief_applications SET
+                    status = $1, reject_reason = $2, reject_notified_at = COALESCE($3, NOW()),
+                    reject_notice_method = $4, accepted_at = COALESCE(accepted_at, NOW()), updated_at = NOW()
+                    WHERE id = $5 AND deleted_at IS NULL AND status = ANY($6)";
+        var result = await _db.ExecuteNonQueryAsync(sql, ct,
+            TempReliefConstants.StatusRejected, reason, notifiedAt, noticeMethod ?? string.Empty, id,
+            (object)new[] { TempReliefConstants.StatusDraft, TempReliefConstants.StatusSubmitted });
+        if (result.IsFailure)
+            return Result.Failure(result.ErrorCode!, result.Message!);
+        if (result.Value == 0)
+            return Result.Failure(ErrorCodes.INVALID_TRANSITION, "仅草稿或已提交状态可登记不予救助");
+
+        Logger.LogBusiness("临时救助不予救助", ("ApplicationId", id), ("Reason", reason), ("Operator", operatorName ?? "System"));
+        return Result.Success();
+    }
+
+    /// <summary>退回补正（已提交 → 退回补正），原因必填。</summary>
+    public async Task<Result> ReturnAsync(long id, string reason, string operatorName, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+            return Result.Failure(ErrorCodes.VALIDATION_FAILED, "请填写退回补正原因");
+
+        var sql = @"UPDATE nc_biz_temp_relief_applications SET
+                    status = $1, reject_reason = $2, updated_at = NOW()
+                    WHERE id = $3 AND deleted_at IS NULL AND status = $4";
+        var result = await _db.ExecuteNonQueryAsync(sql, ct,
+            TempReliefConstants.StatusReturned, reason, id, TempReliefConstants.StatusSubmitted);
+        if (result.IsFailure)
+            return Result.Failure(result.ErrorCode!, result.Message!);
+        if (result.Value == 0)
+            return Result.Failure(ErrorCodes.INVALID_TRANSITION, "仅已提交状态可退回补正");
+
+        Logger.LogBusiness("临时救助退回补正", ("ApplicationId", id), ("Reason", reason), ("Operator", operatorName ?? "System"));
+        return Result.Success();
+    }
+
+    /// <summary>登记备案完成（上级部门发放：已确认 + 待备案 → 已备案）。</summary>
+    public async Task<Result> MarkFiledAsync(long id, string operatorName, CancellationToken ct = default)
+    {
+        var sql = @"UPDATE nc_biz_temp_relief_applications SET
+                    filing_status = $1, updated_at = NOW()
+                    WHERE id = $2 AND deleted_at IS NULL AND status = $3
+                      AND payment_channel = $4 AND COALESCE(filing_status, $5) = $5";
+        var result = await _db.ExecuteNonQueryAsync(sql, ct,
+            TempReliefConstants.FilingFiled, id, TempReliefConstants.StatusConfirmed,
+            TempReliefConstants.PaymentCounty, TempReliefConstants.FilingPending);
+        if (result.IsFailure)
+            return Result.Failure(result.ErrorCode!, result.Message!);
+        if (result.Value == 0)
+            return Result.Failure(ErrorCodes.INVALID_TRANSITION, "仅上级部门发放且待备案的记录可登记备案");
+
+        Logger.LogBusiness("临时救助备案完成", ("ApplicationId", id), ("Operator", operatorName ?? "System"));
         return Result.Success();
     }
 
@@ -1435,10 +1894,11 @@ public class TempReliefService : BaseService, ITempReliefService
 
     /// <summary>
     /// 生成申请编号：LZ{yyyyMMdd}{seq:D4}
+    /// 日期段取**所选申请日期**（2026-11-25 起；以前取保存当天），保证编号与申请日期同源。
     /// </summary>
-    private async Task<Result<string>> GetNextApplicationNoAsync(CancellationToken ct = default)
+    private async Task<Result<string>> GetNextApplicationNoAsync(DateTime applyDate, CancellationToken ct = default)
     {
-        var prefix = $"{TempReliefConstants.ApplicationNoPrefix}{DateTime.Now:yyyyMMdd}";
+        var prefix = $"{TempReliefConstants.ApplicationNoPrefix}{applyDate:yyyyMMdd}";
 
         var sql = @"SELECT COALESCE(MAX(CAST(SUBSTRING(application_no FROM 11) AS INTEGER)), 0) + 1
                     FROM nc_biz_temp_relief_applications
@@ -1447,8 +1907,7 @@ public class TempReliefService : BaseService, ITempReliefService
         if (result.IsFailure)
             return Result.Failure<string>(result.ErrorCode!, result.Message!);
 
-        var seq = result.Value;
-        var appNo = $"{prefix}{seq:D4}";
+        var appNo = TempReliefConstants.BuildApplicationNo(applyDate, result.Value);
         return Result.Success(appNo);
     }
 
@@ -1673,6 +2132,18 @@ public class TempReliefCandidateRow
         var rel = TempReliefConstants.GetRelationshipDisplayName(relation);
         return string.IsNullOrWhiteSpace(rel) ? $"命中成员：{name}" : $"命中成员：{name}（{rel}）";
     }
+}
+
+/// <summary>
+/// 四类在册台账命中行（按身份证反查，自动判定保障人群）
+/// </summary>
+public class TempReliefInsuredLedgerRow
+{
+    public bool RuralSubsistence { get; set; }
+    public bool UrbanSubsistence { get; set; }
+    public bool Destitute { get; set; }
+    public bool LowIncomeEdge { get; set; }
+    public bool RigidExpenditure { get; set; }
 }
 
 /// <summary>

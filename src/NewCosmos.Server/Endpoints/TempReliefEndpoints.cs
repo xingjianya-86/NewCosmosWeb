@@ -1,26 +1,59 @@
+using Microsoft.Extensions.DependencyInjection;
 using NewCosmos.Constants;
 using NewCosmos.Helpers;
 using NewCosmos.Models.Entities;
 using NewCosmos.Models.Results;
 using NewCosmos.Server.Contracts;
 using NewCosmos.Server.Infrastructure;
+using NewCosmos.Server.Services;
 using NewCosmos.Services.Core;
+using NewCosmos.Services.Database;
 using NewCosmos.Services.Domain.Reporting;
 using NewCosmos.Services.Domain.TempRelief;
 using NewCosmos.Services.UserManagement;
+using NewCosmos.Services.Utilities;
 
 namespace NewCosmos.Server.Endpoints;
 
 /// <summary>
 /// 临时救助接口（低收入人口救助帮扶 → 临时救助）。
-/// 读取 TEMP_VIEW；新增 TEMP_CREATE；编辑 / 确认 / 终止 / 归档 TEMP_EDIT；删除 TEMP_DELETE。
-/// 所有业务读写均经 Core <see cref="ITempReliefService"/>，本文件不直接访问数据库，
-/// 也不在前端/端点重抄金额公式：小额金额只按 Core 返回的低保月标准档位确认上限。
+/// 读取 TEMP_VIEW；新增 TEMP_CREATE；编辑 / 提交 / 退回 / 不予 / 确认 / 备案 / 终止 / 改期 / 归档 TEMP_EDIT；删除 TEMP_DELETE。
+/// <para>
+/// 业务口径（两大类 × 三小类、6 状态、时限、金额档位/上限、公示、年度唯一）全部在 Core
+/// <see cref="ITempReliefService"/> / <c>TempReliefConstants</c> / <c>TempReliefPrintDataBuilder</c>，
+/// 本文件只做权限、数据范围、请求映射与 DTO 组装，不重抄金额/状态/时限公式。
+/// </para>
 /// </summary>
 public static class TempReliefEndpoints
 {
     private const int DefaultPageSize = 20;
     private const int MaxPageSize = 100;
+
+    /// <summary>高级筛选（镇/年/月/逾期）为避免错误分页而全量扫描时的单页大小。</summary>
+    private const int ScanPageSize = 100;
+
+    /// <summary>高级筛选全量扫描上限；超过时显式要求缩小范围，不返回不完整结果。</summary>
+    private const int MaxScanRecords = 5000;
+
+    /// <summary>OCR 上传图片大小上限（与高龄端一致）。</summary>
+    private const long MaxOcrUploadBytes = 10L * 1024 * 1024;
+
+    /// <summary>OCR 请求体上限：文件 10MB + multipart 头开销。</summary>
+    private const long MaxOcrRequestBodyBytes = MaxOcrUploadBytes + 1024 * 1024;
+
+    private static readonly string[] PendingStatuses =
+    {
+        TempReliefConstants.StatusDraft,
+        TempReliefConstants.StatusSubmitted,
+        TempReliefConstants.StatusReturned
+    };
+
+    private static readonly string[] ArchivedStatuses =
+    {
+        TempReliefConstants.StatusConfirmed,
+        TempReliefConstants.StatusStopped,
+        TempReliefConstants.StatusRejected
+    };
 
     public static IEndpointRouteBuilder MapTempReliefEndpoints(this IEndpointRouteBuilder app)
     {
@@ -28,22 +61,40 @@ public static class TempReliefEndpoints
 
         app.MapGet(prefix, ListAsync);
         app.MapGet($"{prefix}/summary", GetSummaryAsync);
+        app.MapGet($"{prefix}/archived", GetArchivedAsync);
         app.MapGet($"{prefix}/candidates", SearchCandidatesAsync);
         app.MapGet($"{prefix}/candidates/{{sourceTable}}/{{sourceFamilyId:long}}", GetCandidateAsync);
+        app.MapGet($"{prefix}/insured-identity", ResolveInsuredIdentityAsync);
         app.MapGet($"{prefix}/hukou-type", ResolveHukouTypeAsync);
         app.MapGet($"{prefix}/small-amount-levels", GetSmallAmountLevelsAsync);
+        app.MapGet($"{prefix}/small-tiers", GetSmallTiersAsync);
         app.MapGet($"{prefix}/policy-snapshot", GetPolicySnapshotAsync);
         app.MapGet($"{prefix}/family-status", GetFamilyStatusAsync);
         app.MapGet($"{prefix}/check-annual", CheckAnnualAsync);
         app.MapGet($"{prefix}/report-unit-phone", GetReportUnitPhoneAsync);
         app.MapGet($"{prefix}/{{id:long}}", GetByIdAsync);
+        app.MapGet($"{prefix}/{{id:long}}/print-data", GetPrintDataAsync);
+        app.MapGet($"{prefix}/{{id:long}}/photos", GetPhotosAsync);
 
         app.MapPost(prefix, CreateAsync);
         app.MapPut($"{prefix}/{{id:long}}", UpdateAsync);
         app.MapDelete($"{prefix}/{{id:long}}", DeleteAsync);
+        app.MapPost($"{prefix}/{{id:long}}/submit", SubmitAsync);
+        app.MapPost($"{prefix}/{{id:long}}/return", ReturnAsync);
+        app.MapPost($"{prefix}/{{id:long}}/reject", RejectAsync);
         app.MapPost($"{prefix}/{{id:long}}/confirm", ConfirmAsync);
+        app.MapPost($"{prefix}/{{id:long}}/file", MarkFiledAsync);
+        app.MapPost($"{prefix}/{{id:long}}/change-date", ChangeApplyDateAsync);
         app.MapPost($"{prefix}/{{id:long}}/stop", StopAsync);
         app.MapPost($"{prefix}/{{id:long}}/complete", CompleteAsync);
+        app.MapPost($"{prefix}/{{id:long}}/photos", UploadPhotoAsync);
+        app.MapDelete($"{prefix}/{{id:long}}/photos/{{photoId:long}}", DeletePhotoAsync);
+
+        // 身份证 OCR（multipart file）：{id}/ocr 校验记录存在且类别仅 ID_CARD；/ocr/idcard 供新建表单使用。
+        app.MapPost($"{prefix}/{{id:long}}/ocr", RecognizeIdCardAsync)
+            .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxOcrRequestBodyBytes));
+        app.MapPost($"{prefix}/ocr/idcard", RecognizeIdCardAsync)
+            .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxOcrRequestBodyBytes));
 
         return app;
     }
@@ -58,7 +109,14 @@ public static class TempReliefEndpoints
         int? page,
         int? pageSize,
         string? keyword,
-        string? status)
+        string? status,
+        string? populationStatus,
+        string? reliefType,
+        string? paymentChannel,
+        string? town,
+        int? year,
+        int? month,
+        bool? overdueOnly)
     {
         var denied = await EndpointSecurity.RequirePermissionAsync(
             context, permissions, PermissionCodes.TEMP_VIEW, ct);
@@ -67,38 +125,113 @@ public static class TempReliefEndpoints
             return denied;
         }
 
-        var normalizedStatus = (status ?? string.Empty).Trim();
-        if (normalizedStatus.Length > 0
-            && normalizedStatus != TempReliefConstants.StatusDraft
-            && normalizedStatus != TempReliefConstants.StatusConfirmed
-            && normalizedStatus != TempReliefConstants.StatusStopped)
+        var statuses = NormalizeStatusFilter(status, out var statusError);
+        if (statusError is not null)
         {
-            return Invalid(context, "status 仅支持 Draft / Confirmed / Stopped 或留空");
+            return Invalid(context, statusError);
+        }
+
+        var population = NormalizePopulationStatus(populationStatus);
+        if (!string.IsNullOrWhiteSpace(populationStatus) && population is null)
+        {
+            return Invalid(context, "populationStatus 仅支持 Insured / Uninsured 或留空");
+        }
+
+        var type = NormalizeReliefType(reliefType);
+        if (!string.IsNullOrWhiteSpace(reliefType) && type is null)
+        {
+            return Invalid(context, "reliefType 仅支持 Large / Small 或留空");
+        }
+
+        var channel = NormalizePaymentChannel(paymentChannel);
+        if (!string.IsNullOrWhiteSpace(paymentChannel) && channel is null)
+        {
+            return Invalid(context, "paymentChannel 仅支持 County / Reserve 或留空");
+        }
+
+        if (year is < 1900 or > 9999)
+        {
+            return Invalid(context, "year 参数无效");
+        }
+
+        if (month is < 1 or > 12)
+        {
+            return Invalid(context, "month 参数应为 1-12");
+        }
+
+        if (month.HasValue && !year.HasValue)
+        {
+            return Invalid(context, "按月筛选时 year 必填");
         }
 
         var pageIndex = Math.Max(page ?? 1, 1);
         var effectivePageSize = Math.Clamp(
             pageSize is null or <= 0 ? DefaultPageSize : pageSize.Value, 1, MaxPageSize);
 
-        var result = await service.GetPagedAsync(
-            (keyword ?? string.Empty).Trim(),
-            normalizedStatus,
-            pageIndex,
-            effectivePageSize,
-            ct);
+        var keywordValue = (keyword ?? string.Empty).Trim();
+        var townValue = (town ?? string.Empty).Trim();
+        var advanced = townValue.Length > 0 || year.HasValue || month.HasValue || overdueOnly == true;
 
-        if (result.IsFailure || result.Value is null)
+        if (!advanced)
         {
-            return ApiErrors.FromResult(context, result);
+            var pageResult = await QueryBasePageAsync(
+                service, keywordValue, statuses, population, type, channel,
+                pageIndex, effectivePageSize, ct);
+
+            if (pageResult.IsFailure || pageResult.Value is null)
+            {
+                return ApiErrors.FromResult(context, pageResult);
+            }
+
+            return Results.Json(new TempReliefListResponse(
+                pageResult.Value.Items.Select(ToListItem).ToList(),
+                pageResult.Value.PageIndex,
+                pageResult.Value.PageSize,
+                pageResult.Value.TotalCount,
+                pageResult.Value.TotalPages));
         }
 
-        var items = result.Value.Items.Select(ToListItem).ToList();
+        // 高级筛选：Core 分页接口不提供 town/year/month/overdue 条件，
+        // 按同一业务过滤条件有界扫描后内存分页；超过上限显式报错，绝不返回错误页数据。
+        var firstResult = await QueryBasePageAsync(
+            service, keywordValue, statuses, population, type, channel, 1, ScanPageSize, ct);
+        if (firstResult.IsFailure || firstResult.Value is null)
+        {
+            return ApiErrors.FromResult(context, firstResult);
+        }
+
+        var firstPage = firstResult.Value;
+        if (firstPage.TotalCount > MaxScanRecords)
+        {
+            return Invalid(context,
+                $"筛选结果超过 {MaxScanRecords} 条，请增加关键字或缩小年份范围后再查询");
+        }
+
+        var scanned = new List<TempReliefApplication>(firstPage.TotalCount);
+        scanned.AddRange(firstPage.Items);
+
+        for (var pageNo = 2; pageNo <= firstPage.TotalPages; pageNo++)
+        {
+            var nextResult = await QueryBasePageAsync(
+                service, keywordValue, statuses, population, type, channel, pageNo, ScanPageSize, ct);
+            if (nextResult.IsFailure || nextResult.Value is null)
+            {
+                return ApiErrors.FromResult(context, nextResult);
+            }
+
+            scanned.AddRange(nextResult.Value.Items);
+        }
+
+        var filtered = scanned
+            .Where(app => MatchesAdvancedFilters(app, townValue, year, month, overdueOnly == true))
+            .ToList();
+
+        var skip = (pageIndex - 1) * effectivePageSize;
+        var items = filtered.Skip(skip).Take(effectivePageSize).Select(ToListItem).ToList();
+        var totalPages = (int)Math.Ceiling((double)filtered.Count / effectivePageSize);
+
         return Results.Json(new TempReliefListResponse(
-            items,
-            result.Value.PageIndex,
-            result.Value.PageSize,
-            result.Value.TotalCount,
-            result.Value.TotalPages));
+            items, pageIndex, effectivePageSize, filtered.Count, Math.Max(totalPages, 1)));
     }
 
     private static async Task<IResult> GetSummaryAsync(
@@ -115,27 +248,13 @@ public static class TempReliefEndpoints
             return denied;
         }
 
-        int? draftCount = null;
-        int? confirmedCount = null;
-        int? stoppedCount = null;
-
-        var draft = await service.GetPagedAsync(string.Empty, TempReliefConstants.StatusDraft, 1, 1, ct);
-        if (draft.HasValue)
-        {
-            draftCount = draft.Value.TotalCount;
-        }
-
-        var confirmed = await service.GetPagedAsync(string.Empty, TempReliefConstants.StatusConfirmed, 1, 1, ct);
-        if (confirmed.HasValue)
-        {
-            confirmedCount = confirmed.Value.TotalCount;
-        }
-
-        var stopped = await service.GetPagedAsync(string.Empty, TempReliefConstants.StatusStopped, 1, 1, ct);
-        if (stopped.HasValue)
-        {
-            stoppedCount = stopped.Value.TotalCount;
-        }
+        var pendingCount = await CountAsync(service, PendingStatuses, ct);
+        var submittedCount = await CountAsync(
+            service, new[] { TempReliefConstants.StatusSubmitted }, ct);
+        var confirmedCount = await CountAsync(
+            service, new[] { TempReliefConstants.StatusConfirmed }, ct);
+        var stoppedCount = await CountAsync(
+            service, new[] { TempReliefConstants.StatusStopped, TempReliefConstants.StatusRejected }, ct);
 
         int? yearConfirmed = null;
         decimal? yearAmount = null;
@@ -146,8 +265,161 @@ public static class TempReliefEndpoints
             yearAmount = stats.Value.YearConfirmedAmount;
         }
 
+        var overdueCount = await CountOverdueAsync(service, ct);
+
         return Results.Json(new TempReliefSummaryResponse(
-            draftCount, confirmedCount, stoppedCount, yearConfirmed, yearAmount));
+            pendingCount,
+            confirmedCount,
+            stoppedCount,
+            yearConfirmed,
+            yearAmount,
+            pendingCount,
+            submittedCount,
+            overdueCount));
+    }
+
+    private static async Task<IResult> GetArchivedAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        ITempReliefService service,
+        CancellationToken ct,
+        int? page,
+        int? pageSize,
+        string? keyword,
+        int? year,
+        int? month)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (year is < 1900 or > 9999)
+        {
+            return Invalid(context, "year 参数无效");
+        }
+
+        if (month is < 1 or > 12)
+        {
+            return Invalid(context, "month 参数应为 1-12");
+        }
+
+        if (month.HasValue && !year.HasValue)
+        {
+            return Invalid(context, "按月补打时 year 必填");
+        }
+
+        var pageIndex = Math.Max(page ?? 1, 1);
+        var effectivePageSize = Math.Clamp(
+            pageSize is null or <= 0 ? DefaultPageSize : pageSize.Value, 1, MaxPageSize);
+        var keywordValue = (keyword ?? string.Empty).Trim();
+
+        // 仅按年份补打：Core 无「已完结 + 年」组合查询，按已完结集合有界扫描后按业务时间过滤。
+        if (year.HasValue && !month.HasValue)
+        {
+            var yearOnlyFirstResult = await service.GetArchivedPagedAsync(
+                keywordValue.Length == 0 ? null : keywordValue, 1, ScanPageSize, ct);
+            if (yearOnlyFirstResult.IsFailure || yearOnlyFirstResult.Value is null)
+            {
+                return ApiErrors.FromResult(context, yearOnlyFirstResult);
+            }
+
+            var yearOnlyFirstPage = yearOnlyFirstResult.Value;
+            if (yearOnlyFirstPage.TotalCount > MaxScanRecords)
+            {
+                return Invalid(context,
+                    $"已完结记录超过 {MaxScanRecords} 条，请改用 year + month 或增加关键字后重试");
+            }
+
+            var yearOnlyScanned = new List<TempReliefApplication>(yearOnlyFirstPage.TotalCount);
+            yearOnlyScanned.AddRange(yearOnlyFirstPage.Items);
+
+            for (var yearOnlyPageNo = 2; yearOnlyPageNo <= yearOnlyFirstPage.TotalPages; yearOnlyPageNo++)
+            {
+                var yearOnlyNextResult = await service.GetArchivedPagedAsync(
+                    keywordValue.Length == 0 ? null : keywordValue, yearOnlyPageNo, ScanPageSize, ct);
+                if (yearOnlyNextResult.IsFailure || yearOnlyNextResult.Value is null)
+                {
+                    return ApiErrors.FromResult(context, yearOnlyNextResult);
+                }
+
+                yearOnlyScanned.AddRange(yearOnlyNextResult.Value.Items);
+            }
+
+            var yearOnlyFiltered = yearOnlyScanned
+                .Where(app => (app.ApplyDate ?? app.ReportTime ?? app.CreatedAt)?.Year == year.Value)
+                .ToList();
+
+            var skipYear = (pageIndex - 1) * effectivePageSize;
+            var yearItems = yearOnlyFiltered.Skip(skipYear).Take(effectivePageSize).Select(ToListItem).ToList();
+            var yearTotalPages = (int)Math.Ceiling((double)yearOnlyFiltered.Count / effectivePageSize);
+
+            return Results.Json(new TempReliefListResponse(
+                yearItems, pageIndex, effectivePageSize, yearOnlyFiltered.Count, Math.Max(yearTotalPages, 1)));
+        }
+
+        if (!year.HasValue || !month.HasValue)
+        {
+            var result = await service.GetArchivedPagedAsync(
+                keywordValue.Length == 0 ? null : keywordValue,
+                pageIndex, effectivePageSize, ct);
+            if (result.IsFailure || result.Value is null)
+            {
+                return ApiErrors.FromResult(context, result);
+            }
+
+            return Results.Json(new TempReliefListResponse(
+                result.Value.Items.Select(ToListItem).ToList(),
+                result.Value.PageIndex,
+                result.Value.PageSize,
+                result.Value.TotalCount,
+                result.Value.TotalPages));
+        }
+
+        var firstResult = await service.GetByMonthPagedAsync(
+            year.Value, month.Value, 1, ScanPageSize, ct);
+        if (firstResult.IsFailure || firstResult.Value is null)
+        {
+            return ApiErrors.FromResult(context, firstResult);
+        }
+
+        var firstPage = firstResult.Value;
+        if (firstPage.TotalCount > MaxScanRecords)
+        {
+            return Invalid(context,
+                $"该月已完结记录超过 {MaxScanRecords} 条，请增加姓名/身份证关键字后重试");
+        }
+
+        var scanned = new List<TempReliefApplication>(firstPage.TotalCount);
+        scanned.AddRange(firstPage.Items);
+
+        for (var pageNo = 2; pageNo <= firstPage.TotalPages; pageNo++)
+        {
+            var nextResult = await service.GetByMonthPagedAsync(
+                year.Value, month.Value, pageNo, ScanPageSize, ct);
+            if (nextResult.IsFailure || nextResult.Value is null)
+            {
+                return ApiErrors.FromResult(context, nextResult);
+            }
+
+            scanned.AddRange(nextResult.Value.Items);
+        }
+
+        var filtered = keywordValue.Length == 0
+            ? scanned
+            : scanned.Where(app =>
+                    (app.ApplicantName ?? string.Empty).Contains(keywordValue, StringComparison.OrdinalIgnoreCase)
+                    || (app.ApplicantIdCard ?? string.Empty).Contains(keywordValue, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+        var skip = (pageIndex - 1) * effectivePageSize;
+        var items = filtered.Skip(skip).Take(effectivePageSize).Select(ToListItem).ToList();
+        var totalPages = (int)Math.Ceiling((double)filtered.Count / effectivePageSize);
+
+        return Results.Json(new TempReliefListResponse(
+            items, pageIndex, effectivePageSize, filtered.Count, Math.Max(totalPages, 1)));
     }
 
     // ───────────────────────────── 详情 / 候选人 ─────────────────────────────
@@ -277,6 +549,41 @@ public static class TempReliefEndpoints
 
     // ───────────────────────────── 表单回填辅助 ─────────────────────────────
 
+    private static async Task<IResult> ResolveInsuredIdentityAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        ITempReliefService service,
+        CancellationToken ct,
+        string? idCard)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (string.IsNullOrWhiteSpace(idCard))
+        {
+            return Invalid(context, "请填写身份证号");
+        }
+
+        var result = await service.ResolveInsuredIdentityAsync(idCard.Trim(), ct);
+        if (result.IsFailure || result.Value is null)
+        {
+            return ApiErrors.FromResult(context, result);
+        }
+
+        var identity = result.Value;
+        return Results.Json(new TempReliefInsuredIdentityResponse(
+            identity.IsInsured,
+            identity.PopulationStatus,
+            TempReliefConstants.GetPopulationStatusName(identity.PopulationStatus),
+            identity.LedgerNames,
+            identity.PrimaryLedgerName,
+            identity.BasisText));
+    }
+
     private static async Task<IResult> ResolveHukouTypeAsync(
         HttpContext context,
         INewPermissionService permissions,
@@ -327,6 +634,41 @@ public static class TempReliefEndpoints
             .ToList();
 
         return Results.Json(new TempReliefSmallAmountLevelsResponse(levels));
+    }
+
+    private static async Task<IResult> GetSmallTiersAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        ITempReliefService service,
+        CancellationToken ct,
+        int? personCount)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        var count = personCount is > 0 ? personCount.Value : 1;
+        var baseResult = await service.GetReliefBaseStandardAsync(ct);
+        if (baseResult.IsFailure)
+        {
+            return ApiErrors.FromResult(context, baseResult);
+        }
+
+        var baseStandard = baseResult.Value;
+        var items = TempReliefConstants.SmallTierCodes
+            .Select(code => new TempReliefSmallTierDto(
+                code,
+                TempReliefConstants.GetTierLabel(code),
+                TempReliefConstants.TierMultiplier(code),
+                baseStandard,
+                count,
+                TempReliefConstants.GetSmallTierCeiling(baseStandard, count, code)))
+            .ToList();
+
+        return Results.Json(new TempReliefSmallTiersResponse(baseStandard, count, items));
     }
 
     private static async Task<IResult> GetPolicySnapshotAsync(
@@ -434,6 +776,281 @@ public static class TempReliefEndpoints
             : Results.Json(new TempReliefReportUnitPhoneResponse(result.Value ?? string.Empty));
     }
 
+    // ───────────────────────────── 打印 / OCR / 照片 ─────────────────────────────
+
+    private static async Task<IResult> GetPrintDataAsync(
+        long id,
+        HttpContext context,
+        INewPermissionService permissions,
+        ITempReliefService service,
+        IBusinessTimelineService timeline,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        var appResult = await service.GetByIdAsync(id, ct);
+        if (appResult.IsFailure || appResult.Value is null)
+        {
+            return appResult.IsFailure
+                ? ApiErrors.FromResult(context, appResult)
+                : NotFound(context, "临时救助申请不存在");
+        }
+
+        var app = appResult.Value;
+
+        var membersResult = await service.GetMembersByApplicationIdAsync(id, ct);
+        if (membersResult.IsFailure)
+        {
+            return ApiErrors.FromResult(context, membersResult);
+        }
+
+        var diseasesResult = await service.GetDiseasesByApplicationIdAsync(id, ct);
+        if (diseasesResult.IsFailure)
+        {
+            return ApiErrors.FromResult(context, diseasesResult);
+        }
+        app.Diseases = diseasesResult.Value ?? new List<TempReliefDisease>();
+
+        var accidentsResult = await service.GetAccidentsByApplicationIdAsync(id, ct);
+        if (accidentsResult.IsFailure)
+        {
+            return ApiErrors.FromResult(context, accidentsResult);
+        }
+        app.Accidents = accidentsResult.Value ?? new List<TempReliefAccident>();
+
+        var educationsResult = await service.GetEducationsByApplicationIdAsync(id, ct);
+        if (educationsResult.IsFailure)
+        {
+            return ApiErrors.FromResult(context, educationsResult);
+        }
+        app.Educations = educationsResult.Value ?? new List<TempReliefEducation>();
+
+        var members = membersResult.Value ?? new List<TempReliefMember>();
+        var (acceptanceDate, investigationDate) =
+            await TempReliefPrintDataBuilder.ResolveScheduleAsync(timeline, app);
+
+        var phoneResult = await service.GetReportUnitPhoneAsync(app.ReportUnit, ct);
+        var contactPhone = phoneResult.IsSuccess ? phoneResult.Value ?? string.Empty : string.Empty;
+
+        var fields = TempReliefPrintDataBuilder.BuildSingleFields(
+            app, members, contactPhone, acceptanceDate, investigationDate);
+
+        var classification = ArchiveCategoryResolver
+            .GetRecordCategories(TempReliefConstants.BusinessType, app.ReliefType)
+            .FirstOrDefault() ?? app.ReliefType;
+
+        return Results.Json(new TempReliefPrintDataResponse(
+            app.Id,
+            app.ApplicationNo ?? string.Empty,
+            app.ApplicantName ?? string.Empty,
+            DataMasker.MaskIdCard(app.ApplicantIdCard ?? string.Empty),
+            app.ReliefType ?? string.Empty,
+            TempReliefConstants.GetCategoryDisplayName(app.ReliefType, app.PopulationStatus, app.PaymentChannel),
+            classification,
+            acceptanceDate,
+            investigationDate,
+            fields,
+            Array.Empty<Dictionary<string, string>>(),
+            members.Select(ToMemberDto).ToList()));
+    }
+
+    private static async Task<IResult> RecognizeIdCardAsync(
+        long? id,
+        IFormFile? file,
+        HttpContext context,
+        INewPermissionService permissions,
+        ITempReliefService service,
+        CancellationToken ct,
+        string? category = null)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        var normalizedCategory = string.IsNullOrWhiteSpace(category)
+            ? PhotoCategoryConstants.ID_CARD
+            : category.Trim();
+        if (!string.Equals(normalizedCategory, PhotoCategoryConstants.ID_CARD, StringComparison.Ordinal))
+        {
+            return Invalid(context, "OCR 类别仅支持 ID_CARD（身份证）");
+        }
+
+        if (id is <= 0)
+        {
+            return Invalid(context, "申请 ID 无效");
+        }
+
+        if (id is > 0)
+        {
+            var appResult = await service.GetByIdAsync(id.Value, ct);
+            if (appResult.IsFailure || appResult.Value is null)
+            {
+                return appResult.IsFailure
+                    ? ApiErrors.FromResult(context, appResult)
+                    : NotFound(context, "临时救助申请不存在");
+            }
+        }
+
+        if (file is null || file.Length <= 0)
+        {
+            return Invalid(context, "请选择要识别的身份证图片");
+        }
+
+        if (file.Length > MaxOcrUploadBytes)
+        {
+            return Invalid(context, "身份证图片不能超过 10MB");
+        }
+
+        if (string.IsNullOrWhiteSpace(file.ContentType)
+            || !file.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            return Invalid(context, "仅支持图片文件");
+        }
+
+        var logger = context.RequestServices.GetRequiredService<ILoggerService>();
+        var ocr = new ElderlyOcrService(logger);
+
+        await using var stream = file.OpenReadStream();
+        var result = await ocr.RecognizeIdCardAsync(stream, ct);
+        if (result.IsFailure || result.Value is null)
+        {
+            return MapOcrResult(context, result);
+        }
+
+        var value = result.Value;
+        return Results.Json(new TempReliefOcrResponse(
+            normalizedCategory,
+            value.Name ?? string.Empty,
+            value.IdCard ?? string.Empty,
+            value.Gender ?? string.Empty,
+            value.BirthDate,
+            value.Address ?? string.Empty,
+            value.Fields ?? new Dictionary<string, string>()));
+    }
+
+    private static async Task<IResult> GetPhotosAsync(
+        long id,
+        HttpContext context,
+        INewPermissionService permissions,
+        CancellationToken ct,
+        string? category)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetUserId() is not { } userId)
+        {
+            return Unauthorized(context);
+        }
+
+        var photoService = CreatePhotoService(context);
+        var result = await photoService.ListAsync(id, userId, category, ct);
+        if (result.IsFailure)
+        {
+            return MapPhotoResult(context, result);
+        }
+
+        return Results.Json(new TempReliefPhotoListResponse(result.Value ?? []));
+    }
+
+    private static async Task<IResult> UploadPhotoAsync(
+        long id,
+        IFormFile? file,
+        HttpContext context,
+        INewPermissionService permissions,
+        CancellationToken ct,
+        string? category,
+        string? photoName)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        if (file is null || file.Length <= 0)
+        {
+            return Invalid(context, "请选择要上传的照片");
+        }
+
+        if (file.Length > TempReliefPhotoService.MaxPhotoBytes)
+        {
+            return Invalid(context, "照片不能超过 10MB");
+        }
+
+        if (string.IsNullOrWhiteSpace(file.ContentType)
+            || !file.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            return Invalid(context, "仅支持图片文件");
+        }
+
+        using var memory = new MemoryStream();
+        await using (var stream = file.OpenReadStream())
+        {
+            await stream.CopyToAsync(memory, ct);
+        }
+
+        var photoService = CreatePhotoService(context);
+        var result = await photoService.AddAsync(
+            id,
+            user.Id,
+            OperatorName(user),
+            category,
+            photoName,
+            memory.ToArray(),
+            file.ContentType,
+            ct);
+
+        return result.IsFailure
+            ? MapPhotoResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    private static async Task<IResult> DeletePhotoAsync(
+        long id,
+        long photoId,
+        HttpContext context,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetUserId() is not { } userId)
+        {
+            return Unauthorized(context);
+        }
+
+        var photoService = CreatePhotoService(context);
+        var result = await photoService.DeleteAsync(id, photoId, userId, ct);
+
+        return result.IsFailure
+            ? MapPhotoResult(context, result)
+            : Results.NoContent();
+    }
+
     // ───────────────────────────── 写接口 ─────────────────────────────
 
     private static async Task<IResult> CreateAsync(
@@ -441,6 +1058,7 @@ public static class TempReliefEndpoints
         HttpContext context,
         INewPermissionService permissions,
         ITempReliefService service,
+        IBusinessTimelineService timeline,
         CancellationToken ct)
     {
         var denied = await EndpointSecurity.RequirePermissionAsync(
@@ -460,7 +1078,7 @@ public static class TempReliefEndpoints
             return Invalid(context, "请求体不能为空");
         }
 
-        var validation = ValidateRequest(request, create: true, existing: null);
+        var validation = ValidateRequest(request, create: true);
         if (validation is not null)
         {
             return Invalid(context, validation);
@@ -473,7 +1091,7 @@ public static class TempReliefEndpoints
         }
 
         var (application, members, buildError) = await BuildApplicationAsync(
-            request, existing: null, service, OperatorName(user), ct);
+            request, existing: null, service, timeline, OperatorName(user), ct);
         if (application is null)
         {
             return Invalid(context, buildError ?? "临时救助申请数据不完整");
@@ -491,6 +1109,7 @@ public static class TempReliefEndpoints
         HttpContext context,
         INewPermissionService permissions,
         ITempReliefService service,
+        IBusinessTimelineService timeline,
         CancellationToken ct)
     {
         var denied = await EndpointSecurity.RequirePermissionAsync(
@@ -519,12 +1138,24 @@ public static class TempReliefEndpoints
         }
 
         var existing = existingResult.Value;
-        if (!string.Equals(existing.Status, TempReliefConstants.StatusDraft, StringComparison.Ordinal))
+        if (existing.Status is not (TempReliefConstants.StatusDraft or TempReliefConstants.StatusReturned))
         {
-            return Conflict(context, ErrorCodes.INVALID_TRANSITION, "仅草稿状态可编辑");
+            return Conflict(context, ErrorCodes.INVALID_TRANSITION, "仅草稿或退回补正状态可编辑");
         }
 
-        var validation = ValidateRequest(request, create: false, existing);
+        // 更新时前端可能不重复提交来源信息：沿用库内来源并照常做来源身份证复核，
+        // 防止改身份证绕过「必须从检索结果选择」的服务端闸门。
+        if (string.IsNullOrWhiteSpace(request.SourceTable)
+            && !string.IsNullOrWhiteSpace(existing.SourceTable))
+        {
+            request.SourceTable = existing.SourceTable;
+            if (request.SourceFamilyId <= 0)
+            {
+                request.SourceFamilyId = existing.SourceFamilyId;
+            }
+        }
+
+        var validation = ValidateRequest(request, create: false);
         if (validation is not null)
         {
             return Invalid(context, validation);
@@ -537,7 +1168,7 @@ public static class TempReliefEndpoints
         }
 
         var (application, members, buildError) = await BuildApplicationAsync(
-            request, existing, service, OperatorName(user), ct);
+            request, existing, service, timeline, OperatorName(user), ct);
         if (application is null)
         {
             return Invalid(context, buildError ?? "临时救助申请数据不完整");
@@ -569,6 +1200,102 @@ public static class TempReliefEndpoints
             : Results.NoContent();
     }
 
+    private static async Task<IResult> SubmitAsync(
+        long id,
+        HttpContext context,
+        INewPermissionService permissions,
+        ITempReliefService service,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        var result = await service.SubmitAsync(id, OperatorName(user), ct);
+        return result.IsFailure
+            ? MapWriteResult(context, result)
+            : Results.NoContent();
+    }
+
+    private static async Task<IResult> ReturnAsync(
+        long id,
+        TempReliefReasonRequest? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        ITempReliefService service,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        var reason = request?.Reason?.Trim();
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            return Invalid(context, "请填写退回补正原因");
+        }
+
+        var result = await service.ReturnAsync(id, reason, OperatorName(user), ct);
+        return result.IsFailure
+            ? MapWriteResult(context, result)
+            : Results.NoContent();
+    }
+
+    private static async Task<IResult> RejectAsync(
+        long id,
+        TempReliefRejectRequest? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        ITempReliefService service,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        var reason = request?.Reason?.Trim();
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            return Invalid(context, "请填写不予救助理由");
+        }
+
+        var result = await service.RejectAsync(
+            id,
+            reason,
+            OperatorName(user),
+            request?.NotifiedAt,
+            string.IsNullOrWhiteSpace(request?.NoticeMethod) ? "书面" : request.NoticeMethod.Trim(),
+            ct);
+
+        return result.IsFailure
+            ? MapWriteResult(context, result)
+            : Results.NoContent();
+    }
+
     private static async Task<IResult> ConfirmAsync(
         long id,
         HttpContext context,
@@ -592,6 +1319,69 @@ public static class TempReliefEndpoints
         return result.IsFailure
             ? MapWriteResult(context, result)
             : Results.NoContent();
+    }
+
+    private static async Task<IResult> MarkFiledAsync(
+        long id,
+        HttpContext context,
+        INewPermissionService permissions,
+        ITempReliefService service,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        var result = await service.MarkFiledAsync(id, OperatorName(user), ct);
+        return result.IsFailure
+            ? MapWriteResult(context, result)
+            : Results.NoContent();
+    }
+
+    private static async Task<IResult> ChangeApplyDateAsync(
+        long id,
+        TempReliefChangeDateRequest? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        ITempReliefService service,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.TEMP_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        if (request?.ApplyDate is not { } newDate)
+        {
+            return Invalid(context, "请提供新的申请日期");
+        }
+
+        if (!TempReliefConstants.IsApplyDateWithinRange(newDate, DateTime.Today))
+        {
+            var upper = TempReliefConstants.GetApplyDateUpperBound(DateTime.Today);
+            return Invalid(context,
+                $"申请日期最多只能提前 {TempReliefConstants.ApplyDateFutureMonths} 个月（最晚 {upper:yyyy-MM-dd}）");
+        }
+
+        var result = await service.ChangeApplyDateAsync(id, newDate, OperatorName(user), ct);
+        return result.IsFailure
+            ? MapWriteResult(context, result)
+            : Results.Json(new TempReliefChangeDateResponse(result.Value ?? string.Empty));
     }
 
     private static async Task<IResult> StopAsync(
@@ -644,25 +1434,24 @@ public static class TempReliefEndpoints
 
     // ───────────────────────────── 保存校验 / 组装 ─────────────────────────────
 
-    private static string? ValidateRequest(
-        TempReliefSaveRequest request, bool create, TempReliefApplication? existing)
+    private static string? ValidateRequest(TempReliefSaveRequest request, bool create)
     {
         var sourceTable = request.SourceTable?.Trim() ?? string.Empty;
-        var sourceFamilyId = request.SourceFamilyId > 0
-            ? request.SourceFamilyId
-            : existing?.SourceFamilyId ?? 0;
-
-        if (create || sourceFamilyId > 0)
+        if (sourceTable.Length > 0)
         {
             if (!TempReliefConstants.IsAllowedSourceTable(sourceTable))
             {
-                return "申请人必须从检索结果中选择（来源表不在白名单内）";
+                return "申请人来源表不在白名单内";
             }
 
-            if (sourceFamilyId <= 0)
+            if (request.SourceFamilyId <= 0)
             {
                 return "申请人必须从检索结果中选择";
             }
+        }
+        else if (request.SourceFamilyId > 0)
+        {
+            return "手工登记不应携带来源记录 ID";
         }
 
         if (string.IsNullOrWhiteSpace(request.ApplicantName))
@@ -682,7 +1471,28 @@ public static class TempReliefEndpoints
         if (reliefType != TempReliefConstants.ReliefTypeLarge
             && reliefType != TempReliefConstants.ReliefTypeSmall)
         {
-            return "救助类型仅支持大额或小额";
+            return "救助类型仅支持常规救助（Large）或小额快救（Small）";
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.PopulationStatus)
+            && request.PopulationStatus.Trim() is not (TempReliefConstants.PopulationInsured
+                or TempReliefConstants.PopulationUninsured))
+        {
+            return "populationStatus 仅支持 Insured / Uninsured";
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.PaymentChannel)
+            && request.PaymentChannel.Trim() is not (TempReliefConstants.PaymentCounty
+                or TempReliefConstants.PaymentReserve))
+        {
+            return "paymentChannel 仅支持 County / Reserve";
+        }
+
+        var applyDate = (request.ApplyDate ?? DateTime.Today).Date;
+        if (!TempReliefConstants.IsApplyDateWithinRange(applyDate, DateTime.Today))
+        {
+            var upper = TempReliefConstants.GetApplyDateUpperBound(DateTime.Today);
+            return $"申请日期最多只能提前 {TempReliefConstants.ApplyDateFutureMonths} 个月（最晚 {upper:yyyy-MM-dd}）";
         }
 
         var difficultyType = string.IsNullOrWhiteSpace(request.DifficultyType)
@@ -712,9 +1522,9 @@ public static class TempReliefEndpoints
                 return "请填写每条疾病明细的诊断结果或疾病编码";
             }
 
-            if (request.Diseases.Any(d => d.SelfPaid.HasValue && d.SelfPaid.Value < 0)
-                || request.Diseases.Any(d => (d.MedicalTotal.HasValue && d.MedicalTotal.Value < 0)
-                    || (d.InsurancePaid.HasValue && d.InsurancePaid.Value < 0)))
+            if (request.Diseases.Any(d => d.SelfPaid.HasValue && d.SelfPaid.Value < 0
+                || d.MedicalTotal.HasValue && d.MedicalTotal.Value < 0
+                || d.InsurancePaid.HasValue && d.InsurancePaid.Value < 0))
             {
                 return "疾病明细金额不能为负数";
             }
@@ -747,10 +1557,41 @@ public static class TempReliefEndpoints
             }
         }
 
-        if (request.PublicizeStartDate.HasValue && request.PublicizeEndDate.HasValue
-            && request.PublicizeEndDate.Value.Date < request.PublicizeStartDate.Value.Date)
+        if (reliefType == TempReliefConstants.ReliefTypeSmall)
         {
-            return "公示结束日期不能早于开始日期";
+            if (ResolveTierCode(request.StandardTier, request.SmallAmountLevel) is null)
+            {
+                return "请选择小额快救档位（50%/75%/100%）";
+            }
+        }
+        else
+        {
+            var channel = TempReliefConstants.ResolvePaymentChannel(reliefType, request.PaymentChannel);
+            if (channel == TempReliefConstants.PaymentReserve
+                && request.ConfirmAmount is null or <= 0)
+            {
+                return "备用金发放请填写救助金额";
+            }
+        }
+
+        if (reliefType != TempReliefConstants.ReliefTypeSmall
+            && request.PublicizeStartDate.HasValue != request.PublicizeEndDate.HasValue)
+        {
+            return "公示开始与结束日期需同时填写";
+        }
+
+        if (request.PublicizeStartDate.HasValue && request.PublicizeEndDate.HasValue)
+        {
+            if (request.PublicizeEndDate.Value.Date < request.PublicizeStartDate.Value.Date)
+            {
+                return "公示结束日期不能早于开始日期";
+            }
+
+            if (reliefType != TempReliefConstants.ReliefTypeSmall
+                && (request.PublicizeEndDate.Value.Date - request.PublicizeStartDate.Value.Date).Days != 2)
+            {
+                return "公示期须为 3 天（公示止 = 公示起 + 2 天）";
+            }
         }
 
         return null;
@@ -758,7 +1599,7 @@ public static class TempReliefEndpoints
 
     /// <summary>
     /// 服务端复核「申请人只能从候选人检索选择」：来源表 + 来源家庭 ID 必须能取到候选人，
-    /// 且候选人身份证与提交的申请人身份证一致。更新历史无来源记录时放行（沿用库中原来源）。
+    /// 且候选人身份证与提交的申请人身份证一致。非在册手工登记（无来源）不适用。
     /// </summary>
     private static async Task<string?> VerifySourceApplicantAsync(
         TempReliefSaveRequest request,
@@ -795,6 +1636,7 @@ public static class TempReliefEndpoints
             TempReliefSaveRequest request,
             TempReliefApplication? existing,
             ITempReliefService service,
+            IBusinessTimelineService timeline,
             string operatorName,
             CancellationToken ct)
     {
@@ -807,6 +1649,13 @@ public static class TempReliefEndpoints
         var sourceFamilyId = request.SourceFamilyId > 0
             ? request.SourceFamilyId
             : existing?.SourceFamilyId ?? 0;
+
+        // 非在册手工登记：无来源表/来源记录，source_type=Manual。
+        if (string.IsNullOrEmpty(sourceTable) || sourceFamilyId <= 0)
+        {
+            sourceTable = string.Empty;
+            sourceFamilyId = 0;
+        }
 
         var reliefType = string.IsNullOrWhiteSpace(request.ReliefType)
             ? TempReliefConstants.ReliefTypeLarge
@@ -859,13 +1708,60 @@ public static class TempReliefEndpoints
             })
             .ToList();
 
+        var familySize = TempReliefConstants.ResolveFamilySize(
+            request.FamilySize ?? existing?.FamilySize, effectiveMemberCount);
+
+        var sourceType = sourceTable.Length == 0
+            ? TempReliefConstants.SourceManual
+            : string.Equals(sourceTable, TempReliefConstants.CurrentSourceTable, StringComparison.Ordinal)
+                ? TempReliefConstants.SourceApplication
+                : TempReliefConstants.SourceImportTab;
+
+        var paymentChannel = TempReliefConstants.ResolvePaymentChannel(
+            reliefType, request.PaymentChannel ?? existing?.PaymentChannel);
+
+        var populationStatus = !string.IsNullOrWhiteSpace(request.PopulationStatus)
+            && request.PopulationStatus.Trim() is TempReliefConstants.PopulationInsured
+                or TempReliefConstants.PopulationUninsured
+            ? request.PopulationStatus.Trim()
+            : !string.IsNullOrWhiteSpace(existing?.PopulationStatus)
+                ? existing!.PopulationStatus
+                : TempReliefConstants.ResolvePopulationStatus(sourceType, sourceTable);
+
+        // 公示期由 Core 逐笔曲线推导（3 天）；小额免公示。请求显式提供时以请求为准并已校验 3 天。
+        DateTime? publicizeStart;
+        DateTime? publicizeEnd;
+        if (reliefType == TempReliefConstants.ReliefTypeSmall)
+        {
+            publicizeStart = null;
+            publicizeEnd = null;
+        }
+        else if (request.PublicizeStartDate.HasValue || request.PublicizeEndDate.HasValue)
+        {
+            publicizeStart = request.PublicizeStartDate;
+            publicizeEnd = request.PublicizeEndDate;
+        }
+        else if (existing is not null
+                 && existing.ApplyDate?.Date == applyDate
+                 && existing.PublicizeStartDate.HasValue)
+        {
+            publicizeStart = existing.PublicizeStartDate;
+            publicizeEnd = existing.PublicizeEndDate;
+        }
+        else
+        {
+            var curve = timeline.BuildTempReliefCurve(applyDate);
+            publicizeStart = curve.PublicityStartDate;
+            publicizeEnd = curve.PublicityEndDate;
+        }
+
         var application = new TempReliefApplication
         {
             Id = existing?.Id ?? 0,
             ReliefType = reliefType,
-            SourceType = string.Equals(sourceTable, TempReliefConstants.CurrentSourceTable, StringComparison.Ordinal)
-                ? TempReliefConstants.SourceApplication
-                : TempReliefConstants.SourceImportTab,
+            PopulationStatus = populationStatus,
+            PaymentChannel = paymentChannel,
+            SourceType = sourceType,
             SourceTable = sourceTable,
             SourceFamilyId = sourceFamilyId,
             HukouType = hukouType,
@@ -892,8 +1788,9 @@ public static class TempReliefEndpoints
             HukouAddress = request.HukouAddress?.Trim() ?? string.Empty,
             Town = request.Town?.Trim() ?? string.Empty,
             Village = request.Village?.Trim() ?? string.Empty,
-            FamilySize = TempReliefConstants.ResolveFamilySize(
-                request.FamilySize ?? existing?.FamilySize, effectiveMemberCount),
+            FamilySize = familySize,
+            ReliefPersonCount = TempReliefConstants.ResolveReliefPersonCount(
+                request.ReliefPersonCount, familySize),
             FamilyCategory = familyCategory,
             BankName = request.BankName?.Trim() ?? string.Empty,
             BankAccount = request.BankAccount?.Trim() ?? string.Empty,
@@ -907,8 +1804,8 @@ public static class TempReliefEndpoints
             ReportUnit = request.ReportUnit?.Trim() ?? string.Empty,
             ReportTime = request.ReportTime ?? existing?.ReportTime ?? DateTime.Now,
             VerifyResult = request.VerifyResult ?? string.Empty,
-            PublicizeStartDate = request.PublicizeStartDate,
-            PublicizeEndDate = request.PublicizeEndDate,
+            PublicizeStartDate = publicizeStart,
+            PublicizeEndDate = publicizeEnd,
             AcceptancePerson = request.AcceptancePerson?.Trim() ?? string.Empty,
             Status = existing?.Status ?? TempReliefConstants.StatusDraft,
             CreatedBy = existing?.CreatedBy ?? operatorName,
@@ -988,58 +1885,249 @@ public static class TempReliefEndpoints
             application.BeneficiaryRelation = TempReliefConstants.RelationHead;
         }
 
+        ApplyReliefAmount(application, request, reliefType, paymentChannel);
+        return (application, members, null);
+    }
+
+    /// <summary>
+    /// 金额/档位仅做请求映射：小额档位码 + 可下调金额、备用金手工金额、上级发放留空；
+    /// 人群状态重判、渠道归一、档位上限与备用金上限全部由 Core <c>PrepareReliefAmountsAsync</c> 校验。
+    /// </summary>
+    private static void ApplyReliefAmount(
+        TempReliefApplication application,
+        TempReliefSaveRequest request,
+        string reliefType,
+        string paymentChannel)
+    {
         if (reliefType == TempReliefConstants.ReliefTypeSmall)
         {
-            var levelsResult = await service.GetSmallAmountLevelsAsync(hukouType, ct);
-            if (levelsResult.IsFailure || levelsResult.Value is null || levelsResult.Value.Count == 0)
-            {
-                return (null, members, levelsResult.Message ?? "未取到小额救助金额档位");
-            }
+            var tier = ResolveTierCode(request.StandardTier, request.SmallAmountLevel);
+            application.StandardTier = tier;
+            application.StandardMultiplier =
+                TempReliefConstants.TierMultiplier(tier) > 0
+                    ? TempReliefConstants.TierMultiplier(tier)
+                    : null;
+            application.SmallAmountLevel = string.IsNullOrEmpty(tier)
+                ? request.SmallAmountLevel?.Trim() ?? string.Empty
+                : $"{TempReliefConstants.GetTierLabel(tier)}档";
+            application.ConfirmAmount = request.ConfirmAmount;
+            return;
+        }
 
-            var level = levelsResult.Value.FirstOrDefault(l =>
-                string.Equals(l.StandardName, request.SmallAmountLevel?.Trim(), StringComparison.Ordinal));
+        application.StandardTier = null;
+        application.StandardMultiplier = null;
 
-            if (level is null)
-            {
-                // 存量档位（旧政策 500/1000/2000 等）不在当前低保月标准列表中：
-                // 保留原档位名与原金额回显/保存，只有用户改选新档位后才按新口径落库。
-                if (!string.IsNullOrWhiteSpace(request.SmallAmountLevel)
-                    && request.ConfirmAmount.HasValue
-                    && request.ConfirmAmount.Value > 0)
-                {
-                    application.SmallAmountLevel = request.SmallAmountLevel.Trim();
-                    application.ConfirmAmount = Math.Round(
-                        request.ConfirmAmount.Value, 2, MidpointRounding.AwayFromZero);
-                    return (application, members, null);
-                }
-
-                return (null, members, "请选择有效的小额救助金额档位");
-            }
-
-            var amount = request.ConfirmAmount ?? level.StandardValue;
-            if (amount <= 0 || amount > level.StandardValue)
-            {
-                return (null, members,
-                    $"确定金额须大于 0 且不能超过户籍对应低保月标准 {level.StandardValue:F2} 元");
-            }
-
-            application.SmallAmountLevel = level.StandardName;
-            application.ConfirmAmount = Math.Round(amount, 2, MidpointRounding.AwayFromZero);
+        if (paymentChannel == TempReliefConstants.PaymentReserve)
+        {
+            application.SmallAmountLevel = string.Empty;
+            application.ConfirmAmount = request.ConfirmAmount;
         }
         else
         {
-            // 大额救助金额不填写，由上级审批核定。
+            // 常规·上级发放：金额由上级核定，系统不计算、不落库。
             application.SmallAmountLevel = string.Empty;
             application.ConfirmAmount = null;
         }
-
-        return (application, members, null);
     }
 
     private static string BuildTextAddress(params string?[] parts)
         => string.Concat(parts
             .Where(p => !string.IsNullOrWhiteSpace(p))
             .Select(p => p!.Trim()));
+
+    // ───────────────────────────── 查询辅助 ─────────────────────────────
+
+    private static async Task<Result<PagedResult<TempReliefApplication>>> QueryBasePageAsync(
+        ITempReliefService service,
+        string keyword,
+        string[]? statuses,
+        string? populationStatus,
+        string? reliefType,
+        string? paymentChannel,
+        int pageIndex,
+        int pageSize,
+        CancellationToken ct)
+    {
+        if (statuses is { Length: > 0 })
+        {
+            return await service.GetPagedByStatusesAsync(
+                keyword, statuses, populationStatus, reliefType, paymentChannel,
+                pageIndex, pageSize, ct);
+        }
+
+        return await service.GetPagedAsync(
+            keyword, string.Empty, populationStatus, reliefType, paymentChannel,
+            pageIndex, pageSize, ct);
+    }
+
+    private static bool MatchesAdvancedFilters(
+        TempReliefApplication app,
+        string town,
+        int? year,
+        int? month,
+        bool overdueOnly)
+    {
+        if (town.Length > 0
+            && !(app.Town ?? string.Empty).Contains(town, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var businessDate = app.ApplyDate ?? app.ReportTime ?? app.CreatedAt;
+        if (year.HasValue && businessDate?.Year != year.Value)
+        {
+            return false;
+        }
+
+        if (month.HasValue && businessDate?.Month != month.Value)
+        {
+            return false;
+        }
+
+        if (overdueOnly && !app.IsOverdue)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static async Task<int?> CountAsync(
+        ITempReliefService service,
+        string[] statuses,
+        CancellationToken ct)
+    {
+        var result = await service.GetPagedByStatusesAsync(
+            string.Empty, statuses, 1, 1, ct);
+        return result.IsSuccess ? result.Value.TotalCount : null;
+    }
+
+    /// <summary>
+    /// 逾期数：Core 无逾期计数接口，按待办状态集合有界扫描后按 <c>IsOverdue</c> 统计；
+    /// 扫描超限或读取失败返回 null（前端显示「—」），不伪造 0。
+    /// </summary>
+    private static async Task<int?> CountOverdueAsync(
+        ITempReliefService service,
+        CancellationToken ct)
+    {
+        var firstResult = await service.GetPagedByStatusesAsync(
+            string.Empty, PendingStatuses, 1, ScanPageSize, ct);
+        if (firstResult.IsFailure || firstResult.Value is null)
+        {
+            return null;
+        }
+
+        var firstPage = firstResult.Value;
+        if (firstPage.TotalCount > MaxScanRecords)
+        {
+            return null;
+        }
+
+        var count = firstPage.Items.Count(app => app.IsOverdue);
+        for (var pageNo = 2; pageNo <= firstPage.TotalPages; pageNo++)
+        {
+            var nextResult = await service.GetPagedByStatusesAsync(
+                string.Empty, PendingStatuses, pageNo, ScanPageSize, ct);
+            if (nextResult.IsFailure || nextResult.Value is null)
+            {
+                return null;
+            }
+
+            count += nextResult.Value.Items.Count(app => app.IsOverdue);
+        }
+
+        return count;
+    }
+
+    private static string[]? NormalizeStatusFilter(string? status, out string? error)
+    {
+        error = null;
+        var raw = (status ?? string.Empty).Trim();
+        if (raw.Length == 0 || string.Equals(raw, "All", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        if (string.Equals(raw, "Pending", StringComparison.OrdinalIgnoreCase))
+        {
+            return PendingStatuses;
+        }
+
+        if (string.Equals(raw, "Archived", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(raw, "Done", StringComparison.OrdinalIgnoreCase))
+        {
+            return ArchivedStatuses;
+        }
+
+        var allowed = new[]
+        {
+            TempReliefConstants.StatusDraft,
+            TempReliefConstants.StatusSubmitted,
+            TempReliefConstants.StatusReturned,
+            TempReliefConstants.StatusConfirmed,
+            TempReliefConstants.StatusRejected,
+            TempReliefConstants.StatusStopped
+        };
+
+        var statuses = raw
+            .Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        var invalid = statuses.FirstOrDefault(s => Array.IndexOf(allowed, s) < 0);
+        if (invalid is not null)
+        {
+            error = "status 仅支持 Draft/Submitted/Returned/Confirmed/Rejected/Stopped"
+                    + "（或 Pending / Archived 分组）";
+            return null;
+        }
+
+        return statuses.Length == 0 ? null : statuses;
+    }
+
+    private static string? NormalizePopulationStatus(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        return value.Trim() is TempReliefConstants.PopulationInsured or TempReliefConstants.PopulationUninsured
+            ? value.Trim()
+            : null;
+    }
+
+    private static string? NormalizeReliefType(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        return value.Trim() is TempReliefConstants.ReliefTypeLarge or TempReliefConstants.ReliefTypeSmall
+            ? value.Trim()
+            : null;
+    }
+
+    private static string? NormalizePaymentChannel(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        return value.Trim() is TempReliefConstants.PaymentCounty or TempReliefConstants.PaymentReserve
+            ? value.Trim()
+            : null;
+    }
+
+    /// <summary>
+    /// 小额档位码解析：优先 standardTier（S50/S75/S100），兼容旧前端 smallAmountLevel 的
+    /// 「50%档 / 75%档 / 100%档」展示文本；解析不到返回 null 由校验显式拒绝。
+    /// </summary>
+    private static string? ResolveTierCode(string? standardTier, string? smallAmountLevel)
+    {
+        var tier = (standardTier ?? string.Empty).Trim();
+        if (Array.IndexOf(TempReliefConstants.SmallTierCodes, tier) >= 0)
+        {
+            return tier;
+        }
+
+        var label = (smallAmountLevel ?? string.Empty).Trim();
+        if (label.Length == 0) return null;
+        if (label.Contains("100", StringComparison.Ordinal)) return TempReliefConstants.TierSmall100;
+        if (label.Contains("75", StringComparison.Ordinal)) return TempReliefConstants.TierSmall75;
+        if (label.Contains("50", StringComparison.Ordinal)) return TempReliefConstants.TierSmall50;
+        return null;
+    }
 
     // ───────────────────────────── DTO 映射 ─────────────────────────────
 
@@ -1050,6 +2138,11 @@ public static class TempReliefEndpoints
         DataMasker.MaskIdCard(app.ApplicantIdCard ?? string.Empty),
         app.ReliefType ?? string.Empty,
         TempReliefConstants.GetReliefTypeName(app.ReliefType),
+        app.PopulationStatus ?? string.Empty,
+        TempReliefConstants.GetPopulationStatusName(app.PopulationStatus),
+        app.PaymentChannel ?? string.Empty,
+        TempReliefConstants.GetPaymentChannelName(app.PaymentChannel),
+        TempReliefConstants.GetCategoryDisplayName(app.ReliefType, app.PopulationStatus, app.PaymentChannel),
         app.FamilyCategory ?? string.Empty,
         app.Town ?? string.Empty,
         app.Village ?? string.Empty,
@@ -1057,117 +2150,203 @@ public static class TempReliefEndpoints
         app.ConfirmAmount,
         app.Status ?? string.Empty,
         TempReliefConstants.GetStatusName(app.Status),
+        app.DeadlineText,
+        app.DeadlineDate,
+        app.IsOverdue,
         app.StoppedAt,
         app.StopReason ?? string.Empty,
         app.ReportUnit ?? string.Empty,
-        app.CreatedAt);
+        app.CreatedAt,
+        app.ReliefPersonCount,
+        app.FilingStatus,
+        app.FilingStatus switch
+        {
+            TempReliefConstants.FilingPending => "待备案",
+            TempReliefConstants.FilingFiled => "已备案",
+            _ => string.Empty
+        },
+        app.CanSubmit,
+        app.CanReturn,
+        app.CanReject,
+        app.Status is TempReliefConstants.StatusDraft or TempReliefConstants.StatusSubmitted,
+        app.CanMarkFiled,
+        app.CanMarkFiled);
+
+    private static TempReliefMemberDto ToMemberDto(TempReliefMember member) => new(
+        member.Id,
+        member.MemberName ?? string.Empty,
+        member.Gender ?? string.Empty,
+        member.Relation ?? string.Empty,
+        member.IdCard ?? string.Empty,
+        member.WorkUnit ?? string.Empty,
+        member.AnnualIncome,
+        member.SortOrder);
 
     private static TempReliefDetailResponse ToDetail(
         TempReliefApplication app,
         IReadOnlyList<TempReliefMember> members,
         IReadOnlyList<TempReliefDisease> diseases,
         IReadOnlyList<TempReliefAccident> accidents,
-        IReadOnlyList<TempReliefEducation> educations) => new(
-        app.Id,
-        app.ApplicationNo ?? string.Empty,
-        app.ReliefType ?? string.Empty,
-        TempReliefConstants.GetReliefTypeName(app.ReliefType),
-        app.ApplyYear ?? string.Empty,
-        app.SourceType ?? string.Empty,
-        app.SourceTable ?? string.Empty,
-        app.SourceFamilyId,
-        app.HukouType ?? string.Empty,
-        app.ApplicantName ?? string.Empty,
-        app.ApplicantIdCard ?? string.Empty,
-        app.Gender ?? string.Empty,
-        app.Age,
-        app.Phone ?? string.Empty,
-        app.BeneficiaryName,
-        app.BeneficiaryIdCard,
-        app.BeneficiaryGender,
-        app.BeneficiaryAge,
-        app.BeneficiaryRelation,
-        app.FamilyProvince ?? string.Empty,
-        app.FamilyCity ?? string.Empty,
-        app.FamilyDistrict ?? string.Empty,
-        app.FamilyTown ?? string.Empty,
-        app.FamilyDetail ?? string.Empty,
-        app.FamilyAddress ?? string.Empty,
-        app.HukouProvince ?? string.Empty,
-        app.HukouCity ?? string.Empty,
-        app.HukouDistrict ?? string.Empty,
-        app.HukouTown ?? string.Empty,
-        app.HukouAddress ?? string.Empty,
-        app.Town ?? string.Empty,
-        app.Village ?? string.Empty,
-        app.FamilySize,
-        app.FamilyCategory ?? string.Empty,
-        app.BankName ?? string.Empty,
-        app.BankAccount ?? string.Empty,
-        app.PolicyEnjoyed ?? string.Empty,
-        app.FamilyMemberStatus ?? string.Empty,
-        app.DifficultyReason ?? string.Empty,
-        app.DifficultyType ?? string.Empty,
-        app.ApplyDate,
-        app.ReportUnit ?? string.Empty,
-        app.ReportTime,
-        app.SmallAmountLevel ?? string.Empty,
-        app.ConfirmAmount,
-        app.PublicizeStartDate,
-        app.PublicizeEndDate,
-        app.VerifyResult ?? string.Empty,
-        app.AcceptancePerson ?? string.Empty,
-        app.Status ?? string.Empty,
-        TempReliefConstants.GetStatusName(app.Status),
-        app.ConfirmedAt,
-        app.ConfirmedBy ?? string.Empty,
-        app.StoppedAt,
-        app.StoppedBy ?? string.Empty,
-        app.StopReason ?? string.Empty,
-        app.CreatedAt,
-        app.UpdatedAt,
-        members.Select(m => new TempReliefMemberDto(
-            m.Id,
-            m.MemberName ?? string.Empty,
-            m.Gender ?? string.Empty,
-            m.Relation ?? string.Empty,
-            m.IdCard ?? string.Empty,
-            m.WorkUnit ?? string.Empty,
-            m.AnnualIncome,
-            m.SortOrder)).ToList(),
-        diseases.Select(d => new TempReliefDiseaseDto(
-            d.Id,
-            d.DiseaseName ?? string.Empty,
-            d.DiseaseCode ?? string.Empty,
-            d.MemberName ?? string.Empty,
-            d.Hospital ?? string.Empty,
-            d.TreatStartDate == DateTime.MinValue ? null : d.TreatStartDate,
-            d.TreatEndDate == DateTime.MinValue ? null : d.TreatEndDate,
-            d.MedicalTotal,
-            d.InsurancePaid,
-            d.SelfPaid,
-            d.SortOrder)).ToList(),
-        accidents.Select(a => new TempReliefAccidentDto(
-            a.Id,
-            a.AccidentType ?? string.Empty,
-            a.MemberName ?? string.Empty,
-            a.HappenDate == DateTime.MinValue ? null : a.HappenDate,
-            a.HappenPlace ?? string.Empty,
-            a.InjurySituation ?? string.Empty,
-            a.PropertyLoss,
-            a.CompensationPaid,
-            a.ResponsibilityDesc ?? string.Empty,
-            a.MaterialDesc ?? string.Empty,
-            a.SortOrder)).ToList(),
-        educations.Select(e => new TempReliefEducationDto(
-            e.Id,
-            e.StudentName ?? string.Empty,
-            e.EducationStage ?? string.Empty,
-            e.SchoolName ?? string.Empty,
-            e.SchoolDuration,
-            e.TuitionFee,
-            e.FeeDate == DateTime.MinValue ? null : e.FeeDate,
-            e.SortOrder)).ToList());
+        IReadOnlyList<TempReliefEducation> educations)
+    {
+        var isSmall = string.Equals(
+            app.ReliefType, TempReliefConstants.ReliefTypeSmall, StringComparison.Ordinal);
+        var isCounty = string.Equals(
+            app.PaymentChannel, TempReliefConstants.PaymentCounty, StringComparison.Ordinal);
+        var isUninsured = string.Equals(
+            app.PopulationStatus, TempReliefConstants.PopulationUninsured, StringComparison.Ordinal);
+
+        int? publicizeDays = app.PublicizeStartDate.HasValue && app.PublicizeEndDate.HasValue
+            ? Math.Max((app.PublicizeEndDate.Value.Date - app.PublicizeStartDate.Value.Date).Days + 1, 0)
+            : null;
+
+        var canConfirm = app.Status is TempReliefConstants.StatusDraft
+            or TempReliefConstants.StatusSubmitted;
+
+        var filingStatusText = app.FilingStatus switch
+        {
+            TempReliefConstants.FilingFiled => "已备案",
+            TempReliefConstants.FilingPending => "待备案",
+            _ => isCounty && app.Status == TempReliefConstants.StatusConfirmed ? "待备案" : string.Empty
+        };
+
+        return new TempReliefDetailResponse
+        {
+            Id = app.Id,
+            ApplicationNo = app.ApplicationNo ?? string.Empty,
+            ReliefType = app.ReliefType ?? string.Empty,
+            ReliefTypeText = TempReliefConstants.GetReliefTypeName(app.ReliefType),
+            PopulationStatus = app.PopulationStatus ?? string.Empty,
+            PopulationStatusText = TempReliefConstants.GetPopulationStatusName(app.PopulationStatus),
+            PaymentChannel = app.PaymentChannel ?? string.Empty,
+            PaymentChannelText = TempReliefConstants.GetPaymentChannelName(app.PaymentChannel),
+            CategoryDisplayName = TempReliefConstants.GetCategoryDisplayName(
+                app.ReliefType, app.PopulationStatus, app.PaymentChannel),
+            ApplyYear = app.ApplyYear ?? string.Empty,
+            SourceType = app.SourceType ?? string.Empty,
+            SourceName = TempReliefConstants.GetSourceName(app.SourceType),
+            SourceTable = app.SourceTable ?? string.Empty,
+            SourceFamilyId = app.SourceFamilyId,
+            IsManualEntry = string.Equals(
+                app.SourceType, TempReliefConstants.SourceManual, StringComparison.Ordinal),
+            HukouType = app.HukouType ?? string.Empty,
+            ApplicantName = app.ApplicantName ?? string.Empty,
+            ApplicantIdCard = app.ApplicantIdCard ?? string.Empty,
+            Gender = app.Gender ?? string.Empty,
+            Age = app.Age,
+            Phone = app.Phone ?? string.Empty,
+            BeneficiaryName = app.BeneficiaryName,
+            BeneficiaryIdCard = app.BeneficiaryIdCard,
+            BeneficiaryGender = app.BeneficiaryGender,
+            BeneficiaryAge = app.BeneficiaryAge,
+            BeneficiaryRelation = app.BeneficiaryRelation,
+            FamilyProvince = app.FamilyProvince ?? string.Empty,
+            FamilyCity = app.FamilyCity ?? string.Empty,
+            FamilyDistrict = app.FamilyDistrict ?? string.Empty,
+            FamilyTown = app.FamilyTown ?? string.Empty,
+            FamilyDetail = app.FamilyDetail ?? string.Empty,
+            FamilyAddress = app.FamilyAddress ?? string.Empty,
+            HukouProvince = app.HukouProvince ?? string.Empty,
+            HukouCity = app.HukouCity ?? string.Empty,
+            HukouDistrict = app.HukouDistrict ?? string.Empty,
+            HukouTown = app.HukouTown ?? string.Empty,
+            HukouAddress = app.HukouAddress ?? string.Empty,
+            Town = app.Town ?? string.Empty,
+            Village = app.Village ?? string.Empty,
+            FamilySize = app.FamilySize,
+            ReliefPersonCount = app.ReliefPersonCount,
+            FamilyCategory = app.FamilyCategory ?? string.Empty,
+            BankName = app.BankName ?? string.Empty,
+            BankAccount = app.BankAccount ?? string.Empty,
+            PolicyEnjoyed = app.PolicyEnjoyed ?? string.Empty,
+            FamilyMemberStatus = app.FamilyMemberStatus ?? string.Empty,
+            DifficultyReason = app.DifficultyReason ?? string.Empty,
+            DifficultyType = app.DifficultyType ?? string.Empty,
+            ApplyDate = app.ApplyDate,
+            ReportUnit = app.ReportUnit ?? string.Empty,
+            ReportTime = app.ReportTime,
+            SmallAmountLevel = app.SmallAmountLevel ?? string.Empty,
+            StandardTier = app.StandardTier,
+            StandardTierLabel = string.IsNullOrWhiteSpace(app.StandardTier)
+                ? string.Empty
+                : TempReliefConstants.GetTierLabel(app.StandardTier),
+            StandardMultiplier = app.StandardMultiplier,
+            ConfirmAmount = app.ConfirmAmount,
+            PublicizeStartDate = app.PublicizeStartDate,
+            PublicizeEndDate = app.PublicizeEndDate,
+            PublicizeRangeText = app.PublicizeRangeDisplay,
+            PublicizeDays = publicizeDays,
+            PublicizeRequired = !isSmall,
+            VerifyResult = app.VerifyResult ?? string.Empty,
+            AcceptancePerson = app.AcceptancePerson ?? string.Empty,
+            Status = app.Status ?? string.Empty,
+            StatusText = TempReliefConstants.GetStatusName(app.Status),
+            AcceptedAt = app.AcceptedAt,
+            InvestigationDoneAt = app.InvestigationDoneAt,
+            DeadlineDate = app.DeadlineDate,
+            DeadlineText = app.DeadlineText,
+            RemainingDays = app.RemainingDays,
+            IsOverdue = app.IsOverdue,
+            CanSubmit = app.CanSubmit,
+            CanReturn = app.CanReturn,
+            CanReject = app.CanReject,
+            CanConfirm = canConfirm,
+            CanMarkFiled = app.CanMarkFiled,
+            EconomicCheckRequired = !isSmall && isUninsured,
+            CountyConfirmRequired = isCounty,
+            FilingRequired = isCounty,
+            CountyConfirmedAt = app.CountyConfirmedAt,
+            CountyConfirmedBy = app.CountyConfirmedBy ?? string.Empty,
+            FilingStatus = app.FilingStatus,
+            FilingStatusText = filingStatusText,
+            RejectReason = app.RejectReason,
+            RejectNotifiedAt = app.RejectNotifiedAt,
+            RejectNoticeMethod = app.RejectNoticeMethod,
+            ConfirmedAt = app.ConfirmedAt,
+            ConfirmedBy = app.ConfirmedBy ?? string.Empty,
+            StoppedAt = app.StoppedAt,
+            StoppedBy = app.StoppedBy ?? string.Empty,
+            StopReason = app.StopReason ?? string.Empty,
+            CreatedAt = app.CreatedAt,
+            UpdatedAt = app.UpdatedAt,
+            CreatedBy = app.CreatedBy ?? string.Empty,
+            UpdatedBy = app.UpdatedBy ?? string.Empty,
+            Members = members.Select(ToMemberDto).ToList(),
+            Diseases = diseases.Select(d => new TempReliefDiseaseDto(
+                d.Id,
+                d.DiseaseName ?? string.Empty,
+                d.DiseaseCode ?? string.Empty,
+                d.MemberName ?? string.Empty,
+                d.Hospital ?? string.Empty,
+                d.TreatStartDate == DateTime.MinValue ? null : d.TreatStartDate,
+                d.TreatEndDate == DateTime.MinValue ? null : d.TreatEndDate,
+                d.MedicalTotal,
+                d.InsurancePaid,
+                d.SelfPaid,
+                d.SortOrder)).ToList(),
+            Accidents = accidents.Select(a => new TempReliefAccidentDto(
+                a.Id,
+                a.AccidentType ?? string.Empty,
+                a.MemberName ?? string.Empty,
+                a.HappenDate == DateTime.MinValue ? null : a.HappenDate,
+                a.HappenPlace ?? string.Empty,
+                a.InjurySituation ?? string.Empty,
+                a.PropertyLoss,
+                a.CompensationPaid,
+                a.ResponsibilityDesc ?? string.Empty,
+                a.MaterialDesc ?? string.Empty,
+                a.SortOrder)).ToList(),
+            Educations = educations.Select(e => new TempReliefEducationDto(
+                e.Id,
+                e.StudentName ?? string.Empty,
+                e.EducationStage ?? string.Empty,
+                e.SchoolName ?? string.Empty,
+                e.SchoolDuration,
+                e.TuitionFee,
+                e.FeeDate == DateTime.MinValue ? null : e.FeeDate,
+                e.SortOrder)).ToList()
+        };
+    }
 
     private static TempReliefCandidateDto ToCandidate(TempReliefCandidate candidate) => new(
         candidate.SourceFamilyId,
@@ -1204,7 +2383,20 @@ public static class TempReliefEndpoints
                 m.AnnualIncome))
             .ToList());
 
-    // ───────────────────────────── 通用出口 ─────────────────────────────
+    // ───────────────────────────── 服务构造 / 通用出口 ─────────────────────────────
+
+    /// <summary>
+    /// Program.cs 未注册照片服务（避免改启动装配）；按请求作用域依赖就地构造，
+    /// 与高龄端 CreateQueryService 同模式。
+    /// </summary>
+    private static TempReliefPhotoService CreatePhotoService(HttpContext context)
+    {
+        var services = context.RequestServices;
+        return new TempReliefPhotoService(
+            services.GetRequiredService<IDatabaseService>(),
+            services.GetRequiredService<DataScopeFilterBuilder>(),
+            services.GetRequiredService<ILoggerService>());
+    }
 
     private static string OperatorName(UserDto user)
         => string.IsNullOrWhiteSpace(user.Username) ? user.FullName ?? "System" : user.Username;
@@ -1218,16 +2410,12 @@ public static class TempReliefEndpoints
             return NotFound(context, result.Message);
         }
 
-        if (result.ErrorCode is ErrorCodes.ANNUAL_LIMIT_EXCEEDED)
+        if (result.ErrorCode is ErrorCodes.ANNUAL_LIMIT_EXCEEDED
+            or ErrorCodes.INVALID_TRANSITION
+            or ErrorCodes.CONCURRENCY_CONFLICT
+            or ErrorCodes.DB_UNIQUE_VIOLATION)
         {
-            return Conflict(context, ErrorCodes.ANNUAL_LIMIT_EXCEEDED,
-                result.Message ?? "该申请人本年度已申请过临时救助");
-        }
-
-        if (result.ErrorCode is ErrorCodes.INVALID_TRANSITION)
-        {
-            return Conflict(context, ErrorCodes.INVALID_TRANSITION,
-                result.Message ?? "当前状态不允许该操作");
+            return Conflict(context, result.ErrorCode, result.Message ?? "当前状态不允许该操作");
         }
 
         if (result.ErrorCode is ErrorCodes.VALIDATION_FAILED
@@ -1239,6 +2427,39 @@ public static class TempReliefEndpoints
         }
 
         return ApiErrors.FromResult(context, result);
+    }
+
+    private static IResult MapPhotoResult(HttpContext context, Result result)
+    {
+        if (result.ErrorCode is ErrorCodes.RECORD_NOT_FOUND or ErrorCodes.NOT_FOUND)
+        {
+            return NotFound(context, result.Message ?? "临时救助申请不存在或无权访问");
+        }
+
+        if (result.ErrorCode is ErrorCodes.VALIDATION_FAILED or ErrorCodes.REQUIRED_FIELD_MISSING)
+        {
+            return Invalid(context, result.Message ?? "照片操作参数校验失败");
+        }
+
+        return ApiErrors.FromResult(context, result);
+    }
+
+    private static IResult MapOcrResult(HttpContext context, Result result)
+    {
+        var status = result.ErrorCode switch
+        {
+            ErrorCodes.OCR_SERVICE_UNREACHABLE => StatusCodes.Status503ServiceUnavailable,
+            ErrorCodes.OCR_IMAGE_INVALID or ErrorCodes.OCR_NO_FIELD => StatusCodes.Status400BadRequest,
+            ErrorCodes.OCR_TIMEOUT or ErrorCodes.OCR_RECOGNIZE_FAILED => StatusCodes.Status502BadGateway,
+            ErrorCodes.CANCELLED => StatusCodes.Status408RequestTimeout,
+            _ => StatusCodes.Status502BadGateway
+        };
+
+        return ApiErrors.Write(
+            context,
+            status,
+            result.ErrorCode ?? ApiErrorCodes.InternalError,
+            result.Message);
     }
 
     private static IResult Invalid(HttpContext context, string message)

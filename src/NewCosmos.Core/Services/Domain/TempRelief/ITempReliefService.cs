@@ -22,6 +22,13 @@ public interface ITempReliefService
     Task<Result<TempReliefCandidate>> GetCandidateDetailAsync(string sourceTable, long sourceFamilyId, string? excludeIdCard = null, CancellationToken ct = default);
 
     /// <summary>
+    /// 「保障人群」自动判定（唯一口径）：按身份证反查四类在册台账（家庭表户主 + 人员表成员），
+    /// 命中即 <c>Insured</c>，未命中即 <c>Uninsured</c>；查询失败如实返回 Failure。
+    /// 表单展示、创建/更新落库均走本方法，人工不可改判。
+    /// </summary>
+    Task<Result<TempReliefInsuredIdentity>> ResolveInsuredIdentityAsync(string? idCard, CancellationToken ct = default);
+
+    /// <summary>
     /// 按身份证跨来源解析户籍分类（当前库低保申请库优先，其次 6 个导入台账库；
     /// 农村/城镇低保台账按表名固定，其余取 hukou_type 列）。
     /// 未找到返回 Success("")，由表单提示手动选择档位（=手选户籍分类）。
@@ -34,6 +41,12 @@ public interface ITempReliefService
     /// </summary>
     Task<Result<List<Models.Entities.ConfigStandard>>> GetSmallAmountLevelsAsync(string? hukouType, CancellationToken ct = default);
 
+    /// <summary>
+    /// 临时救助金额基数：当前有效的城市低保月标准最高值（政策第十条，不按户籍分流）。
+    /// 未配置显式失败。
+    /// </summary>
+    Task<Result<decimal>> GetReliefBaseStandardAsync(CancellationToken ct = default);
+
     Task<Result<TempReliefApplication>> GetByIdAsync(long id, CancellationToken ct = default);
 
     /// <summary>
@@ -45,6 +58,22 @@ public interface ITempReliefService
     /// 分页查询（关键字：姓名/身份证；状态：空=全部）
     /// </summary>
     Task<Result<PagedResult<TempReliefApplication>>> GetPagedAsync(string keyword, string status, int pageIndex, int pageSize, CancellationToken ct = default);
+
+    /// <summary>
+    /// 分页查询（支持两大类 × 三小类筛选：人群状态 / 救助类型 / 发放渠道）。
+    /// </summary>
+    Task<Result<PagedResult<TempReliefApplication>>> GetPagedAsync(
+        string keyword, string? status, string? populationStatus, string? reliefType, string? paymentChannel,
+        int pageIndex, int pageSize, CancellationToken ct = default);
+
+    /// <summary>按状态集合分页（办理中/已终结 Tab 用）。</summary>
+    Task<Result<PagedResult<TempReliefApplication>>> GetPagedByStatusesAsync(
+        string keyword, string[] statuses, int pageIndex, int pageSize, CancellationToken ct = default);
+
+    /// <summary>按状态集合 + 两大类/三小类筛选分页。</summary>
+    Task<Result<PagedResult<TempReliefApplication>>> GetPagedByStatusesAsync(
+        string keyword, string[] statuses, string? populationStatus, string? reliefType, string? paymentChannel,
+        int pageIndex, int pageSize, CancellationToken ct = default);
 
     /// <summary>
     /// 分页查询已完结记录（已确认+已终止，供历史补打用）
@@ -67,9 +96,29 @@ public interface ITempReliefService
     Task<Result> UpdateAsync(TempReliefApplication application, List<TempReliefMember> members, CancellationToken ct = default);
 
     /// <summary>
+    /// 修改申请日期并重编号（仅草稿/退回补正）：
+    /// 按新日期重取 LZ 编号，同步 apply_date/apply_year/accepted_at 与公示起止；
+    /// 年度唯一校验排除自身；单事务 + 并发守卫。返回新申请编号。
+    /// </summary>
+    Task<Result<string>> ChangeApplyDateAsync(long applicationId, DateTime newDate, string operatorName, CancellationToken ct = default);
+
+    /// <summary>
     /// 确认生效（草稿→已确认）
     /// </summary>
     Task<Result> ConfirmAsync(long id, string operatorName, CancellationToken ct = default);
+
+    /// <summary>提交（草稿/退回补正 → 已提交），写受理时间作为时限起点。</summary>
+    Task<Result> SubmitAsync(long id, string operatorName, CancellationToken ct = default);
+
+    /// <summary>不予救助（草稿/已提交 → 不予救助），理由与告知时间必填。</summary>
+    Task<Result> RejectAsync(long id, string reason, string operatorName, DateTime? notifiedAt,
+        string? noticeMethod, CancellationToken ct = default);
+
+    /// <summary>退回补正（已提交 → 退回补正），原因必填。</summary>
+    Task<Result> ReturnAsync(long id, string reason, string operatorName, CancellationToken ct = default);
+
+    /// <summary>登记备案完成（上级部门发放：已确认 + 待备案 → 已备案）。</summary>
+    Task<Result> MarkFiledAsync(long id, string operatorName, CancellationToken ct = default);
 
     /// <summary>
     /// 归档完成（打印页「完成归档」入口）：记录存在即幂等成功——保存并确认后状态已是终态 Confirmed，

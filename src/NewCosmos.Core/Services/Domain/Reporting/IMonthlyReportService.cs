@@ -419,6 +419,8 @@ public class MonthlyExitRectificationRow
 public class MonthlyTempReliefRow
 {
     public string ReliefType { get; set; } = TempReliefConstants.ReliefTypeLarge; // 救助类型（Small=有额度→备用金发放；其余=无额度→报县局审批）
+    public string PopulationStatus { get; set; } = TempReliefConstants.PopulationInsured; // 人群状态（Insured/Uninsured）
+    public string PaymentChannel { get; set; } = TempReliefConstants.PaymentCounty;      // 发放渠道（County/Reserve）
     public string Name { get; set; } = string.Empty;          // 姓名（申请人）
     public string IdCard { get; set; } = string.Empty;        // 身份证号
     public string Age { get; set; } = string.Empty;           // 年龄

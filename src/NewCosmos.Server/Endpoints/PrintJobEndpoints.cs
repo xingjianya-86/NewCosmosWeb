@@ -6,7 +6,9 @@ using NewCosmos.Server.Contracts;
 using NewCosmos.Server.Infrastructure;
 using NewCosmos.Server.Services;
 using NewCosmos.Services.Core;
+using NewCosmos.Services.Domain.TempRelief;
 using NewCosmos.Services.UserManagement;
+using NewCosmos.Services.Utilities;
 
 namespace NewCosmos.Server.Endpoints;
 
@@ -108,7 +110,8 @@ public static class PrintJobEndpoints
         var permissionCode = ResolvePrintPermission(businessType);
         if (permissionCode is null)
         {
-            return InvalidRequest(context, "当前仅支持 FamilyApplication / AssetVerification 推送打印");
+            return InvalidRequest(context,
+                "当前仅支持 FamilyApplication / AssetVerification / TempRelief 推送打印");
         }
 
         var denied = await EndpointSecurity.RequirePermissionAsync(context, permissions, permissionCode, ct);
@@ -152,7 +155,7 @@ public static class PrintJobEndpoints
         }
 
         // 数据装配：FamilyApplication 复用表单服务（数据范围 + 业务存在性）；
-        // AssetVerification 复用资产核查打印数据服务（另一个子代理创建并注册）。
+        // AssetVerification 复用资产核查打印数据服务；TempRelief 复用 Core 打印数据组装。
         ArchivePrintData data;
         if (string.Equals(businessType, PrintBusinessTypes.AssetVerification, StringComparison.OrdinalIgnoreCase))
         {
@@ -174,6 +177,75 @@ public static class PrintJobEndpoints
                 if (!string.IsNullOrWhiteSpace(value)) data.Fields[key] = value;
             }
             data.TableRows.AddRange(payload.TableRows);
+        }
+        else if (string.Equals(businessType, PrintBusinessTypes.TempRelief, StringComparison.OrdinalIgnoreCase))
+        {
+            var tempRelief = context.RequestServices.GetRequiredService<ITempReliefService>();
+            var timeline = context.RequestServices.GetRequiredService<IBusinessTimelineService>();
+
+            var appResult = await tempRelief.GetByIdAsync(request.BusinessId.Value, ct);
+            if (appResult.IsFailure || appResult.Value is null)
+            {
+                return appResult.IsFailure
+                    ? MapResult(context, appResult)
+                    : NotFound(context, "临时救助申请不存在");
+            }
+
+            var app = appResult.Value;
+
+            var membersResult = await tempRelief.GetMembersByApplicationIdAsync(app.Id, ct);
+            if (membersResult.IsFailure)
+            {
+                return MapResult(context, membersResult);
+            }
+
+            var diseasesResult = await tempRelief.GetDiseasesByApplicationIdAsync(app.Id, ct);
+            if (diseasesResult.IsFailure)
+            {
+                return MapResult(context, diseasesResult);
+            }
+            app.Diseases = diseasesResult.Value ?? new List<TempReliefDisease>();
+
+            var accidentsResult = await tempRelief.GetAccidentsByApplicationIdAsync(app.Id, ct);
+            if (accidentsResult.IsFailure)
+            {
+                return MapResult(context, accidentsResult);
+            }
+            app.Accidents = accidentsResult.Value ?? new List<TempReliefAccident>();
+
+            var educationsResult = await tempRelief.GetEducationsByApplicationIdAsync(app.Id, ct);
+            if (educationsResult.IsFailure)
+            {
+                return MapResult(context, educationsResult);
+            }
+            app.Educations = educationsResult.Value ?? new List<TempReliefEducation>();
+
+            var (acceptanceDate, investigationDate) =
+                await TempReliefPrintDataBuilder.ResolveScheduleAsync(timeline, app);
+
+            var phoneResult = await tempRelief.GetReportUnitPhoneAsync(app.ReportUnit, ct);
+            var contactPhone = phoneResult.IsSuccess ? phoneResult.Value ?? string.Empty : string.Empty;
+
+            var fields = TempReliefPrintDataBuilder.BuildSingleFields(
+                app,
+                membersResult.Value ?? new List<TempReliefMember>(),
+                contactPhone,
+                acceptanceDate,
+                investigationDate);
+
+            var categories = ArchiveCategoryResolver.GetRecordCategories(
+                TempReliefConstants.BusinessType, app.ReliefType);
+
+            data = new ArchivePrintData
+            {
+                ApplicantName = app.ApplicantName ?? string.Empty,
+                ApplicantIdCard = app.ApplicantIdCard ?? string.Empty,
+                Classification = categories.FirstOrDefault() ?? app.ReliefType
+            };
+            foreach (var (key, value) in fields)
+            {
+                if (!string.IsNullOrWhiteSpace(value)) data.Fields[key] = value;
+            }
         }
         else
         {
@@ -257,6 +329,8 @@ public static class PrintJobEndpoints
             return PermissionCodes.PRINT_FAMILYAPPLICATION;
         if (string.Equals(businessType, PrintBusinessTypes.AssetVerification, StringComparison.OrdinalIgnoreCase))
             return PermissionCodes.PRINT_ASSETVERIFICATION;
+        if (string.Equals(businessType, PrintBusinessTypes.TempRelief, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.TEMP_VIEW;
         return null;
     }
 

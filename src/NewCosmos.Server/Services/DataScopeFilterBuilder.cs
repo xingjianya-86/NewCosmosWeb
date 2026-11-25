@@ -11,7 +11,9 @@ public enum DataScopeTarget
 {
     Applications,
     ElderlyApplications,
-    AssetChecks
+    AssetChecks,
+    /// <summary>临时救助（nc_biz_temp_relief_applications：仅有 town / village 文本列）。</summary>
+    TempRelief
 }
 
 /// <summary>
@@ -141,6 +143,8 @@ public sealed class DataScopeFilterBuilder(
             DataScopeTarget.ElderlyApplications => BuildElderlyClause(
                 alias, startIndex, townIds, villageIds, villageKeywords),
             DataScopeTarget.AssetChecks => BuildAssetClause(alias, startIndex, villageCodes),
+            DataScopeTarget.TempRelief => BuildTempReliefClause(
+                alias, startIndex, townNames, villageKeywords),
             _ => Deny()
         };
     }
@@ -271,6 +275,38 @@ public sealed class DataScopeFilterBuilder(
         return new DataScopeClause(
             $"{alias}.community = ANY(${startIndex})",
             new object?[] { villageCodes });
+    }
+
+    /// <summary>
+    /// 临时救助范围：主表只有 town / village 文本列（无 town_id / village_id），
+    /// 按乡镇名精确匹配 + 村名归一后模糊匹配；两者皆无则拒绝。
+    /// </summary>
+    private static DataScopeClause BuildTempReliefClause(
+        string alias,
+        int startIndex,
+        string[] townNames,
+        string[] villageKeywords)
+    {
+        var conditions = new List<string>();
+        var parameters = new List<object?>();
+        var index = startIndex;
+
+        if (townNames.Length > 0)
+        {
+            conditions.Add($"{alias}.town = ANY(${index})");
+            parameters.Add(townNames);
+            index++;
+        }
+
+        if (villageKeywords.Length > 0)
+        {
+            conditions.Add($"{alias}.village ILIKE ANY(${index})");
+            parameters.Add(villageKeywords.Select(x => $"%{x}%").ToArray());
+        }
+
+        return conditions.Count == 0 ? Deny() : new DataScopeClause(
+            "(" + string.Join(" OR ", conditions) + ")",
+            parameters);
     }
 
     /// <summary>村委会名称归一为可匹配片段：柳西村委会 / 柳西村村民委员会 → 柳西。</summary>
