@@ -4,33 +4,30 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowLeft,
+  Camera,
   Delete,
   Document,
+  Money,
   Plus,
   Refresh,
   Search,
+  Tickets,
+  User,
+  UserFilled,
 } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
 import {
   changeTempReliefApplyDate,
-  checkTempReliefAnnual,
   confirmTempReliefApplication,
   createTempReliefApplication,
-  deleteTempReliefApplication,
-  fileTempReliefApplication,
   getTempReliefApplication,
   getTempReliefCandidate,
   getTempReliefFamilyStatus,
   getTempReliefInsuredIdentity,
   getTempReliefPolicySnapshot,
-  getTempReliefReportUnitPhone,
   getTempReliefSmallTiers,
-  rejectTempReliefApplication,
   resolveTempReliefHukouType,
-  returnTempReliefApplication,
   searchTempReliefCandidates,
-  stopTempReliefApplication,
-  submitTempReliefApplication,
   updateTempReliefApplication,
 } from '@/api/tempRelief'
 import NcCard from '@/components/NcCard.vue'
@@ -48,13 +45,11 @@ import type {
 } from '@/types/tempRelief'
 import TempReliefOcrDialog from './TempReliefOcrDialog.vue'
 import TempReliefPhotoPanel from './TempReliefPhotoPanel.vue'
-import TempReliefPrintDialog from './TempReliefPrintDialog.vue'
 
 type FormMode = 'create' | 'edit' | 'view'
 type ReliefType = 'Large' | 'Small'
 type PaymentChannel = 'County' | 'Reserve'
 type DifficultyType = '疾病' | '意外灾害' | '教育支出' | '其他困难'
-type ActionKey = 'submit' | 'return' | 'reject' | 'confirm' | 'file' | 'stop' | 'delete'
 
 interface ApplicantState {
   sourceTable: string
@@ -168,6 +163,15 @@ interface BeneficiaryOption {
   isHead: boolean
 }
 
+interface DiseaseSharedState {
+  hospital: string
+  treatStartDate: string | null
+  treatEndDate: string | null
+  medicalTotal: number | undefined
+  insurancePaid: number | undefined
+  selfPaid: number | undefined
+}
+
 const FAMILY_CATEGORY_BASE = [
   '最低生活保障家庭',
   '最低生活保障边缘家庭',
@@ -187,8 +191,17 @@ const SCHOOL_DURATION_OPTIONS = [
 ]
 const DEFAULT_VERIFY_TEXT = '已入户核实，申请人家庭实际情况与申报一致。'
 const MAX_DETAIL_ROWS = 10
-const MAX_MEMBER_ROWS = 10
+const MAX_MEMBER_ROWS = 5
 const HEAD_KEY = '__head__'
+
+/** PC 的视觉分区顺序：类型与申请人(0) → 家庭成员(3) → 申请信息(1) → 金额与公示(2)。 */
+const SECTION_ORDER: readonly number[] = [0, 3, 1, 2]
+const SECTION_TABS = [
+  { key: 0, label: '类型与申请人', icon: User },
+  { key: 3, label: '家庭成员', icon: UserFilled },
+  { key: 1, label: '申请信息', icon: Tickets },
+  { key: 2, label: '金额与公示', icon: Money },
+] as const
 
 const STATUS_TEXT: Record<string, string> = {
   Draft: '草稿',
@@ -205,7 +218,6 @@ const auth = useAuthStore()
 
 let rowSeed = 0
 let identityTicket = 0
-let annualTicket = 0
 let tierTicket = 0
 let routeReloadSuppressed = false
 
@@ -227,14 +239,9 @@ function todayText(): string {
 }
 
 function formatDate(value: string | null | undefined): string {
-  if (!value) return '—'
+  if (!value) return '保存后生成'
   const text = value.slice(0, 10)
-  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text.split('-').join('/') : '—'
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) return '—'
-  return value.length >= 16 ? value.slice(0, 16).replace('T', ' ') : formatDate(value)
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text.split('-').join('/') : '保存后生成'
 }
 
 function formatMoney(value: number | null | undefined): string {
@@ -298,14 +305,6 @@ function normalizeDifficulty(value: string | null | undefined): DifficultyType {
   return (DIFFICULTY_TYPES as readonly string[]).includes(text)
     ? (text as DifficultyType)
     : '其他困难'
-}
-
-function formatHukouType(value: string): string {
-  const text = value.trim()
-  if (!text) return '未识别'
-  if (text.includes('农村') || text.toLowerCase() === 'rural') return '农村'
-  if (text.includes('城镇') || text.includes('城市') || text.toLowerCase() === 'urban') return '城镇'
-  return text
 }
 
 function extractDetailFromAddress(address: string, village: string): string {
@@ -423,8 +422,8 @@ function createDiseaseRow(): DiseaseRow {
     diseaseCode: '',
     memberName: '',
     hospital: '',
-    treatStartDate: null,
-    treatEndDate: null,
+    treatStartDate: todayText(),
+    treatEndDate: todayText(),
     medicalTotal: undefined,
     insurancePaid: undefined,
     selfPaid: undefined,
@@ -438,7 +437,7 @@ function createAccidentRow(): AccidentRow {
     id: 0,
     accidentType: '',
     memberName: '',
-    happenDate: null,
+    happenDate: todayText(),
     happenPlace: '',
     injurySituation: '',
     propertyLoss: undefined,
@@ -484,20 +483,29 @@ const diseases = ref<DiseaseRow[]>([])
 const accidents = ref<AccidentRow[]>([])
 const educations = ref<EducationRow[]>([])
 
+const diseaseShared = reactive<DiseaseSharedState>({
+  hospital: '',
+  treatStartDate: todayText(),
+  treatEndDate: todayText(),
+  medicalTotal: undefined,
+  insurancePaid: undefined,
+  selfPaid: undefined,
+})
+const multiHospitalMode = ref(false)
+
 const detail = ref<TempReliefDetail | null>(null)
 const storedFamilySize = ref<number | null>(null)
 const familyCategoryOptions = ref<string[]>([...FAMILY_CATEGORY_BASE])
+const reasonDirty = ref(false)
+let suppressReasonWrite = false
 
 const loading = ref(false)
 const saving = ref(false)
-const actionLoading = ref<ActionKey | null>(null)
+const confirming = ref(false)
 const loadError = ref('')
+const saveError = ref('')
 const autoFilling = ref(false)
 const activeSection = ref(0)
-
-const section1 = ref<HTMLElement | null>(null)
-const section2 = ref<HTMLElement | null>(null)
-const section3 = ref<HTMLElement | null>(null)
 
 const candidateKeyword = ref('')
 const candidates = ref<TempReliefCandidate[]>([])
@@ -505,25 +513,18 @@ const candidateLoading = ref(false)
 const candidateSearched = ref(false)
 const candidateSelected = ref(false)
 const candidateSummary = ref('')
+const selectedCandidateKey = ref('')
 const manualEntry = ref(false)
 
 const identity = ref<TempReliefInsuredIdentityResponse | null>(null)
 const identityLoading = ref(false)
 const identityError = ref('')
 
-const annualBlocked = ref(false)
-const annualMessage = ref('')
-const annualChecking = ref(false)
-
 const smallTiers = ref<TempReliefSmallTier[]>([])
 const smallTiersBase = ref<number | null>(null)
 const smallTiersLoading = ref(false)
 const smallTiersError = ref('')
 
-const reportUnitPhone = ref('')
-const policyItems = ref<string[]>([])
-
-const printVisible = ref(false)
 const photoVisible = ref(false)
 const ocrVisible = ref(false)
 
@@ -531,10 +532,14 @@ const changeDateVisible = ref(false)
 const changeDateValue = ref('')
 const changeDateSaving = ref(false)
 
-const isEditable = computed(
-  () => !isView.value && (isCreate.value || form.status === 'Draft' || form.status === 'Returned'),
-)
-const isReadonly = computed(() => !isEditable.value)
+const lastLargeChannel = ref<PaymentChannel>('County')
+
+const isEditable = computed(() => {
+  if (isView.value) return false
+  if (isCreate.value) return true
+  if (!detail.value) return false
+  return form.status === 'Draft' || form.status === 'Returned'
+})
 const isSmall = computed(() => form.reliefType === 'Small')
 const effectiveChannel = computed<PaymentChannel>(
   () => (isSmall.value ? 'Reserve' : form.paymentChannel),
@@ -543,77 +548,44 @@ const statusText = computed(() => detail.value?.statusText || STATUS_TEXT[form.s
 const printableId = computed<number | null>(() => (form.id > 0 ? form.id : null))
 const canChangeDate = computed(() => !isCreate.value && isEditable.value && form.id > 0)
 
-const populationStatusText = computed(() => {
-  if (manualEntry.value && !identity.value) return '待判定'
-  return identity.value?.populationStatusText
-    ?? detail.value?.populationStatusText
-    ?? '待判定'
-})
+const sectionPosition = computed(() => SECTION_ORDER.indexOf(activeSection.value))
+const canGoPrevious = computed(() => sectionPosition.value > 0)
+const canGoNext = computed(() => sectionPosition.value >= 0 && sectionPosition.value < SECTION_ORDER.length - 1)
+const isLastSection = computed(() => activeSection.value === 2)
+const canSaveAndConfirm = computed(() => isEditable.value && isLastSection.value)
+const canEnterManualEntry = computed(() => isEditable.value && !manualEntry.value && !candidateSelected.value)
 
+const populationResolved = computed(
+  () => Boolean(identity.value) || manualEntry.value || candidateSelected.value || Boolean(detail.value),
+)
+const populationStatusText = computed(() => {
+  if (identity.value) return identity.value.populationStatusText
+  if (manualEntry.value) return '不在保障人群内'
+  if (detail.value) return detail.value.populationStatusText
+  return '待判定'
+})
+const isInsured = computed(
+  () => populationResolved.value && populationStatusText.value === '在保障人群内',
+)
+const isUninsured = computed(
+  () => populationResolved.value && populationStatusText.value === '不在保障人群内',
+)
 const populationBasis = computed(() => {
   if (identity.value) {
-    const source = !manualEntry.value && candidateSummary.value ? `（来源：${candidateSummary.value}）` : ''
-    return `${identity.value.basisText}${source}`
+    if (manualEntry.value) {
+      return identity.value.isInsured
+        ? `${identity.value.basisText}，请改用检索选择该申请人`
+        : `${identity.value.basisText}（非在册登记）`
+    }
+    return identity.value.basisText
   }
-  if (detail.value) return `已入库判定：${detail.value.populationStatusText}`
-  return '选择申请人或填写身份证号后，系统按身份证反查四类在册台账自动判定。'
+  if (manualEntry.value) return '非在册登记：填写身份证后自动核查四类在册台账'
+  if (detail.value) return `按保存时判定结果（身份证反查四类在册台账）：${detail.value.populationStatusText}`
+  return '检索并选择申请人后，系统按身份证自动判定（人工不可改）'
 })
-
 const manualHitsLedger = computed(
   () => manualEntry.value && identity.value?.isInsured === true,
 )
-
-const scenarioFresh = computed(() => {
-  const current = detail.value
-  if (!current) return false
-  if (manualEntry.value && !identity.value) return false
-  const currentPopulation = identity.value?.populationStatus ?? current.populationStatus
-  return (
-    current.reliefType === form.reliefType
-    && current.paymentChannel === effectiveChannel.value
-    && current.populationStatus === currentPopulation
-  )
-})
-
-const channelText = computed(() =>
-  effectiveChannel.value === 'County' ? '上级部门发放' : '备用金发放',
-)
-const categoryDisplayName = computed(() => {
-  if (scenarioFresh.value && detail.value?.categoryDisplayName) return detail.value.categoryDisplayName
-  return `${populationStatusText.value} · ${isSmall.value ? '小额快救' : `常规救助（${channelText.value}）`}`
-})
-
-const scenarioItems = computed(() => {
-  const fresh = scenarioFresh.value
-  const current = detail.value
-  return [
-    { label: '大类', value: populationStatusText.value },
-    { label: '小类', value: isSmall.value ? '小额快救' : `常规救助·${channelText.value}` },
-    { label: '渠道', value: channelText.value },
-    {
-      label: '时限',
-      value: fresh && current
-        ? (current.deadlineText || (current.deadlineDate ? `截止 ${formatDate(current.deadlineDate)}` : '未起算'))
-        : '保存后按政策生成',
-    },
-    {
-      label: '公示',
-      value: isSmall.value
-        ? '小额快救免公示'
-        : fresh && current
-          ? (current.publicizeRequired
-            ? `需公示${current.publicizeDays ? ` ${current.publicizeDays} 天` : ''}`
-            : '免公示')
-          : '保存后生成起止日期',
-    },
-    {
-      label: '经济核对',
-      value: fresh && current
-        ? (current.economicCheckRequired ? '需经济核对' : '不需经济核对')
-        : '保存后由服务端判定',
-    },
-  ]
-})
 
 const familySizeDisplay = computed(() => {
   const count = members.value.filter(
@@ -678,101 +650,40 @@ const selectedTier = computed<TempReliefSmallTier | null>(
   () => smallTiers.value.find((tier) => tier.code === form.standardTier) ?? null,
 )
 
+const reliefPersonCountHint = computed(() => (
+  familySizeDisplay.value > 0
+    ? `家庭人口 ${familySizeDisplay.value} 人；遇困人数含户主，须 >0 且 ≤ ${familySizeDisplay.value}`
+    : '遇困人数含户主，须大于 0'
+))
+
 const amountHint = computed(() => {
   if (isSmall.value) {
     if (smallTiersLoading.value) return '正在读取服务端档位上限…'
     if (smallTiersError.value) return smallTiersError.value
     if (smallTiers.value.length === 0) return '未取到小额档位配置，无法填写金额。'
     if (!selectedTier.value) return '请选择 50% / 75% / 100% 档位。'
-    return `档位上限 ${formatMoney(selectedTier.value.ceilingAmount)}（${selectedTier.value.personCount} 人 × 城市低保标准 ${formatMoney(selectedTier.value.standardValue)} × ${selectedTier.value.multiplier}）。确定金额可下调，不得超过上限。`
+    return `档位上限 ${formatMoney(selectedTier.value.ceilingAmount)}（${selectedTier.value.personCount} 人 × 城市低保标准 ${formatMoney(selectedTier.value.standardValue)} × ${selectedTier.value.multiplier}）；确定金额可下调，不得超过该上限。`
   }
   if (effectiveChannel.value === 'Reserve') {
-    return '备用金发放需手工填写金额；上限由服务端按遇困人数与低保月标准校验，超出将拒绝保存。'
+    return '备用金发放需手工填写金额；上限由服务端按遇困人数与城市低保标准校验，超出将拒绝保存。'
   }
   return '常规救助·上级部门发放：金额由上级按程序核定，系统不填写。'
 })
 
-const selfPaidTotal = computed(() =>
-  diseases.value.reduce((sum, row) => sum + (row.selfPaid ?? 0), 0),
-)
-
-const publicizeText = computed(() => {
+const publicizeStartText = computed(() => {
   if (isSmall.value) return '小额快救免公示'
-  if (scenarioFresh.value && detail.value?.publicizeRangeText) return detail.value.publicizeRangeText
-  return '保存后由服务端按政策生成'
+  return form.publicizeStartDate ? formatDate(form.publicizeStartDate) : '保存后生成'
+})
+const publicizeEndText = computed(() => {
+  if (isSmall.value) return '小额快救免公示'
+  return form.publicizeEndDate ? formatDate(form.publicizeEndDate) : '保存后生成'
 })
 
-const deadlineText = computed(() => {
-  if (!scenarioFresh.value || !detail.value) return '保存后按政策生成'
-  return detail.value.deadlineText || (detail.value.deadlineDate ? `截止 ${formatDate(detail.value.deadlineDate)}` : '未起算')
+const modeHint = computed(() => {
+  if (isView.value) return '查看模式：仅可查看，保存与编辑动作已隐藏。'
+  if (!isEditable.value) return `当前状态「${statusText.value}」不可编辑；状态动作请在列表页办理。`
+  return ''
 })
-
-const countyConfirmText = computed(() => {
-  if (!detail.value) return '保存后生成'
-  if (!detail.value.countyConfirmRequired) return '不适用（备用金 / 小额）'
-  if (!detail.value.countyConfirmedAt) return '待县确认'
-  return `已确认 ${formatDateTime(detail.value.countyConfirmedAt)}${detail.value.countyConfirmedBy ? ` · ${detail.value.countyConfirmedBy}` : ''}`
-})
-
-const filingText = computed(() => {
-  if (!detail.value) return '保存后生成'
-  if (!detail.value.filingRequired) return '不适用（备用金 / 小额）'
-  if (detail.value.filingStatus === 'Filed' || detail.value.filingStatusText === '已备案') return '已备案'
-  if (detail.value.status === 'Confirmed') return '待备案'
-  return '确认后进入备案'
-})
-
-const economicCheckText = computed(() => {
-  if (!scenarioFresh.value || !detail.value) return '保存后由服务端判定'
-  return detail.value.economicCheckRequired ? '需经济核对' : '不需经济核对'
-})
-
-const confirmLabel = computed(() => {
-  const channel = detail.value?.paymentChannel ?? effectiveChannel.value
-  return channel === 'County' ? '县确认' : '乡镇确认'
-})
-
-const canReturnAction = computed(() => detail.value?.canReturn === true)
-const canRejectAction = computed(() => detail.value?.canReject === true)
-const canConfirmAction = computed(() => detail.value?.canConfirm === true)
-const canFileAction = computed(() => detail.value?.canMarkFiled === true || detail.value?.canFile === true)
-const canStopAction = computed(() => detail.value?.status === 'Confirmed')
-const canDeleteAction = computed(() => detail.value?.status === 'Draft')
-
-const actionHint = computed(() => {
-  const notes: string[] = []
-  if (annualBlocked.value) notes.push('该申请人本年度已存在临时救助申请')
-  if (manualHitsLedger.value) notes.push('身份证命中四类在册台账，禁止手工登记，请改用检索选择')
-  if (isCreate.value) {
-    notes.push('新建申请保存后可执行提交、确认、打印等动作')
-  } else if (isView.value) {
-    notes.push('查看模式：仅可查看与打印')
-  } else if (isReadonly.value) {
-    notes.push(`当前状态「${statusText.value}」不可编辑；可执行下方可用的状态动作或打印`)
-  } else {
-    notes.push('当前可编辑；保存后按状态显示可执行动作')
-  }
-  return notes.join('；')
-})
-
-const returnDisabledReason = computed(() =>
-  canReturnAction.value ? '' : '仅已提交状态可退回补正',
-)
-const rejectDisabledReason = computed(() =>
-  canRejectAction.value ? '' : '仅草稿或已提交状态可登记不予救助',
-)
-const confirmDisabledReason = computed(() =>
-  canConfirmAction.value ? '' : '仅草稿或已提交状态可确认',
-)
-const fileDisabledReason = computed(() =>
-  canFileAction.value ? '' : '仅上级部门发放且已确认、待备案时可登记备案',
-)
-const stopDisabledReason = computed(() =>
-  canStopAction.value ? '' : '仅已确认状态可终止',
-)
-const deleteDisabledReason = computed(() =>
-  canDeleteAction.value ? '' : '仅草稿状态可删除',
-)
 
 function isHeadMemberRow(row: MemberRow): boolean {
   if (row.idCard.trim() && applicant.idCard.trim()) {
@@ -796,15 +707,31 @@ function ensureCategoryOption(value: string): void {
   applicant.familyCategory = category
 }
 
-function scrollToSection(index: number): void {
-  activeSection.value = index
-  const target = [section1.value, section2.value, section3.value][index]
-  target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+function goToSection(key: number): void {
+  activeSection.value = key
+}
+
+function goPrevious(): void {
+  if (!canGoPrevious.value) return
+  activeSection.value = SECTION_ORDER[sectionPosition.value - 1]
+}
+
+function goNext(): void {
+  if (!canGoNext.value) return
+  activeSection.value = SECTION_ORDER[sectionPosition.value + 1]
 }
 
 function backToList(): void {
   void router.push('/social-assistance/temp-relief')
 }
+
+function candidateKey(candidate: TempReliefCandidate): string {
+  return `${candidate.sourceTable}:${candidate.sourceFamilyId}`
+}
+
+const selectedCandidate = computed(
+  () => candidates.value.find((candidate) => candidateKey(candidate) === selectedCandidateKey.value) ?? null,
+)
 
 function resetAll(): void {
   Object.assign(form, createEmptyForm())
@@ -813,39 +740,48 @@ function resetAll(): void {
   diseases.value = []
   accidents.value = []
   educations.value = []
+  Object.assign(diseaseShared, {
+    hospital: '',
+    treatStartDate: todayText(),
+    treatEndDate: todayText(),
+    medicalTotal: undefined,
+    insurancePaid: undefined,
+    selfPaid: undefined,
+  })
+  multiHospitalMode.value = false
   detail.value = null
   storedFamilySize.value = null
   familyCategoryOptions.value = [...FAMILY_CATEGORY_BASE]
   loading.value = false
   saving.value = false
-  actionLoading.value = null
+  confirming.value = false
   loadError.value = ''
+  saveError.value = ''
   autoFilling.value = false
   activeSection.value = 0
   candidateKeyword.value = ''
   candidates.value = []
+  candidateLoading.value = false
   candidateSearched.value = false
   candidateSelected.value = false
   candidateSummary.value = ''
+  selectedCandidateKey.value = ''
   manualEntry.value = false
   identity.value = null
   identityLoading.value = false
   identityError.value = ''
-  annualBlocked.value = false
-  annualMessage.value = ''
-  annualChecking.value = false
   smallTiers.value = []
   smallTiersBase.value = null
   smallTiersLoading.value = false
   smallTiersError.value = ''
-  reportUnitPhone.value = ''
-  policyItems.value = []
-  printVisible.value = false
   photoVisible.value = false
   ocrVisible.value = false
   changeDateVisible.value = false
   changeDateValue.value = ''
   changeDateSaving.value = false
+  lastLargeChannel.value = 'County'
+  reasonDirty.value = false
+  suppressReasonWrite = false
 }
 
 function hydrateApplicant(current: TempReliefDetail): void {
@@ -862,7 +798,7 @@ function hydrateApplicant(current: TempReliefDetail): void {
   applicant.familyDistrict = current.familyDistrict
   applicant.familyTown = current.familyTown || current.town
   applicant.town = current.town || current.familyTown
-  applicant.village = current.village
+  applicant.village = current.village || '村委会'
   applicant.detailAddress = current.familyDetail
     || extractDetailFromAddress(current.familyAddress, current.village)
   applicant.hukouProvince = current.hukouProvince || '黑龙江省'
@@ -891,6 +827,77 @@ function hydrateMembers(current: TempReliefDetail): void {
   if (members.value.length === 0) members.value = [createMemberRow()]
 }
 
+function hasRowDivergence(rows: DiseaseRow[]): boolean {
+  if (rows.length < 2) return false
+  const distinct = <T>(values: T[]): boolean => new Set(values).size > 1
+
+  const hospitals = rows
+    .map((row) => row.hospital.trim())
+    .filter(Boolean)
+  if (distinct(hospitals)) return true
+
+  const starts = rows
+    .map((row) => row.treatStartDate?.slice(0, 10) ?? '')
+    .filter(Boolean)
+  if (distinct(starts)) return true
+
+  const ends = rows
+    .map((row) => row.treatEndDate?.slice(0, 10) ?? '')
+    .filter(Boolean)
+  if (distinct(ends)) return true
+
+  const amounts = (selector: (row: DiseaseRow) => number | undefined): boolean => {
+    const values = rows
+      .map((row) => selector(row))
+      .filter((value): value is number => value !== undefined)
+    return distinct(values)
+  }
+  if (amounts((row) => row.medicalTotal)) return true
+  if (amounts((row) => row.insurancePaid)) return true
+  if (amounts((row) => row.selfPaid)) return true
+  return false
+}
+
+function setSharedFromRow(row: DiseaseRow): void {
+  diseaseShared.hospital = row.hospital
+  diseaseShared.treatStartDate = row.treatStartDate ?? todayText()
+  diseaseShared.treatEndDate = row.treatEndDate ?? todayText()
+  diseaseShared.medicalTotal = row.medicalTotal
+  diseaseShared.insurancePaid = row.insurancePaid
+  diseaseShared.selfPaid = row.selfPaid
+}
+
+function applySharedToRows(): void {
+  diseases.value.forEach((row) => {
+    row.hospital = diseaseShared.hospital
+    row.treatStartDate = diseaseShared.treatStartDate
+    row.treatEndDate = diseaseShared.treatEndDate
+    row.medicalTotal = diseaseShared.medicalTotal
+    row.insurancePaid = diseaseShared.insurancePaid
+    row.selfPaid = diseaseShared.selfPaid
+  })
+}
+
+function handleSharedDiseaseChange(): void {
+  if (multiHospitalMode.value) return
+  applySharedToRows()
+  regenerateDifficultyReason()
+}
+
+function handleMultiHospitalChange(value: string | number | boolean): void {
+  if (!isEditable.value) return
+  const enabled = Boolean(value)
+  if (enabled) {
+    applySharedToRows()
+    regenerateDifficultyReason()
+    return
+  }
+  const first = diseases.value[0]
+  if (first) setSharedFromRow(first)
+  applySharedToRows()
+  regenerateDifficultyReason()
+}
+
 function hydrateDetails(current: TempReliefDetail): void {
   diseases.value = current.diseases.map((disease) => ({
     key: nextRowKey(),
@@ -906,6 +913,12 @@ function hydrateDetails(current: TempReliefDetail): void {
     selfPaid: disease.selfPaid ?? undefined,
     sortOrder: disease.sortOrder,
   }))
+
+  multiHospitalMode.value = hasRowDivergence(diseases.value)
+  if (!multiHospitalMode.value) {
+    const first = diseases.value[0]
+    if (first) setSharedFromRow(first)
+  }
 
   accidents.value = current.accidents.map((accident) => ({
     key: nextRowKey(),
@@ -958,6 +971,7 @@ function applyDetail(current: TempReliefDetail): void {
   form.status = current.status
   form.reliefType = current.reliefType === 'Small' ? 'Small' : 'Large'
   form.paymentChannel = current.paymentChannel === 'Reserve' ? 'Reserve' : 'County'
+  if (form.reliefType === 'Large') lastLargeChannel.value = form.paymentChannel
   form.applyDate = current.applyDate?.slice(0, 10) ?? todayText()
   form.reportUnit = current.reportUnit
   form.reportTime = current.reportTime
@@ -985,11 +999,13 @@ function applyDetail(current: TempReliefDetail): void {
   manualEntry.value = current.isManualEntry
   candidateSelected.value = !current.isManualEntry && Boolean(current.sourceTable)
   candidateSummary.value = current.isManualEntry
-    ? '非在册手工登记'
-    : `已选择：${current.applicantName}（${current.sourceName}）`
-  policyItems.value = []
+    ? ''
+    : `已选择：${current.applicantName}${current.sourceName ? `（${current.sourceName}）` : ''}`
 
   if (form.reliefType === 'Small') void loadSmallTiers()
+
+  // 读入已有申请：救助原因取保存值，视为“已有内容”，类型/明细变化前不自动覆盖
+  reasonDirty.value = true
 }
 
 async function loadDetail(options: { silent?: boolean } = {}): Promise<void> {
@@ -1004,11 +1020,7 @@ async function loadDetail(options: { silent?: boolean } = {}): Promise<void> {
   try {
     const current = await getTempReliefApplication(id)
     applyDetail(current)
-    await Promise.allSettled([
-      refreshIdentity(true),
-      loadReportUnitPhone(),
-      runAnnualCheck(true),
-    ])
+    await refreshIdentity(true)
     if (!current.policyEnjoyed || !current.familyMemberStatus) {
       void loadPolicyAndHealth(current.applicantIdCard, false)
     }
@@ -1037,7 +1049,7 @@ async function refreshIdentity(silent = false): Promise<void> {
     if (ticket !== identityTicket) return
     identity.value = result
     if (manualEntry.value && result.isInsured && !silent) {
-      ElMessage.warning(result.basisText + '，请改用检索选择该申请人')
+      ElMessage.warning(`${result.basisText}，请改用检索选择该申请人`)
     }
   } catch (error) {
     if (ticket !== identityTicket) return
@@ -1049,48 +1061,17 @@ async function refreshIdentity(silent = false): Promise<void> {
   }
 }
 
-async function runAnnualCheck(silent = false): Promise<void> {
-  const idCard = applicant.idCard.trim()
-  const year = form.applyDate.slice(0, 4)
-  if (!idCard || !year) {
-    annualBlocked.value = false
-    annualMessage.value = ''
-    return
-  }
-
-  const ticket = ++annualTicket
-  annualChecking.value = true
-  try {
-    const exists = await checkTempReliefAnnual(idCard, year, form.id > 0 ? form.id : undefined)
-    if (ticket !== annualTicket) return
-    annualBlocked.value = exists
-    annualMessage.value = exists
-      ? `该申请人 ${year} 年已存在临时救助申请，同一身份证每年仅限一次。`
-      : ''
-  } catch (error) {
-    if (ticket !== annualTicket) return
-    annualBlocked.value = false
-    annualMessage.value = ''
-    if (!silent) {
-      ElMessage.warning(getErrorMessage(error, '年度唯一校验失败，保存时以服务端校验为准'))
-    }
-  } finally {
-    if (ticket === annualTicket) annualChecking.value = false
-  }
-}
-
 async function loadPolicyAndHealth(idCard: string, overwrite: boolean): Promise<void> {
   const id = idCard.trim()
   if (!id) return
 
   try {
     const policy = await getTempReliefPolicySnapshot(id)
-    policyItems.value = policy
     if ((overwrite || !form.policyEnjoyed.trim()) && policy.length > 0) {
       form.policyEnjoyed = `${policy.join('；')}。`
     }
   } catch {
-    if (policyItems.value.length === 0) policyItems.value = []
+    // 政策快照失败不阻断录入，用户可手工补录。
   }
 
   try {
@@ -1100,19 +1081,6 @@ async function loadPolicyAndHealth(idCard: string, overwrite: boolean): Promise<
     }
   } catch {
     // 健康摘要失败不阻断录入，用户可手工补录。
-  }
-}
-
-async function loadReportUnitPhone(): Promise<void> {
-  const unit = form.reportUnit.trim()
-  if (!unit) {
-    reportUnitPhone.value = ''
-    return
-  }
-  try {
-    reportUnitPhone.value = await getTempReliefReportUnitPhone(unit)
-  } catch {
-    reportUnitPhone.value = ''
   }
 }
 
@@ -1137,8 +1105,12 @@ async function loadSmallTiers(): Promise<void> {
     if (form.standardTier && !smallTiers.value.some((tier) => tier.code === form.standardTier)) {
       form.standardTier = ''
     }
-    if (!form.standardTier) form.confirmAmount = undefined
-    else {
+    if (!form.standardTier && smallTiers.value.length > 0) {
+      form.standardTier = smallTiers.value[0].code
+      form.confirmAmount = smallTiers.value[0].ceilingAmount
+    } else if (!form.standardTier) {
+      form.confirmAmount = undefined
+    } else {
       const tier = smallTiers.value.find((item) => item.code === form.standardTier)
       if (tier && (
         form.confirmAmount === undefined
@@ -1166,6 +1138,7 @@ async function searchCandidates(): Promise<void> {
   }
 
   candidateLoading.value = true
+  selectedCandidateKey.value = ''
   try {
     candidates.value = await searchTempReliefCandidates(keyword)
     candidateSearched.value = true
@@ -1221,6 +1194,14 @@ function applyCandidateDetail(current: TempReliefCandidate): void {
   if (members.value.length === 0) members.value = [createMemberRow()]
 
   resolveBeneficiaryKey(current.matchedMemberIdCard)
+  form.difficultyType = '其他困难'
+  form.difficultyReason = ''
+  diseases.value = []
+  accidents.value = []
+  educations.value = []
+  multiHospitalMode.value = false
+  reasonDirty.value = false
+  regenerateDifficultyReason()
 }
 
 async function selectCandidate(candidate: TempReliefCandidate): Promise<void> {
@@ -1240,15 +1221,16 @@ async function selectCandidate(candidate: TempReliefCandidate): Promise<void> {
 
     manualEntry.value = false
     identity.value = null
-    annualBlocked.value = false
-    annualMessage.value = ''
+    identityError.value = ''
     applyCandidateDetail(current)
+    await refreshIdentity(true)
     candidateSelected.value = true
     candidateSummary.value = current.matchedPersonInfo
       ? `已选择：${current.name}（${current.sourceName}）· ${current.matchedPersonInfo}`
       : `已选择：${current.name}（${current.sourceName}）`
     candidates.value = []
     candidateKeyword.value = ''
+    selectedCandidateKey.value = ''
 
     if (!applicant.hukouType) {
       try {
@@ -1259,12 +1241,7 @@ async function selectCandidate(candidate: TempReliefCandidate): Promise<void> {
     }
 
     if (form.reliefType === 'Small') await loadSmallTiers()
-    await Promise.allSettled([
-      refreshIdentity(true),
-      runAnnualCheck(true),
-      loadPolicyAndHealth(current.idCard, false),
-      loadReportUnitPhone(),
-    ])
+    await loadPolicyAndHealth(current.idCard, false)
   } catch (error) {
     ElMessage.error(getErrorMessage(error, '选择申请人失败'))
   } finally {
@@ -1273,56 +1250,29 @@ async function selectCandidate(candidate: TempReliefCandidate): Promise<void> {
   }
 }
 
-function enterManualEntry(): void {
-  if (!isEditable.value) return
-  manualEntry.value = true
-  candidateSelected.value = false
-  candidateSummary.value = '非在册手工登记'
-  Object.assign(applicant, createEmptyApplicant())
-  storedFamilySize.value = null
-  form.reliefPersonCount = 1
-  members.value = [createMemberRow()]
-  identity.value = null
-  identityError.value = ''
-  annualBlocked.value = false
-  annualMessage.value = ''
-  candidates.value = []
-  candidateSearched.value = false
-  diseases.value = []
-  accidents.value = []
-  educations.value = []
-  form.difficultyType = '其他困难'
-  form.difficultyReason = ''
+function useSelectedCandidate(): void {
+  if (!selectedCandidate.value) return
+  void selectCandidate(selectedCandidate.value)
 }
 
-function backToSearch(): void {
-  if (!isEditable.value) return
-  manualEntry.value = false
+function enterManualEntry(): void {
+  if (!canEnterManualEntry.value) return
+  manualEntry.value = true
+  applicant.sourceTable = ''
+  applicant.sourceFamilyId = 0
   candidateSelected.value = false
   candidateSummary.value = ''
-  Object.assign(applicant, createEmptyApplicant())
-  storedFamilySize.value = null
-  form.reliefPersonCount = 1
-  members.value = [createMemberRow()]
-  identity.value = null
-  identityError.value = ''
-  annualBlocked.value = false
-  annualMessage.value = ''
   candidates.value = []
   candidateSearched.value = false
-  diseases.value = []
-  accidents.value = []
-  educations.value = []
-  form.difficultyType = '其他困难'
-  form.difficultyReason = ''
+  selectedCandidateKey.value = ''
+  identity.value = null
+  identityError.value = ''
 }
 
 function handleManualIdInput(): void {
   if (!manualEntry.value) return
   identity.value = null
   identityError.value = ''
-  annualBlocked.value = false
-  annualMessage.value = ''
 }
 
 async function handleManualIdBlur(): Promise<void> {
@@ -1341,47 +1291,253 @@ async function handleManualIdBlur(): Promise<void> {
     }
   }
 
-  await Promise.allSettled([
-    refreshIdentity(false),
-    runAnnualCheck(false),
-    loadPolicyAndHealth(id, false),
-  ])
+  await refreshIdentity(false)
 }
 
-function handleApplyDateChange(): void {
-  void runAnnualCheck(false)
+function formatCnDate(value: string | null): string {
+  if (!value) return ''
+  const [year, month, day] = value.slice(0, 10).split('-')
+  if (!year || !month || !day) return ''
+  return `${Number(year)}年${Number(month)}月${Number(day)}日`
 }
 
-function handleReliefTypeChange(next: ReliefType): void {
+function formatTreatRangeCn(start: string | null, end: string | null): string {
+  if (!start && !end) return ''
+  if (!start) return formatCnDate(end)
+  if (!end) return formatCnDate(start)
+  const startText = start.slice(0, 10)
+  const endText = end.slice(0, 10)
+  return startText === endText
+    ? formatCnDate(start)
+    : `${formatCnDate(start)}至${formatCnDate(end)}`
+}
+
+function reasonHead(names: string[]): string {
+  const valid = Array.from(new Set(
+    names.map((name) => name.trim()).filter((name) => Boolean(name) && name !== '家庭成员'),
+  ))
+  if (valid.length === 1) return `申请人家庭成员${valid[0]}`
+  if (valid.length > 1) return `申请人家庭成员${valid.join('、')}`
+  return '申请人家庭成员'
+}
+
+function fallbackReasonHead(): string {
+  return applicant.name.trim()
+    ? `申请人家庭成员${applicant.name.trim()}`
+    : '申请人家庭成员'
+}
+
+function diseaseCostText(row: DiseaseRow): string {
+  const parts: string[] = []
+  if (row.medicalTotal !== undefined) parts.push(`费用总额${row.medicalTotal.toFixed(2)}元`)
+  if (row.insurancePaid !== undefined) parts.push(`报销${row.insurancePaid.toFixed(2)}元`)
+  if (row.selfPaid !== undefined) parts.push(`自付${row.selfPaid.toFixed(2)}元`)
+  return parts.join('，')
+}
+
+function sharedDiseaseCostText(): string {
+  const parts: string[] = []
+  if (diseaseShared.medicalTotal !== undefined) parts.push(`本次医疗费用总额${diseaseShared.medicalTotal.toFixed(2)}元`)
+  if (diseaseShared.insurancePaid !== undefined) parts.push(`经基本医疗保险及大病保险等报销${diseaseShared.insurancePaid.toFixed(2)}元`)
+  if (diseaseShared.selfPaid !== undefined) parts.push(`个人自付${diseaseShared.selfPaid.toFixed(2)}元`)
+  return parts.join('，')
+}
+
+function buildDiseaseReasonText(): string {
+  const items = diseases.value.filter(
+    (row) => row.diseaseName.trim() || row.diseaseCode.trim(),
+  )
+  if (items.length === 0) return ''
+
+  const ownerOf = (row: DiseaseRow): string => (
+    row.memberName.trim() || applicant.name.trim() || '家庭成员'
+  )
+  const owners = Array.from(new Set(items.map(ownerOf)))
+  const head = reasonHead(owners.length === 1 ? owners : [])
+  const itemOwner = (row: DiseaseRow): string => (
+    owners.length === 1 ? '' : `${ownerOf(row)} `
+  )
+  const diseaseLabel = (row: DiseaseRow): string => (
+    `${row.diseaseName.trim()}${row.diseaseCode.trim() ? `（编码${row.diseaseCode.trim()}）` : ''}`
+  )
+
+  if (multiHospitalMode.value) {
+    const segments = items.map((row) => {
+      const hospital = row.hospital.trim() || '医院'
+      const date = formatTreatRangeCn(row.treatStartDate, row.treatEndDate)
+      const cost = diseaseCostText(row)
+      let segment = `${itemOwner(row)}${diseaseLabel(row)}，${date ? `于${date}在${hospital}住院治疗` : `于${hospital}住院治疗`}`
+      if (cost) segment += `，${cost}`
+      return segment
+    })
+    const body = segments.length === 1
+      ? `因患${segments[0]}`
+      : `因患以下疾病：${segments.map((segment, index) => `${index + 1}、${segment}`).join('；')}`
+    return `${head}${body}，医疗费用支出较大，造成家庭基本生活暂时陷入困境，特申请临时救助。`
+  }
+
+  const diseaseText = items.length === 1
+    ? diseaseLabel(items[0])
+    : `以下疾病：${items.map((row, index) => `${index + 1}、${itemOwner(row)}${diseaseLabel(row)}`).join('；')}`
+  const dateText = formatTreatRangeCn(diseaseShared.treatStartDate, diseaseShared.treatEndDate)
+  const hospitalText = diseaseShared.hospital.trim() || '医院'
+  const body = dateText
+    ? `于${dateText}在${hospitalText}住院治疗`
+    : `于${hospitalText}住院治疗`
+  const costText = sharedDiseaseCostText()
+  const tail = costText
+    ? `，${costText}，个人自付费用较高，造成家庭基本生活暂时陷入困境，特申请临时救助。`
+    : '，医疗费用支出较大，造成家庭基本生活暂时陷入困境，特申请临时救助。'
+  return `${head}因患${diseaseText}，${body}${tail}`
+}
+
+function buildAccidentReasonText(): string {
+  const items = accidents.value.filter(
+    (row) => row.accidentType.trim()
+      || row.happenDate
+      || row.happenPlace.trim()
+      || row.injurySituation.trim(),
+  )
+  if (items.length === 0) return ''
+
+  const ownerOf = (row: AccidentRow): string => (
+    row.memberName.trim() || applicant.name.trim() || '家庭成员'
+  )
+  const owners = Array.from(new Set(items.map(ownerOf)))
+  const head = reasonHead(owners.length === 1 ? owners : [])
+  const itemOwner = (row: AccidentRow): string => (
+    owners.length === 1 ? '' : `${ownerOf(row)} `
+  )
+
+  const segments = items.map((row) => {
+    const parts: string[] = []
+    if (row.accidentType.trim()) parts.push(`${itemOwner(row)}${row.accidentType.trim()}`)
+    else if (row.memberName.trim()) parts.push(row.memberName.trim())
+    if (row.happenDate) parts.push(formatCnDate(row.happenDate))
+    if (row.happenPlace.trim()) parts.push(row.happenPlace.trim())
+    let segment = parts.join('，')
+    if (row.injurySituation.trim()) segment += `（${row.injurySituation.trim()}）`
+    const lossParts: string[] = []
+    if (row.propertyLoss !== undefined) lossParts.push(`财产损失${row.propertyLoss.toFixed(2)}元`)
+    if (row.compensationPaid !== undefined) lossParts.push(`已获保险及赔偿${row.compensationPaid.toFixed(2)}元`)
+    if (lossParts.length > 0) segment += `，${lossParts.join('，')}`
+    return segment
+  })
+
+  const body = segments.length === 1
+    ? (segments[0].startsWith('因') ? segments[0] : `因${segments[0]}`)
+    : `因发生以下意外灾害：${segments.map((segment, index) => `${index + 1}、${segment}`).join('；')}`
+  return `${head}${body}，家庭基本生活暂时陷入困境，特申请临时救助。`
+}
+
+function buildEducationReasonText(): string {
+  const items = educations.value.filter(
+    (row) => row.studentName.trim()
+      || row.educationStage.trim()
+      || row.schoolName.trim()
+      || row.tuitionFee !== undefined,
+  )
+  if (items.length === 0) return ''
+
+  const studentOf = (row: EducationRow): string => (
+    row.studentName.trim() || applicant.name.trim() || '家庭成员'
+  )
+  const students = Array.from(new Set(items.map(studentOf)))
+  const head = reasonHead(students.length === 1 ? students : [])
+
+  const segments = items.map((row) => {
+    const parts: string[] = []
+    if (row.studentName.trim()) parts.push(row.studentName.trim())
+    if (row.educationStage.trim()) parts.push(`就读${row.educationStage.trim()}`)
+    if (row.schoolName.trim()) parts.push(row.schoolName.trim())
+    const duration = SCHOOL_DURATION_OPTIONS.find((option) => option.value === row.schoolDuration)
+    if (duration) parts.push(duration.label)
+    let text = parts.join('，')
+    if (row.tuitionFee !== undefined) text += `（学费${row.tuitionFee.toFixed(2)}元）`
+    return text
+  })
+
+  const body = segments.length === 1
+    ? `因家庭子女就学，${segments[0]}`
+    : `因家庭子女就学，教育支出明细如下：${segments.map((segment, index) => `${index + 1}、${segment}`).join('；')}`
+  return `${head}${body}，学费等教育支出较大，家庭基本生活暂时陷入困境，特申请临时救助。`
+}
+
+function buildDifficultyReasonText(): string {
+  if (form.difficultyType === '疾病') {
+    const text = buildDiseaseReasonText()
+    if (text) return text
+    return `${fallbackReasonHead()}因患疾病，医疗费用支出较大，造成家庭基本生活暂时陷入困境，特申请临时救助。`
+  }
+  if (form.difficultyType === '意外灾害') {
+    const text = buildAccidentReasonText()
+    if (text) return text
+    return `${fallbackReasonHead()}因意外灾害，家庭基本生活暂时陷入困境，特申请临时救助。`
+  }
+  if (form.difficultyType === '教育支出') {
+    const text = buildEducationReasonText()
+    if (text) return text
+    return `${fallbackReasonHead()}因家庭子女就学，教育支出较大，造成家庭基本生活暂时陷入困境，特申请临时救助。`
+  }
+  const category = applicant.familyCategory.trim() || '困难群众'
+  return `申请人家庭为${category}对象，因突发困难导致基本生活暂时陷入困境，特申请临时救助。`
+}
+
+function regenerateDifficultyReason(): void {
+  if (reasonDirty.value) return
+  const text = buildDifficultyReasonText()
+  suppressReasonWrite = true
+  form.difficultyReason = text
+  suppressReasonWrite = false
+}
+
+function handleDifficultyTypeChange(): void {
+  // 与 PC 一致：切换困难类型视为重新起草，清掉手动编辑标记后按新类型生成
+  reasonDirty.value = false
+  regenerateDifficultyReason()
+}
+
+function handleDetailChanged(): void {
+  regenerateDifficultyReason()
+}
+
+function selectReliefType(next: ReliefType): void {
   if (!isEditable.value || form.reliefType === next) return
-  form.reliefType = next
+  if (next === 'Small') {
+    lastLargeChannel.value = form.paymentChannel
+    form.reliefType = 'Small'
+    form.paymentChannel = 'Reserve'
+    form.standardTier = ''
+    form.confirmAmount = undefined
+    form.publicizeStartDate = null
+    form.publicizeEndDate = null
+    void loadSmallTiers()
+    return
+  }
+
+  form.reliefType = 'Large'
+  form.paymentChannel = lastLargeChannel.value
   form.standardTier = ''
   form.confirmAmount = undefined
-  form.publicizeStartDate = null
-  form.publicizeEndDate = null
-  if (next === 'Small') {
-    form.paymentChannel = 'Reserve'
-    void loadSmallTiers()
-  } else {
-    void loadSmallTiers()
-  }
+  void loadSmallTiers()
 }
 
-function handlePaymentChannelChange(next: PaymentChannel): void {
+function selectChannel(next: PaymentChannel): void {
+  if (!isEditable.value) return
   form.paymentChannel = next
   if (next === 'County') {
-    form.confirmAmount = undefined
     form.standardTier = ''
+    form.confirmAmount = undefined
   }
 }
 
-function handlePersonCountChange(next: number | undefined): void {
-  const value = Math.max(Math.min(next ?? 1, familySizeDisplay.value), 1)
+function handlePersonCountChange(): void {
+  const value = Math.max(Math.min(form.reliefPersonCount || 1, familySizeDisplay.value), 1)
   form.reliefPersonCount = value
   if (isSmall.value) void loadSmallTiers()
 }
 
-function handleTierChange(next: string | number | boolean | undefined): void {
+function handleTierSelect(next: string | number | boolean | undefined): void {
   const code = String(next ?? '')
   form.standardTier = code
   const tier = smallTiers.value.find((item) => item.code === code)
@@ -1399,7 +1555,7 @@ function handleMemberChanged(): void {
 
 function addMember(): void {
   if (members.value.length >= MAX_MEMBER_ROWS) {
-    ElMessage.warning(`最多填写 ${MAX_MEMBER_ROWS} 名家庭成员`)
+    ElMessage.warning(`家庭成员最多填写 ${MAX_MEMBER_ROWS} 行（审批表展示上限）`)
     return
   }
   members.value.push(createMemberRow())
@@ -1407,7 +1563,7 @@ function addMember(): void {
 
 function removeMember(index: number): void {
   if (members.value.length <= 1) {
-    ElMessage.warning('至少保留一名家庭成员行')
+    ElMessage.warning('至少保留一名家庭成员')
     return
   }
   members.value.splice(index, 1)
@@ -1416,76 +1572,53 @@ function removeMember(index: number): void {
 
 function addDisease(): void {
   if (diseases.value.length >= MAX_DETAIL_ROWS) {
-    ElMessage.warning(`最多填写 ${MAX_DETAIL_ROWS} 条疾病明细`)
+    ElMessage.warning(`最多添加 ${MAX_DETAIL_ROWS} 条疾病明细`)
     return
   }
-  diseases.value.push(createDiseaseRow())
+  const row = createDiseaseRow()
+  if (!multiHospitalMode.value) {
+    row.hospital = diseaseShared.hospital
+    row.treatStartDate = diseaseShared.treatStartDate
+    row.treatEndDate = diseaseShared.treatEndDate
+    row.medicalTotal = diseaseShared.medicalTotal
+    row.insurancePaid = diseaseShared.insurancePaid
+    row.selfPaid = diseaseShared.selfPaid
+  }
+  diseases.value.push(row)
+  regenerateDifficultyReason()
 }
 
 function removeDisease(index: number): void {
   diseases.value.splice(index, 1)
+  regenerateDifficultyReason()
 }
 
 function addAccident(): void {
   if (accidents.value.length >= MAX_DETAIL_ROWS) {
-    ElMessage.warning(`最多填写 ${MAX_DETAIL_ROWS} 条意外灾害明细`)
+    ElMessage.warning(`最多添加 ${MAX_DETAIL_ROWS} 条意外灾害明细`)
     return
   }
   accidents.value.push(createAccidentRow())
+  regenerateDifficultyReason()
 }
 
 function removeAccident(index: number): void {
   accidents.value.splice(index, 1)
+  regenerateDifficultyReason()
 }
 
 function addEducation(): void {
   if (educations.value.length >= MAX_DETAIL_ROWS) {
-    ElMessage.warning(`最多填写 ${MAX_DETAIL_ROWS} 条教育支出明细`)
+    ElMessage.warning(`最多添加 ${MAX_DETAIL_ROWS} 条教育支出明细`)
     return
   }
   educations.value.push(createEducationRow())
+  regenerateDifficultyReason()
 }
 
 function removeEducation(index: number): void {
   educations.value.splice(index, 1)
-}
-
-function generateReason(): void {
-  const head = applicant.name.trim() ? `申请人家庭成员${applicant.name.trim()}` : '申请人家庭成员'
-  if (form.difficultyType === '疾病') {
-    const items = diseases.value
-      .filter((row) => row.diseaseName.trim() || row.diseaseCode.trim())
-      .map((row) => row.diseaseName.trim() || row.diseaseCode.trim())
-    form.difficultyReason = items.length > 0
-      ? `${head}因患${items.join('、')}，医疗费用支出较大，造成家庭基本生活暂时陷入困境，特申请临时救助。`
-      : `${head}因患疾病，医疗费用支出较大，造成家庭基本生活暂时陷入困境，特申请临时救助。`
-    return
-  }
-  if (form.difficultyType === '意外灾害') {
-    const items = accidents.value
-      .filter((row) => row.accidentType.trim() || row.happenPlace.trim())
-      .map((row) => [row.accidentType.trim(), formatDate(row.happenDate), row.happenPlace.trim()]
-        .filter((part) => part && part !== '—')
-        .join('，'))
-      .filter(Boolean)
-    form.difficultyReason = items.length > 0
-      ? `${head}因${items.join('；')}，家庭基本生活暂时陷入困境，特申请临时救助。`
-      : `${head}因意外灾害，家庭基本生活暂时陷入困境，特申请临时救助。`
-    return
-  }
-  if (form.difficultyType === '教育支出') {
-    const items = educations.value
-      .filter((row) => row.studentName.trim() || row.educationStage.trim() || row.schoolName.trim())
-      .map((row) => [row.studentName.trim(), row.educationStage.trim(), row.schoolName.trim()]
-        .filter(Boolean)
-        .join('，'))
-      .filter(Boolean)
-    form.difficultyReason = items.length > 0
-      ? `${head}因家庭子女就学，${items.join('；')}，学费等教育支出较大，家庭基本生活暂时陷入困境，特申请临时救助。`
-      : `${head}因家庭子女就学，教育支出较大，造成家庭基本生活暂时陷入困境，特申请临时救助。`
-    return
-  }
-  form.difficultyReason = `申请人家庭为${applicant.familyCategory || '困难群众'}对象，因突发困难导致基本生活暂时陷入困境，特申请临时救助。`
+  regenerateDifficultyReason()
 }
 
 function buildFamilyAddress(): string {
@@ -1508,63 +1641,72 @@ function buildHukouAddress(): string {
 }
 
 function validateForm(): string | null {
-  if (!manualEntry.value && !candidateSelected.value && !applicant.name.trim()) {
-    return '请先检索并选择申请人；检索不到可转非在册手工登记'
+  if (!populationResolved.value) {
+    return '请先检索并选择申请人（或转非在册登记），系统将自动判定保障人群'
   }
   if (manualHitsLedger.value) {
     return identity.value?.basisText
       ? `${identity.value.basisText}，请改用检索选择该申请人`
       : '该身份证命中四类在册台账，请改用检索选择该申请人'
   }
-  if (!applicant.name.trim()) return '请填写申请人姓名'
-  if (!applicant.idCard.trim()) return '请填写申请人身份证号'
-  if (!isValidIdCard(applicant.idCard)) return '申请人身份证号格式不正确'
-  if (annualBlocked.value) return annualMessage.value || '该申请人本年度已存在临时救助申请'
+  if (manualEntry.value) {
+    if (!applicant.name.trim()) return '请填写申请人姓名'
+    if (!applicant.idCard.trim()) return '请填写申请人身份证号'
+    if (!isValidIdCard(applicant.idCard)) return '申请人身份证号格式不正确'
+  } else if (!candidateSelected.value && !applicant.name.trim()) {
+    return '请先检索并选择申请人；检索不到可点「转非在册登记」'
+  }
+  if (!applicant.idCard.trim()) return '申请人身份证号缺失'
   if (!form.applyDate) return '请选择申请日期'
   if (form.applyDate > maxApplyDateText()) {
     return `申请日期最晚为 ${maxApplyDateText()}`
   }
   if (form.reliefPersonCount <= 0) return '家庭遇困人数（含户主）须大于 0'
   if (form.reliefPersonCount > familySizeDisplay.value) {
-    return `家庭遇困人数不能大于家庭人口（${familySizeDisplay.value} 人）`
+    return `家庭遇困人数（${form.reliefPersonCount}）不能大于家庭人口（${familySizeDisplay.value}）`
   }
-  if (!selectedBeneficiary.value) return '请选择救助对象'
-  if (!form.difficultyReason.trim()) return '请填写申请救助原因 / 困难情况'
+  if (!selectedBeneficiary.value || !selectedBeneficiary.value.idCard) {
+    return '请选择申请成员作为救助对象'
+  }
+  if (!form.difficultyReason.trim()) return '请填写申请救助原因/困难情况'
 
   if (form.difficultyType === '疾病') {
     if (diseases.value.length === 0) return '困难类型为疾病，请至少添加一条疾病明细'
     if (diseases.value.some((row) => !row.diseaseName.trim() && !row.diseaseCode.trim())) {
       return '请填写每条疾病明细的诊断结果或疾病编码'
     }
-    if (diseases.value.some(
-      (row) => (row.medicalTotal ?? 0) < 0 || (row.insurancePaid ?? 0) < 0 || (row.selfPaid ?? 0) < 0,
-    )) {
-      return '疾病明细金额不能为负数'
+    if (multiHospitalMode.value) {
+      if (diseases.value.some((row) => !row.hospital.trim())) {
+        return '多医院模式下，请为每条疾病明细填写所在医院'
+      }
+      if (diseases.value.some((row) => (row.selfPaid ?? 0) < 0)) {
+        return '自费费用不能为负数'
+      }
+    } else if ((diseaseShared.selfPaid ?? 0) < 0) {
+      return '自费费用不能为负数'
     }
   }
 
-  if (form.difficultyType === '意外灾害') {
-    if (accidents.value.length === 0) return '困难类型为意外灾害，请至少添加一条意外灾害明细'
-    if (accidents.value.some((row) => !row.accidentType.trim())) {
-      return '请填写每条意外灾害的类型'
-    }
+  if (form.difficultyType === '意外灾害' && accidents.value.length === 0) {
+    return '困难类型为意外灾害，请至少添加一条意外灾害明细'
   }
-
-  if (form.difficultyType === '教育支出') {
-    if (educations.value.length === 0) return '困难类型为教育支出，请至少添加一条教育支出明细'
-    if (educations.value.some((row) => !row.studentName.trim() && !row.educationStage.trim())) {
-      return '请填写每条教育支出明细的学生姓名或就学阶段'
-    }
+  if (form.difficultyType === '教育支出' && educations.value.length === 0) {
+    return '困难类型为教育支出，请至少添加一条教育支出明细'
   }
 
   if (isSmall.value) {
-    if (!form.standardTier) return '请选择小额快救档位（50% / 75% / 100%）'
+    if (!form.standardTier) return '请选择小额快救政策档位（50%/75%/100%）'
     if (!form.confirmAmount || form.confirmAmount <= 0) return '确定金额须为大于 0 的数字'
     if (selectedTier.value && form.confirmAmount > selectedTier.value.ceilingAmount) {
-      return `确定金额不能超过${selectedTier.value.label}档上限 ${formatMoney(selectedTier.value.ceilingAmount)}`
+      return `确定金额不能超过档位上限 ${formatMoney(selectedTier.value.ceilingAmount)}`
     }
   } else if (effectiveChannel.value === 'Reserve') {
     if (!form.confirmAmount || form.confirmAmount <= 0) return '备用金发放请填写救助金额'
+  }
+
+  if (form.publicizeStartDate && form.publicizeEndDate
+    && form.publicizeEndDate < form.publicizeStartDate) {
+    return '公示结束日期不能早于开始日期'
   }
 
   return null
@@ -1577,7 +1719,7 @@ function buildRequest(): TempReliefSaveRequest {
     reliefType: form.reliefType,
     populationStatus: identity.value?.populationStatus
       ?? detail.value?.populationStatus
-      ?? null,
+      ?? (manualEntry.value ? 'Uninsured' : null),
     paymentChannel: effectiveChannel.value,
     sourceTable: manualEntry.value ? '' : applicant.sourceTable,
     sourceFamilyId: manualEntry.value ? 0 : applicant.sourceFamilyId,
@@ -1645,12 +1787,12 @@ function buildRequest(): TempReliefSaveRequest {
         diseaseName: row.diseaseName.trim(),
         diseaseCode: row.diseaseCode.trim(),
         memberName: row.memberName,
-        hospital: row.hospital.trim(),
-        treatStartDate: row.treatStartDate,
-        treatEndDate: row.treatEndDate,
-        medicalTotal: row.medicalTotal ?? null,
-        insurancePaid: row.insurancePaid ?? null,
-        selfPaid: row.selfPaid ?? null,
+        hospital: (multiHospitalMode.value ? row.hospital : diseaseShared.hospital).trim(),
+        treatStartDate: multiHospitalMode.value ? row.treatStartDate : diseaseShared.treatStartDate,
+        treatEndDate: multiHospitalMode.value ? row.treatEndDate : diseaseShared.treatEndDate,
+        medicalTotal: multiHospitalMode.value ? (row.medicalTotal ?? null) : (diseaseShared.medicalTotal ?? null),
+        insurancePaid: multiHospitalMode.value ? (row.insurancePaid ?? null) : (diseaseShared.insurancePaid ?? null),
+        selfPaid: multiHospitalMode.value ? (row.selfPaid ?? null) : (diseaseShared.selfPaid ?? null),
         sortOrder: index,
       }))
       : [],
@@ -1689,6 +1831,17 @@ async function persist(): Promise<number | null> {
     ElMessage.warning('当前状态不可编辑')
     return null
   }
+  saveError.value = ''
+  if (manualEntry.value && isValidIdCard(applicant.idCard)) {
+    await refreshIdentity(true)
+    if (manualHitsLedger.value) {
+      const message = identity.value?.basisText
+        ? `${identity.value.basisText}，请改用检索选择该申请人`
+        : '该身份证命中四类在册台账，请改用检索选择该申请人'
+      ElMessage.warning(message)
+      return null
+    }
+  }
   const validation = validateForm()
   if (validation) {
     ElMessage.warning(validation)
@@ -1718,7 +1871,9 @@ async function persist(): Promise<number | null> {
     await loadDetail({ silent: true })
     return id
   } catch (error) {
-    ElMessage.error(getErrorMessage(error, '保存临时救助申请失败'))
+    const message = getErrorMessage(error, '保存临时救助申请失败')
+    saveError.value = message
+    ElMessage.error(message)
     return null
   } finally {
     saving.value = false
@@ -1731,35 +1886,24 @@ async function saveDraft(): Promise<void> {
   ElMessage.success(form.status === 'Returned' ? '已保存，申请仍为退回补正状态' : '草稿已保存')
 }
 
-async function saveAndSubmit(): Promise<void> {
+async function saveAndConfirm(): Promise<void> {
   const id = await persist()
   if (id === null) return
 
-  actionLoading.value = 'submit'
+  confirming.value = true
+  saveError.value = ''
   try {
-    await submitTempReliefApplication(id)
-    ElMessage.success('保存并提交成功，已进入办理时限')
+    await confirmTempReliefApplication(id)
+    ElMessage.success('保存并确认成功')
     await loadDetail({ silent: true })
   } catch (error) {
-    ElMessage.error(getErrorMessage(error, '提交失败，已保存当前修改'))
+    const message = getErrorMessage(error, '确认失败，已保存当前修改')
+    saveError.value = message
+    ElMessage.error(message)
     await loadDetail({ silent: true })
   } finally {
-    actionLoading.value = null
+    confirming.value = false
   }
-}
-
-async function saveAndPrint(): Promise<void> {
-  const id = await persist()
-  if (id === null) return
-  printVisible.value = true
-}
-
-function openPrint(): void {
-  if (form.id <= 0) {
-    ElMessage.warning('请先保存申请后再打印')
-    return
-  }
-  printVisible.value = true
 }
 
 function openChangeDate(): void {
@@ -1799,129 +1943,6 @@ async function submitChangeDate(): Promise<void> {
     ElMessage.error(getErrorMessage(error, '改期失败'))
   } finally {
     changeDateSaving.value = false
-  }
-}
-
-async function runStatusAction(key: ActionKey): Promise<void> {
-  if (form.id <= 0) return
-
-  if (key === 'delete') {
-    try {
-      await ElMessageBox.confirm(
-        `确定要删除申请 [${form.applicationNo}] ${applicant.name} 吗？\n此操作不可恢复。`,
-        '确认删除',
-        { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
-      )
-    } catch {
-      return
-    }
-
-    actionLoading.value = 'delete'
-    try {
-      await deleteTempReliefApplication(form.id)
-      ElMessage.success('临时救助申请已删除')
-      backToList()
-    } catch (error) {
-      ElMessage.error(getErrorMessage(error, '删除申请失败'))
-    } finally {
-      actionLoading.value = null
-    }
-    return
-  }
-
-  let reason = ''
-  if (key === 'return' || key === 'reject' || key === 'stop') {
-    const title = key === 'return' ? '退回补正' : key === 'reject' ? '不予救助' : '终止申请'
-    const confirmText = key === 'return' ? '退回' : key === 'reject' ? '确定' : '终止'
-    const placeholder = key === 'return'
-      ? '如：材料不全 / 信息需核实'
-      : key === 'reject'
-        ? '如：不符合救助条件'
-        : '请填写终止原因'
-    try {
-      const result = await ElMessageBox.prompt(
-        key === 'return'
-          ? `请填写 [${form.applicationNo}] ${applicant.name} 的退回补正原因：`
-          : key === 'reject'
-            ? `请填写 [${form.applicationNo}] ${applicant.name} 的不予救助理由：`
-            : `确定要终止 [${form.applicationNo}] ${applicant.name} 的临时救助申请吗？\n终止后本年度仍占用唯一申请名额。`,
-        title,
-        {
-          confirmButtonText: confirmText,
-          cancelButtonText: '取消',
-          inputPlaceholder: placeholder,
-          inputValidator: (value: string) => Boolean(value && value.trim()) || `请填写${
-            key === 'return' ? '退回补正原因' : key === 'reject' ? '不予救助理由' : '终止原因'
-          }`,
-          type: 'warning',
-        },
-      )
-      reason = result.value.trim()
-    } catch {
-      return
-    }
-  } else {
-    const label = key === 'confirm' ? confirmLabel.value : key === 'file' ? '登记备案' : '提交申请'
-    try {
-      await ElMessageBox.confirm(
-        key === 'confirm'
-          ? `确定要${label} [${form.applicationNo}] ${applicant.name} 的临时救助申请吗？\n${
-            label === '县确认' ? '县确认后进入待备案。' : '乡镇确认后即生效。'
-          }`
-          : key === 'file'
-            ? `确定 [${form.applicationNo}] ${applicant.name} 已完成备案登记吗？`
-            : `确定提交 [${form.applicationNo}] ${applicant.name} 的临时救助申请吗？`,
-        label,
-        {
-          confirmButtonText: label,
-          cancelButtonText: '取消',
-          type: key === 'file' ? 'info' : 'warning',
-        },
-      )
-    } catch {
-      return
-    }
-  }
-
-  actionLoading.value = key
-  try {
-    if (key === 'return') {
-      await returnTempReliefApplication(form.id, reason)
-      ElMessage.success('已退回补正')
-    } else if (key === 'reject') {
-      await rejectTempReliefApplication(form.id, {
-        reason,
-        notifiedAt: new Date().toISOString(),
-        noticeMethod: '书面',
-      })
-      ElMessage.success('已登记不予救助')
-    } else if (key === 'stop') {
-      await stopTempReliefApplication(form.id, reason)
-      ElMessage.success('临时救助申请已终止')
-    } else if (key === 'confirm') {
-      await confirmTempReliefApplication(form.id)
-      ElMessage.success(`已${confirmLabel.value}`)
-    } else if (key === 'file') {
-      await fileTempReliefApplication(form.id)
-      ElMessage.success('已登记备案')
-    } else if (key === 'submit') {
-      await submitTempReliefApplication(form.id)
-      ElMessage.success('临时救助申请已提交')
-    }
-    await loadDetail({ silent: true })
-  } catch (error) {
-    const fallback: Record<ActionKey, string> = {
-      submit: '提交申请失败',
-      return: '退回补正失败',
-      reject: '登记不予救助失败',
-      confirm: `${confirmLabel.value}失败`,
-      file: '登记备案失败',
-      stop: '终止申请失败',
-      delete: '删除申请失败',
-    }
-    ElMessage.error(getErrorMessage(error, fallback[key]))
-  } finally {
-    actionLoading.value = null
   }
 }
 
@@ -1988,11 +2009,8 @@ async function handleOcrResult(result: TempReliefOcrResponse): Promise<void> {
   }
 
   ElMessage.success(`已回填：${Array.from(new Set(emptyFields)).join('、')}`)
-  await Promise.allSettled([
-    refreshIdentity(true),
-    runAnnualCheck(true),
-    loadPolicyAndHealth(applicant.idCard, false),
-  ])
+  await refreshIdentity(true)
+  await loadPolicyAndHealth(applicant.idCard, false)
 
   if (!manualEntry.value && originalIdCard && applicant.idCard.trim() !== originalIdCard) {
     ElMessage.warning('身份证号与检索来源不一致，服务端将拒绝保存；请重新检索选择申请人。')
@@ -2004,19 +2022,14 @@ function handlePhotoChanged(): void {
 }
 
 function refreshPage(): void {
-  if (isCreate.value) {
-    void loadDetail()
-    return
-  }
   void loadDetail()
 }
 
 function hydrateForCreate(): void {
   form.reportUnit = auth.user?.organizationName ?? ''
   form.applyDate = todayText()
-  form.reportTime = null
+  form.reportTime = new Date().toISOString()
   form.reliefPersonCount = 1
-  void loadReportUnitPhone()
 }
 
 async function load(): Promise<void> {
@@ -2051,6 +2064,21 @@ watch(familySizeDisplay, (next) => {
   if (form.reliefPersonCount > next) form.reliefPersonCount = Math.max(next, 1)
 })
 
+watch(
+  () => form.difficultyReason,
+  () => {
+    if (suppressReasonWrite) return
+    reasonDirty.value = true
+  },
+  { flush: 'sync' },
+)
+
+watch(beneficiaryOptions, (options) => {
+  if (!options.some((option) => option.key === form.beneficiaryKey)) {
+    form.beneficiaryKey = HEAD_KEY
+  }
+})
+
 onMounted(() => {
   void load()
 })
@@ -2060,7 +2088,7 @@ onMounted(() => {
   <div class="nc-page temp-relief-form">
     <NcPageHeader
       :title="isCreate ? '新建临时救助申请' : isView ? '查看临时救助申请' : '临时救助申请'"
-      description="两大类 × 三小类、六状态；金额、时限、公示、备案与可执行动作均以服务端返回为准。"
+      description="申请人来源仅限导入台账库与最低生活保障申请库"
       kicker="低收入人口救助帮扶 · 临时救助"
     >
       <template #actions>
@@ -2091,63 +2119,77 @@ onMounted(() => {
         <span class="mode-banner__label">{{ isView ? '查看模式' : isEditable ? '编辑模式' : '只读模式' }}</span>
         <strong class="mono">{{ form.applicationNo || '—' }}</strong>
         <el-tag size="small" effect="plain">{{ statusText }}</el-tag>
-        <span class="mode-banner__category">{{ categoryDisplayName }}</span>
-        <span v-if="!isEditable" class="mode-banner__hint">
-          当前状态不可编辑，仅可查看与打印。
-        </span>
+        <span v-if="detail?.categoryDisplayName" class="mode-banner__category">{{ detail.categoryDisplayName }}</span>
+        <span v-if="modeHint" class="mode-banner__hint">{{ modeHint }}</span>
       </div>
 
-      <div class="section-nav" role="navigation" aria-label="表单分区">
+      <!-- 分区 Tab（视觉顺序与 PC 一致） -->
+      <div class="form-tabs" role="tablist" aria-label="表单分区">
         <button
-          v-for="(item, index) in ['① 分类与申请人', '② 申请信息与金额', '③ 家庭成员与明细']"
-          :key="item"
+          v-for="tab in SECTION_TABS"
+          :key="tab.key"
           type="button"
-          class="section-nav__item"
-          :class="{ 'is-active': activeSection === index }"
-          @click="scrollToSection(index)"
+          role="tab"
+          class="form-tabs__item"
+          :class="{ 'is-active': activeSection === tab.key }"
+          :aria-selected="activeSection === tab.key"
+          @click="goToSection(tab.key)"
         >
-          {{ item }}
+          <el-icon :size="16"><component :is="tab.icon" /></el-icon>
+          <span>{{ tab.label }}</span>
         </button>
       </div>
 
-      <!-- ① 分类与申请人 -->
-      <section ref="section1" class="form-section">
-        <NcCard title="业务场景" subtitle="大类由身份证反查四类在册台账自动判定；小类与发放渠道按实际情形选择。">
-          <div class="scenario-grid">
-            <div v-for="item in scenarioItems" :key="item.label" class="scenario-card">
-              <span class="scenario-card__label">{{ item.label }}</span>
-              <strong class="scenario-card__value">{{ item.value }}</strong>
+      <!-- ════════════ 第 1 页：类型与申请人 ════════════ -->
+      <div v-show="activeSection === 0" class="form-section">
+        <NcCard title="保障人群 *">
+          <template #actions>
+            <span class="card-hint">系统自动判定</span>
+          </template>
+          <div class="choice-grid">
+            <div class="choice-card" :class="{ 'is-selected': isInsured }">
+              <strong>在保障人群内</strong>
+              <span>四类在册：低保/特困/边缘/刚性支出；5 日办结</span>
+            </div>
+            <div class="choice-card" :class="{ 'is-selected': isUninsured }">
+              <strong>不在保障人群内</strong>
+              <span>手工登记；需核对/公示，15 日办结</span>
             </div>
           </div>
-          <div class="scenario-foot">
-            <span>当前场景：{{ categoryDisplayName }}</span>
-            <span v-if="detail?.applyYear">申请年度：{{ detail.applyYear }}</span>
-            <span v-if="detail?.deadlineDate">办理截止：{{ formatDate(detail.deadlineDate) }}</span>
-          </div>
-
-          <div class="type-choice" v-if="isEditable">
-            <button
-              type="button"
-              class="type-card"
-              :class="{ 'is-selected': form.reliefType === 'Large' }"
-              @click="handleReliefTypeChange('Large')"
-            >
-              <strong>常规救助</strong>
-              <span>上级部门发放金额由上级核定；备用金渠道手工填写金额。</span>
-            </button>
-            <button
-              type="button"
-              class="type-card"
-              :class="{ 'is-selected': form.reliefType === 'Small' }"
-              @click="handleReliefTypeChange('Small')"
-            >
-              <strong>小额快救</strong>
-              <span>按城市低保月标准 × 遇困人数 × 档位系数自动计算，可下调。</span>
-            </button>
-          </div>
+          <p class="section-note section-note--spaced">
+            {{ populationBasis }}
+          </p>
+          <p v-if="identityLoading" class="section-note">正在判定…</p>
+          <p v-if="identityError" class="error-note">{{ identityError }}</p>
         </NcCard>
 
-        <NcCard title="选择申请人" subtitle="统一检索四类在册台账、其他困难台账与最低生活保障申请库；非在册可手工登记。">
+        <NcCard title="救助类型 *">
+          <div class="choice-grid">
+            <button
+              type="button"
+              class="choice-card"
+              :class="{ 'is-selected': form.reliefType === 'Large', 'is-disabled': !isEditable }"
+              @click="selectReliefType('Large')"
+            >
+              <strong>常规救助</strong>
+              <span>金额不填写，按程序审批核定</span>
+            </button>
+            <button
+              type="button"
+              class="choice-card"
+              :class="{ 'is-selected': form.reliefType === 'Small', 'is-disabled': !isEditable }"
+              @click="selectReliefType('Small')"
+            >
+              <strong>小额快救</strong>
+              <span>免公示、免核对，≤2 日；按城市低保标准 × 人数 × 档位</span>
+            </button>
+          </div>
+          <p class="section-note section-note--spaced">
+            请根据实际救助情形选择类型，审批表将随之区分（常规审批表 / 小额快救审批表）。
+          </p>
+        </NcCard>
+
+        <NcCard title="选择申请人" subtitle="统一检索台账与申请库，系统自动判定大类">
           <div v-if="isEditable && !candidateSelected && !manualEntry" class="candidate-search">
             <el-input
               v-model="candidateKeyword"
@@ -2159,14 +2201,16 @@ onMounted(() => {
             <el-button type="primary" :loading="candidateLoading" @click="searchCandidates">
               检索
             </el-button>
-            <el-button :disabled="candidateLoading" @click="enterManualEntry">转非在册登记</el-button>
           </div>
 
           <div v-if="candidates.length > 0" class="candidate-list">
-            <article
+            <button
               v-for="candidate in candidates"
-              :key="`${candidate.sourceTable}-${candidate.sourceFamilyId}`"
+              :key="candidateKey(candidate)"
+              type="button"
               class="candidate-card"
+              :class="{ 'is-selected': selectedCandidateKey === candidateKey(candidate) }"
+              @click="selectedCandidateKey = candidateKey(candidate)"
             >
               <div class="candidate-card__main">
                 <div class="candidate-card__title">
@@ -2184,26 +2228,24 @@ onMounted(() => {
                   {{ candidate.familyCategory || '—' }} · {{ candidate.familyAddress || '—' }}
                 </p>
               </div>
-              <el-button
-                type="primary"
-                size="small"
-                :disabled="candidate.hasAppliedThisYear"
-                :loading="candidateLoading"
-                @click="selectCandidate(candidate)"
-              >
-                使用该申请人
-              </el-button>
-            </article>
+            </button>
           </div>
 
           <p v-else-if="candidateSearched && isEditable && !candidateSelected && !manualEntry" class="empty-note">
             未检索到符合条件的申请人。请核对姓名或身份证号，或转非在册手工登记。
           </p>
 
-          <div v-if="candidateSelected || manualEntry" class="candidate-summary">
-            <span>{{ candidateSummary || '非在册手工登记' }}</span>
-            <el-button v-if="isEditable" link type="primary" @click="backToSearch">
-              重新选择
+          <div v-if="isEditable && !candidateSelected && !manualEntry" class="candidate-actions">
+            <el-button
+              type="primary"
+              :disabled="!selectedCandidate"
+              :loading="candidateLoading"
+              @click="useSelectedCandidate"
+            >
+              使用该申请人
+            </el-button>
+            <el-button v-if="canEnterManualEntry" @click="enterManualEntry">
+              未检索到？转非在册登记
             </el-button>
           </div>
 
@@ -2213,27 +2255,25 @@ onMounted(() => {
             type="warning"
             :closable="false"
             show-icon
-            title="非在册手工登记"
+            title="非在册登记"
           >
-            请填写真实姓名与身份证号。系统按身份证反查四类在册台账，命中将阻断保存并要求改用检索选择。
+            非在册登记：请直接填写申请人信息；需入户/经济核对与 3 日公示，15 日办结。填写身份证后系统自动核查四类在册台账。
           </el-alert>
 
           <el-alert
-            v-if="annualBlocked"
-            class="annual-alert"
+            v-if="manualHitsLedger"
+            class="manual-alert"
             type="error"
-            :title="annualMessage"
             :closable="false"
             show-icon
+            title="该身份证命中四类在册台账，请改用上方检索选择该申请人（不可手工登记）。"
           />
-        </NcCard>
 
-        <NcCard
-          v-if="candidateSelected || manualEntry"
-          title="申请人信息"
-          :subtitle="manualEntry ? '手工登记可填写身份与住址；保存时服务端仍会复核在册身份。' : '姓名、身份证号与地址分列来自来源记录；详细地址可修正。'"
-        >
-          <div class="form-grid">
+          <div v-if="candidateSelected || manualEntry" class="candidate-summary">
+            <span>{{ candidateSummary || '非在册手工登记' }}</span>
+          </div>
+
+          <div class="form-grid form-grid--spaced">
             <label class="field">
               <span class="field-label">申请人姓名 *</span>
               <el-input
@@ -2242,17 +2282,25 @@ onMounted(() => {
                 maxlength="50"
               />
             </label>
-            <label class="field">
+            <div class="field">
               <span class="field-label">身份证号 *</span>
-              <el-input
-                v-model="applicant.idCard"
-                :disabled="!isEditable || !manualEntry"
-                maxlength="18"
-                class="mono"
-                @input="handleManualIdInput"
-                @blur="handleManualIdBlur"
-              />
-            </label>
+              <div class="inline-actions">
+                <el-input
+                  v-model="applicant.idCard"
+                  :disabled="!isEditable || !manualEntry"
+                  maxlength="18"
+                  class="mono"
+                  @input="handleManualIdInput"
+                  @blur="handleManualIdBlur"
+                />
+                <el-button size="small" :icon="Document" :disabled="!isEditable" @click="ocrVisible = true">
+                  扫描
+                </el-button>
+                <el-button size="small" :icon="Camera" @click="photoVisible = true">
+                  照片
+                </el-button>
+              </div>
+            </div>
             <label class="field">
               <span class="field-label">性别</span>
               <el-select
@@ -2268,175 +2316,14 @@ onMounted(() => {
               <span class="field-label">年龄</span>
               <el-input :model-value="applicant.age === null ? '' : `${applicant.age} 周岁`" readonly />
             </label>
-            <label class="field">
-              <span class="field-label">户籍分类</span>
-              <el-input :model-value="formatHukouType(applicant.hukouType)" readonly />
-            </label>
-            <label class="field">
-              <span class="field-label">家庭人口</span>
-              <el-input :model-value="`${familySizeDisplay} 人`" readonly />
-            </label>
-          </div>
 
-          <div class="identity-actions">
-            <el-button
-              v-if="isEditable"
-              size="small"
-              :icon="Search"
-              @click="ocrVisible = true"
-            >
-              识别身份证
-            </el-button>
-            <el-button
-              size="small"
-              :icon="Document"
-              :disabled="form.id <= 0"
-              @click="photoVisible = true"
-            >
-              证件 / 材料照片
-            </el-button>
-            <span v-if="form.id <= 0" class="identity-actions__hint">保存草稿后可上传照片</span>
-          </div>
-
-          <div class="population-panel">
-            <div class="population-panel__head">
-              <el-tag
-                :type="populationStatusText === '在保障人群内' ? 'success' : populationStatusText === '不在保障人群内' ? 'warning' : 'info'"
-                effect="dark"
-              >
-                {{ populationStatusText }}
-              </el-tag>
-              <el-tag size="small" effect="plain" :type="manualEntry ? 'warning' : 'info'">
-                {{ manualEntry ? '非在册手工登记' : '检索选择' }}
-              </el-tag>
-              <span v-if="identityLoading" class="population-panel__loading">正在判定…</span>
-            </div>
-            <p class="population-panel__basis">{{ populationBasis }}</p>
-            <div v-if="identity?.ledgerNames.length" class="population-panel__ledgers">
-              <el-tag
-                v-for="name in identity.ledgerNames"
-                :key="name"
-                size="small"
-                type="success"
-                effect="plain"
-              >
-                {{ name }}
-              </el-tag>
-            </div>
-            <el-alert
-              v-if="manualHitsLedger"
-              class="population-panel__alert"
-              type="error"
-              :closable="false"
-              show-icon
-              title="该身份证命中四类在册台账，不能手工登记"
-            >
-              请点击「重新选择」从检索结果选择该申请人，以便带出成员与银行快照。
-            </el-alert>
-            <p v-if="identityError" class="population-panel__error">{{ identityError }}</p>
-          </div>
-
-          <p class="group-title group-title--spaced">户籍所在地</p>
-          <div class="form-grid">
-            <label class="field">
-              <span class="field-label">省</span>
-              <el-input v-model="applicant.hukouProvince" :disabled="!isEditable || !manualEntry" />
-            </label>
-            <label class="field">
-              <span class="field-label">市</span>
-              <el-input v-model="applicant.hukouCity" :disabled="!isEditable || !manualEntry" />
-            </label>
-            <label class="field">
-              <span class="field-label">县区</span>
-              <el-input v-model="applicant.hukouDistrict" :disabled="!isEditable || !manualEntry" />
-            </label>
-            <label class="field">
-              <span class="field-label">镇社区</span>
-              <el-input v-model="applicant.hukouTown" :disabled="!isEditable || !manualEntry" />
-            </label>
-          </div>
-
-          <p class="group-title group-title--spaced">家庭住址</p>
-          <div class="form-grid">
-            <label class="field">
-              <span class="field-label">省</span>
-              <el-input v-model="applicant.familyProvince" :disabled="!isEditable || !manualEntry" />
-            </label>
-            <label class="field">
-              <span class="field-label">市</span>
-              <el-input v-model="applicant.familyCity" :disabled="!isEditable || !manualEntry" />
-            </label>
-            <label class="field">
-              <span class="field-label">县区</span>
-              <el-input v-model="applicant.familyDistrict" :disabled="!isEditable || !manualEntry" />
-            </label>
-            <label class="field">
-              <span class="field-label">镇社区</span>
-              <el-input v-model="applicant.familyTown" :disabled="!isEditable || !manualEntry" />
-            </label>
-            <label class="field">
-              <span class="field-label">村 / 社区</span>
-              <el-input v-model="applicant.village" :disabled="!isEditable || !manualEntry" />
-            </label>
-            <label class="field field--wide">
-              <span class="field-label">详细地址</span>
-              <el-input
-                v-model="applicant.detailAddress"
-                :disabled="!isEditable"
-                placeholder="如：柳树村99号"
-              />
-            </label>
-          </div>
-        </NcCard>
-      </section>
-
-      <!-- ② 申请信息与金额 -->
-      <section ref="section2" class="form-section">
-        <NcCard title="申请信息" subtitle="申请日期、遇困人数与救助对象共同决定金额档位与时限。">
-          <div class="form-grid">
-            <label class="field">
-              <span class="field-label">申请日期 *</span>
-              <el-date-picker
-                v-if="isCreate"
-                v-model="form.applyDate"
-                type="date"
-                value-format="YYYY-MM-DD"
-                :disabled="!isEditable"
-                :disabled-date="isDateBeyondMax"
-                style="width: 100%"
-                @change="handleApplyDateChange"
-              />
-              <div v-else class="readonly-with-action">
-                <el-input :model-value="formatDate(form.applyDate)" readonly />
-                <el-button
-                  v-if="canChangeDate"
-                  size="small"
-                  @click="openChangeDate"
-                >
-                  改期
-                </el-button>
-              </div>
-              <span class="field-hint">最晚 {{ maxApplyDateText() }}；已入库仅草稿 / 退回补正可改期。</span>
-            </label>
-            <label class="field">
-              <span class="field-label">遇困人数（含户主）*</span>
-              <el-input-number
-                v-model="form.reliefPersonCount"
-                :min="1"
-                :max="familySizeDisplay"
-                :disabled="!isEditable"
-                controls-position="right"
-                style="width: 100%"
-                @change="handlePersonCountChange"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">家庭人口</span>
-              <el-input :model-value="`${familySizeDisplay} 人`" readonly />
-            </label>
-            <label class="field">
+            <label class="field field--span-2">
               <span class="field-label">联系电话</span>
-              <el-input v-model="applicant.phone" :disabled="!isEditable" maxlength="30" />
+              <el-input
+                v-model="applicant.phone"
+                :disabled="!isEditable || !manualEntry"
+                maxlength="30"
+              />
             </label>
             <label class="field">
               <span class="field-label">家庭类别</span>
@@ -2450,283 +2337,115 @@ onMounted(() => {
               </el-select>
             </label>
             <label class="field">
-              <span class="field-label">救助对象 *</span>
-              <el-select
-                v-model="form.beneficiaryKey"
-                :disabled="!isEditable || beneficiaryOptions.length === 0"
-              >
-                <el-option
-                  v-for="option in beneficiaryOptions"
-                  :key="option.key"
-                  :label="`${option.name}（${option.relation}）`"
-                  :value="option.key"
-                />
-              </el-select>
+              <span class="field-label">家庭人口</span>
+              <el-input :model-value="`${familySizeDisplay} 人`" readonly />
             </label>
-            <label class="field">
-              <span class="field-label">与户主关系</span>
-              <el-input :model-value="selectedBeneficiary?.relation ?? ''" readonly />
-            </label>
-            <label class="field">
+
+            <label class="field field--span-2">
               <span class="field-label">开户行</span>
-              <el-input v-model="applicant.bankName" :disabled="!isEditable" maxlength="100" />
-            </label>
-            <label class="field field--wide">
-              <span class="field-label">银行卡号 / 一卡通账号</span>
-              <el-input v-model="applicant.bankAccount" :disabled="!isEditable" maxlength="50" class="mono" />
-            </label>
-            <label class="field">
-              <span class="field-label">填报单位</span>
               <el-input
-                v-model="form.reportUnit"
+                v-model="applicant.bankName"
                 :disabled="!isEditable"
                 maxlength="100"
-                @blur="loadReportUnitPhone"
+                placeholder="银行卡开户行（来源台账自动带出，可修改）"
               />
             </label>
-            <label class="field">
-              <span class="field-label">填报时间</span>
-              <el-input :model-value="form.reportTime ? formatDateTime(form.reportTime) : '保存时生成'" readonly />
-            </label>
-          </div>
-
-          <div class="difficulty-head">
-            <p class="group-title">困难情况</p>
-            <el-button v-if="isEditable" size="small" @click="generateReason">
-              按明细生成申请理由
-            </el-button>
-          </div>
-
-          <div class="form-grid">
-            <label class="field">
-              <span class="field-label">遇困类型 *</span>
-              <el-select
-                v-model="form.difficultyType"
-                :disabled="!isEditable"
-              >
-                <el-option
-                  v-for="option in DIFFICULTY_TYPES"
-                  :key="option"
-                  :label="option"
-                  :value="option"
-                />
-              </el-select>
-            </label>
-            <label class="field field--wide">
-              <span class="field-label">申请理由 / 困难情况 *</span>
+            <label class="field field--span-2">
+              <span class="field-label">银行卡号</span>
               <el-input
-                v-model="form.difficultyReason"
-                type="textarea"
-                :rows="3"
+                v-model="applicant.bankAccount"
                 :disabled="!isEditable"
-                placeholder="如：因病、因灾等突发困难，家庭基本生活暂时陷入困境..."
+                maxlength="50"
+                class="mono"
+                placeholder="银行卡号/一卡通账号（来源台账自动带出，可修改）"
               />
             </label>
           </div>
 
-          <p class="group-title group-title--spaced">政策快照与家庭健康</p>
-          <div v-if="policyItems.length > 0" class="policy-chips">
-            <el-tag
-              v-for="item in policyItems"
-              :key="item"
-              size="small"
-              effect="plain"
-              type="info"
-            >
-              {{ item }}
-            </el-tag>
-          </div>
-          <div class="form-grid">
-            <label class="field field--wide">
-              <span class="field-label">享受的政策救助情况</span>
-              <el-input
-                v-model="form.policyEnjoyed"
-                type="textarea"
-                :rows="2"
-                :disabled="!isEditable"
-                placeholder="如：最低生活保障 / 特困人员 / 最低生活保障边缘家庭等..."
-              />
-            </label>
-            <label class="field field--wide">
-              <span class="field-label">家庭健康摘要</span>
-              <el-input
-                v-model="form.familyMemberStatus"
-                type="textarea"
-                :rows="2"
-                :disabled="!isEditable"
-                placeholder="如：家庭成员健康 / 患病 / 劳动能力等情况..."
-              />
-            </label>
-          </div>
-        </NcCard>
-
-        <NcCard title="救助金额" subtitle="金额、档位与上限均以服务端配置与 Core 公式为准，前端不重算。">
-          <div v-if="isSmall" class="small-amount">
-            <div class="small-amount__head">
-              <span class="group-title">小额快救档位</span>
-              <span v-if="smallTiersBase !== null" class="field-hint">
-                城市低保月标准 {{ formatMoney(smallTiersBase) }}
-              </span>
+          <div class="sub-card">
+            <div class="sub-card__head">
+              <span class="sub-card__title">户籍所在地</span>
+              <span class="sub-card__hint">（从当前登录用户组织机构获取）</span>
             </div>
-            <el-radio-group
-              v-if="smallTiers.length > 0"
-              v-model="form.standardTier"
-              :disabled="!isEditable || smallTiersLoading"
-              @change="handleTierChange"
-            >
-              <el-radio-button
-                v-for="tier in smallTiers"
-                :key="tier.code"
-                :value="tier.code"
-              >
-                {{ tier.label }} · 上限 {{ formatMoney(tier.ceilingAmount) }}
-              </el-radio-button>
-            </el-radio-group>
-            <el-alert
-              v-if="smallTiersError"
-              class="amount-alert"
-              type="error"
-              :title="smallTiersError"
-              :closable="false"
-              show-icon
-            >
-              <el-button link type="primary" @click="loadSmallTiers">重试</el-button>
-            </el-alert>
-
             <div class="form-grid">
               <label class="field">
-                <span class="field-label">确定金额（可下调）*</span>
-                <el-input-number
-                  v-model="form.confirmAmount"
-                  :min="0"
-                  :max="selectedTier?.ceilingAmount"
-                  :precision="2"
-                  :step="10"
-                  :disabled="!isEditable || !selectedTier"
-                  controls-position="right"
-                  style="width: 100%"
-                />
+                <span class="field-label">省</span>
+                <el-input v-model="applicant.hukouProvince" :disabled="!isEditable || !manualEntry" />
               </label>
               <label class="field">
-                <span class="field-label">档位上限（服务端）</span>
-                <el-input :model-value="formatMoney(selectedTier?.ceilingAmount)" readonly />
+                <span class="field-label">市</span>
+                <el-input v-model="applicant.hukouCity" :disabled="!isEditable || !manualEntry" />
+              </label>
+              <label class="field">
+                <span class="field-label">县区</span>
+                <el-input v-model="applicant.hukouDistrict" :disabled="!isEditable || !manualEntry" />
+              </label>
+              <label class="field">
+                <span class="field-label">镇社区</span>
+                <el-input v-model="applicant.hukouTown" :disabled="!isEditable || !manualEntry" />
               </label>
             </div>
-            <p class="section-note">{{ amountHint }}</p>
           </div>
 
-          <div v-else class="large-amount">
-            <label class="field">
-              <span class="field-label">发放渠道</span>
-              <el-select
-                v-model="form.paymentChannel"
-                :disabled="!isEditable"
-                @change="handlePaymentChannelChange"
-              >
-                <el-option label="上级部门发放（金额不填写）" value="County" />
-                <el-option label="备用金发放（手工填写金额）" value="Reserve" />
-              </el-select>
-            </label>
-
-            <div v-if="effectiveChannel === 'County'" class="amount-placeholder">
-              <span>常规救助 · 上级部门发放</span>
-              <strong>金额由上级按程序核定，系统不填写、不落库。</strong>
+          <div class="sub-card">
+            <div class="sub-card__head">
+              <span class="sub-card__title">家庭住址</span>
+              <span class="sub-card__hint">（省市区县镇社区/村取自申请人来源数据，详细地址可编辑）</span>
             </div>
-            <label v-else class="field">
-              <span class="field-label">救助金额（元）*</span>
-              <el-input-number
-                v-model="form.confirmAmount"
-                :min="0"
-                :precision="2"
-                :step="100"
-                :disabled="!isEditable"
-                controls-position="right"
-                style="width: 100%"
-              />
-            </label>
-            <p class="section-note">{{ amountHint }}</p>
+            <div class="form-grid">
+              <label class="field">
+                <span class="field-label">省</span>
+                <el-input v-model="applicant.familyProvince" :disabled="!isEditable || !manualEntry" />
+              </label>
+              <label class="field">
+                <span class="field-label">市</span>
+                <el-input v-model="applicant.familyCity" :disabled="!isEditable || !manualEntry" />
+              </label>
+              <label class="field">
+                <span class="field-label">县区</span>
+                <el-input v-model="applicant.familyDistrict" :disabled="!isEditable || !manualEntry" />
+              </label>
+              <label class="field">
+                <span class="field-label">镇社区</span>
+                <el-input v-model="applicant.familyTown" :disabled="!isEditable || !manualEntry" />
+              </label>
+            </div>
+            <div class="address-extra">
+              <label class="field">
+                <span class="field-label">村</span>
+                <el-input v-model="applicant.village" :disabled="!isEditable || !manualEntry" />
+              </label>
+              <label class="field">
+                <span class="field-label">详细地址</span>
+                <el-input
+                  v-model="applicant.detailAddress"
+                  :disabled="!isEditable"
+                  placeholder="如：柳树村99号"
+                />
+              </label>
+            </div>
           </div>
+
+          <p v-if="autoFilling" class="auto-fill-note">
+            正在回填申请人来源、政策快照与家庭健康摘要…
+          </p>
         </NcCard>
+      </div>
 
-        <NcCard title="公示、受理与备案" subtitle="公示起止、办理时限、县确认与备案状态由服务端按政策推导。">
-          <div class="form-grid">
-            <label class="field">
-              <span class="field-label">公示期间</span>
-              <el-input :model-value="publicizeText" readonly />
-            </label>
-            <label class="field">
-              <span class="field-label">公示起止</span>
-              <el-input
-                :model-value="scenarioFresh && detail?.publicizeStartDate
-                  ? `${formatDate(detail.publicizeStartDate)} 至 ${formatDate(detail.publicizeEndDate)}`
-                  : (isSmall ? '小额快救免公示' : '保存后生成')"
-                readonly
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">公示异议反馈电话</span>
-              <el-input :model-value="reportUnitPhone || '未取到填报单位电话'" readonly />
-            </label>
-            <label class="field">
-              <span class="field-label">办理时限</span>
-              <el-input :model-value="deadlineText" readonly />
-            </label>
-            <label class="field">
-              <span class="field-label">乡镇受理人</span>
-              <el-input v-model="form.acceptancePerson" :disabled="!isEditable" maxlength="50" />
-            </label>
-            <label class="field">
-              <span class="field-label">受理日期</span>
-              <el-input
-                :model-value="detail?.acceptedAt ? formatDateTime(detail.acceptedAt) : '提交 / 确认时生成'"
-                readonly
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">经济核对</span>
-              <el-input :model-value="economicCheckText" readonly />
-            </label>
-            <label class="field">
-              <span class="field-label">县确认</span>
-              <el-input :model-value="countyConfirmText" readonly />
-            </label>
-            <label class="field">
-              <span class="field-label">备案状态</span>
-              <el-input :model-value="filingText" readonly />
-            </label>
-          </div>
-
-          <label class="field field--wide field--spaced">
-            <span class="field-label">入户核实情况</span>
-            <el-input
-              v-model="form.verifyResult"
-              type="textarea"
-              :rows="2"
-              :disabled="!isEditable"
-              placeholder="入户调查核实情况..."
-            />
-          </label>
-
-          <div v-if="detail?.isOverdue" class="overdue-note">
-            已逾期 {{ detail.remainingDays === null ? '' : Math.abs(detail.remainingDays) }} 天，请尽快办理。
-          </div>
-        </NcCard>
-      </section>
-
-      <!-- ③ 家庭成员与明细 -->
-      <section ref="section3" class="form-section">
+      <!-- ════════════ 第 2 页：家庭成员 ════════════ -->
+      <div v-show="activeSection === 3" class="form-section">
         <NcCard
-          title="家庭成员"
-          subtitle="家庭人口 = 户主 1 人 + 有效家庭成员行数；审批表最多展示 5 行。"
+          title="家庭成员（审批表逐行展示）"
+          subtitle="家庭成员将展示在大额/小额审批表中（最多 5 行）。选中申请人时已自动带回，可增删调整。"
         >
           <template #actions>
             <el-button v-if="isEditable" size="small" :icon="Plus" @click="addMember">
-              添加成员
+              添加
             </el-button>
           </template>
 
-          <article v-for="(row, index) in members" :key="row.key" class="member-card">
-            <div class="member-card__head">
+          <article v-for="(row, index) in members" :key="row.key" class="row-card">
+            <div class="row-card__head">
               <span>家庭成员 {{ index + 1 }}</span>
               <el-button
                 v-if="isEditable"
@@ -2739,9 +2458,9 @@ onMounted(() => {
                 删除
               </el-button>
             </div>
-            <div class="form-grid">
+            <div class="form-grid form-grid--3">
               <label class="field">
-                <span class="field-label">姓名</span>
+                <span class="field-label">姓名 *</span>
                 <el-input
                   v-model="row.memberName"
                   :disabled="!isEditable"
@@ -2760,11 +2479,15 @@ onMounted(() => {
                   <el-option label="女" value="女" />
                 </el-select>
               </label>
-              <label class="field">
+            </div>
+            <div class="form-grid form-grid--3 form-grid--spaced">
+              <label class="field field--span-3">
                 <span class="field-label">身份证号</span>
                 <el-input v-model="row.idCard" :disabled="!isEditable" maxlength="18" class="mono" />
               </label>
-              <label class="field">
+            </div>
+            <div class="form-grid form-grid--3 form-grid--spaced">
+              <label class="field field--span-2">
                 <span class="field-label">工作单位</span>
                 <el-input v-model="row.workUnit" :disabled="!isEditable" maxlength="100" />
               </label>
@@ -2781,27 +2504,179 @@ onMounted(() => {
               </label>
             </div>
           </article>
+        </NcCard>
+      </div>
 
-          <p class="section-note section-note--spaced">
-            当前家庭人口：{{ familySizeDisplay }} 人（户主 1 人 + 有效成员 {{ Math.max(familySizeDisplay - 1, 0) }} 人）。
-            添加或删除成员后，遇困人数不得超过家庭人口。
-          </p>
+      <!-- ════════════ 第 3 页：申请信息 ════════════ -->
+      <div v-show="activeSection === 1" class="form-section">
+        <NcCard title="选择申请成员（救助对象）">
+          <div class="form-grid form-grid--2">
+            <label class="field">
+              <span class="field-label">救助对象 *</span>
+              <el-select
+                v-model="form.beneficiaryKey"
+                :disabled="!isEditable || beneficiaryOptions.length === 0"
+              >
+                <el-option
+                  v-for="option in beneficiaryOptions"
+                  :key="option.key"
+                  :label="option.isHead ? `${option.name}（户主）` : `${option.name}（${option.relation}）`"
+                  :value="option.key"
+                />
+              </el-select>
+            </label>
+            <label class="field">
+              <span class="field-label">与户主关系</span>
+              <el-input :model-value="selectedBeneficiary?.relation ?? ''" readonly />
+            </label>
+          </div>
+          <div v-if="selectedBeneficiary?.idCard" class="beneficiary-summary">
+            <strong>救助对象：</strong>
+            <span>{{ selectedBeneficiary.name }}</span>
+            <span class="mono">{{ selectedBeneficiary.idCard }}</span>
+          </div>
         </NcCard>
 
-        <NcCard title="困难明细" subtitle="按遇困类型填写；金额明细用于核对自付合计，不参与前端金额计算。">
+        <NcCard title="申请内容">
+          <div class="form-grid form-grid--2">
+            <div class="field">
+              <span class="field-label">申请日期 *</span>
+              <el-date-picker
+                v-if="isCreate"
+                v-model="form.applyDate"
+                type="date"
+                value-format="YYYY-MM-DD"
+                :disabled="!isEditable"
+                :disabled-date="isDateBeyondMax"
+                style="width: 100%"
+              />
+              <div v-else class="readonly-with-action">
+                <el-input :model-value="form.applyDate ? formatDate(form.applyDate) : '—'" readonly />
+                <el-button
+                  v-if="canChangeDate"
+                  size="small"
+                  @click="openChangeDate"
+                >
+                  修改
+                </el-button>
+              </div>
+            </div>
+            <label class="field">
+              <span class="field-label">填报单位</span>
+              <el-input v-model="form.reportUnit" :disabled="!isEditable" maxlength="100" />
+            </label>
+          </div>
+
+          <label class="field field--spaced">
+            <span class="field-label">困难类型</span>
+            <el-select
+              v-model="form.difficultyType"
+              :disabled="!isEditable"
+              @change="handleDifficultyTypeChange"
+            >
+              <el-option
+                v-for="option in DIFFICULTY_TYPES"
+                :key="option"
+                :label="option"
+                :value="option"
+              />
+            </el-select>
+          </label>
+
+          <!-- 疾病明细 -->
           <div v-if="form.difficultyType === '疾病'" class="detail-block">
             <div class="detail-head">
-              <div>
+              <div class="detail-head__title">
                 <p class="group-title">疾病明细</p>
-                <p class="section-note">可多条，最多 {{ MAX_DETAIL_ROWS }} 条。</p>
+                <span class="section-note">（困难类型为疾病时，可多条，最多 10 条）</span>
               </div>
-              <el-button v-if="isEditable" size="small" :icon="Plus" @click="addDisease">
-                添加疾病
-              </el-button>
+              <div class="detail-head__actions">
+                <span class="switch-label">逐条填写医院/日期/费用（多次住院）</span>
+                <el-switch
+                  v-model="multiHospitalMode"
+                  :disabled="!isEditable"
+                  @change="handleMultiHospitalChange"
+                />
+                <el-button size="small" :icon="Plus" :disabled="!isEditable" @click="addDisease">
+                  添加疾病
+                </el-button>
+              </div>
             </div>
 
-            <article v-for="(row, index) in diseases" :key="row.key" class="detail-card">
-              <div class="detail-card__head">
+            <div v-if="!multiHospitalMode" class="shared-block">
+              <label class="field">
+                <span class="field-label">所在医院</span>
+                <el-input
+                  v-model="diseaseShared.hospital"
+                  :disabled="!isEditable"
+                  placeholder="如：县人民医院"
+                  @change="handleSharedDiseaseChange"
+                />
+              </label>
+              <div class="form-grid form-grid--3">
+                <label class="field">
+                  <span class="field-label">治疗开始日期</span>
+                  <el-date-picker
+                    v-model="diseaseShared.treatStartDate"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                    :disabled="!isEditable"
+                    style="width: 100%"
+                    @change="handleSharedDiseaseChange"
+                  />
+                </label>
+                <label class="field">
+                  <span class="field-label">治疗结束日期</span>
+                  <el-date-picker
+                    v-model="diseaseShared.treatEndDate"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                    :disabled="!isEditable"
+                    style="width: 100%"
+                    @change="handleSharedDiseaseChange"
+                  />
+                </label>
+                <label class="field">
+                  <span class="field-label">医疗费用总额（元）</span>
+                  <el-input-number
+                    v-model="diseaseShared.medicalTotal"
+                    :min="0"
+                    :precision="2"
+                    :controls="false"
+                    :disabled="!isEditable"
+                    style="width: 100%"
+                    @change="handleSharedDiseaseChange"
+                  />
+                </label>
+                <label class="field">
+                  <span class="field-label">医保/其他报销（元）</span>
+                  <el-input-number
+                    v-model="diseaseShared.insurancePaid"
+                    :min="0"
+                    :precision="2"
+                    :controls="false"
+                    :disabled="!isEditable"
+                    style="width: 100%"
+                    @change="handleSharedDiseaseChange"
+                  />
+                </label>
+                <label class="field">
+                  <span class="field-label">个人自付费用（元）*</span>
+                  <el-input-number
+                    v-model="diseaseShared.selfPaid"
+                    :min="0"
+                    :precision="2"
+                    :controls="false"
+                    :disabled="!isEditable"
+                    style="width: 100%"
+                    @change="handleSharedDiseaseChange"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <article v-for="(row, index) in diseases" :key="row.key" class="row-card">
+              <div class="row-card__head">
                 <span>疾病 {{ index + 1 }}</span>
                 <el-button
                   v-if="isEditable"
@@ -2814,47 +2689,67 @@ onMounted(() => {
                   删除
                 </el-button>
               </div>
-              <div class="form-grid">
+              <div class="form-grid form-grid--3">
                 <label class="field">
-                  <span class="field-label">疾病诊断结果</span>
-                  <el-input v-model="row.diseaseName" :disabled="!isEditable" />
-                </label>
-                <label class="field">
-                  <span class="field-label">疾病编码（ICD-10）</span>
-                  <el-input v-model="row.diseaseCode" :disabled="!isEditable" placeholder="可手工填写" />
+                  <span class="field-label">疾病诊断结果（填编码可自动带出）</span>
+                  <el-input v-model="row.diseaseName" :disabled="!isEditable" @change="handleDetailChanged" />
                 </label>
                 <label class="field">
                   <span class="field-label">患病成员</span>
-                  <el-select v-model="row.memberName" :disabled="!isEditable" filterable clearable>
+                  <el-select
+                    v-model="row.memberName"
+                    :disabled="!isEditable"
+                    filterable
+                    clearable
+                    @change="handleDetailChanged"
+                  >
                     <el-option v-for="name in memberNameOptions" :key="name" :label="name" :value="name" />
                   </el-select>
                 </label>
                 <label class="field">
-                  <span class="field-label">所在医院</span>
-                  <el-input v-model="row.hospital" :disabled="!isEditable" placeholder="如：县人民医院" />
+                  <span class="field-label">疾病编码（ICD-10）</span>
+                  <el-input
+                    v-model="row.diseaseCode"
+                    :disabled="!isEditable"
+                    placeholder="输入编码自动带出名称"
+                    @change="handleDetailChanged"
+                  />
+                </label>
+              </div>
+              <div v-if="multiHospitalMode" class="form-grid form-grid--3 form-grid--spaced">
+                <label class="field">
+                  <span class="field-label">所在医院 *</span>
+                  <el-input
+                    v-model="row.hospital"
+                    :disabled="!isEditable"
+                    placeholder="县人民医院"
+                    @change="handleDetailChanged"
+                  />
                 </label>
                 <label class="field">
-                  <span class="field-label">治疗开始日期</span>
+                  <span class="field-label">开始</span>
                   <el-date-picker
                     v-model="row.treatStartDate"
                     type="date"
                     value-format="YYYY-MM-DD"
                     :disabled="!isEditable"
                     style="width: 100%"
+                    @change="handleDetailChanged"
                   />
                 </label>
                 <label class="field">
-                  <span class="field-label">治疗结束日期</span>
+                  <span class="field-label">结束</span>
                   <el-date-picker
                     v-model="row.treatEndDate"
                     type="date"
                     value-format="YYYY-MM-DD"
                     :disabled="!isEditable"
                     style="width: 100%"
+                    @change="handleDetailChanged"
                   />
                 </label>
                 <label class="field">
-                  <span class="field-label">医疗费用总额（元）</span>
+                  <span class="field-label">费用总额</span>
                   <el-input-number
                     v-model="row.medicalTotal"
                     :min="0"
@@ -2862,10 +2757,11 @@ onMounted(() => {
                     :controls="false"
                     :disabled="!isEditable"
                     style="width: 100%"
+                    @change="handleDetailChanged"
                   />
                 </label>
                 <label class="field">
-                  <span class="field-label">医保 / 其他报销（元）</span>
+                  <span class="field-label">报销</span>
                   <el-input-number
                     v-model="row.insurancePaid"
                     :min="0"
@@ -2873,10 +2769,11 @@ onMounted(() => {
                     :controls="false"
                     :disabled="!isEditable"
                     style="width: 100%"
+                    @change="handleDetailChanged"
                   />
                 </label>
                 <label class="field">
-                  <span class="field-label">个人自付费用（元）</span>
+                  <span class="field-label">自付 *</span>
                   <el-input-number
                     v-model="row.selfPaid"
                     :min="0"
@@ -2884,31 +2781,29 @@ onMounted(() => {
                     :controls="false"
                     :disabled="!isEditable"
                     style="width: 100%"
+                    @change="handleDetailChanged"
                   />
                 </label>
               </div>
             </article>
 
             <p v-if="diseases.length === 0" class="empty-note">尚未添加疾病明细。</p>
-            <div class="detail-total">
-              <span>自付合计</span>
-              <strong>{{ formatMoney(selfPaidTotal) }}</strong>
-            </div>
           </div>
 
-          <div v-else-if="form.difficultyType === '意外灾害'" class="detail-block">
+          <!-- 意外灾害明细 -->
+          <div v-if="form.difficultyType === '意外灾害'" class="detail-block">
             <div class="detail-head">
-              <div>
+              <div class="detail-head__title">
                 <p class="group-title">意外灾害明细</p>
-                <p class="section-note">可多条，最多 {{ MAX_DETAIL_ROWS }} 条。</p>
+                <span class="section-note">（困难类型为意外灾害时，可多条，最多 10 条）</span>
               </div>
-              <el-button v-if="isEditable" size="small" :icon="Plus" @click="addAccident">
+              <el-button size="small" :icon="Plus" :disabled="!isEditable" @click="addAccident">
                 添加意外灾害
               </el-button>
             </div>
 
-            <article v-for="(row, index) in accidents" :key="row.key" class="detail-card">
-              <div class="detail-card__head">
+            <article v-for="(row, index) in accidents" :key="row.key" class="row-card">
+              <div class="row-card__head">
                 <span>意外灾害 {{ index + 1 }}</span>
                 <el-button
                   v-if="isEditable"
@@ -2921,10 +2816,10 @@ onMounted(() => {
                   删除
                 </el-button>
               </div>
-              <div class="form-grid">
+              <div class="form-grid form-grid--2">
                 <label class="field">
-                  <span class="field-label">意外 / 灾害类型 *</span>
-                  <el-select v-model="row.accidentType" :disabled="!isEditable">
+                  <span class="field-label">意外/灾害类型 *</span>
+                  <el-select v-model="row.accidentType" :disabled="!isEditable" @change="handleDetailChanged">
                     <el-option
                       v-for="option in ACCIDENT_TYPE_OPTIONS"
                       :key="option"
@@ -2935,10 +2830,18 @@ onMounted(() => {
                 </label>
                 <label class="field">
                   <span class="field-label">受灾成员</span>
-                  <el-select v-model="row.memberName" :disabled="!isEditable" filterable clearable>
+                  <el-select
+                    v-model="row.memberName"
+                    :disabled="!isEditable"
+                    filterable
+                    clearable
+                    @change="handleDetailChanged"
+                  >
                     <el-option v-for="name in memberNameOptions" :key="name" :label="name" :value="name" />
                   </el-select>
                 </label>
+              </div>
+              <div class="form-grid form-grid--2 form-grid--spaced">
                 <label class="field">
                   <span class="field-label">发生时间</span>
                   <el-date-picker
@@ -2947,21 +2850,29 @@ onMounted(() => {
                     value-format="YYYY-MM-DD"
                     :disabled="!isEditable"
                     style="width: 100%"
+                    @change="handleDetailChanged"
                   />
                 </label>
                 <label class="field">
                   <span class="field-label">发生地点</span>
-                  <el-input v-model="row.happenPlace" :disabled="!isEditable" />
-                </label>
-                <label class="field field--wide">
-                  <span class="field-label">人身伤害 / 伤残情况</span>
                   <el-input
-                    v-model="row.injurySituation"
-                    type="textarea"
-                    :rows="2"
+                    v-model="row.happenPlace"
                     :disabled="!isEditable"
+                    @change="handleDetailChanged"
                   />
                 </label>
+              </div>
+              <label class="field field--spaced">
+                <span class="field-label">人身伤害/伤残情况</span>
+                <el-input
+                  v-model="row.injurySituation"
+                  type="textarea"
+                  :rows="2"
+                  :disabled="!isEditable"
+                  @change="handleDetailChanged"
+                />
+              </label>
+              <div class="form-grid form-grid--2 form-grid--spaced">
                 <label class="field">
                   <span class="field-label">财产损失（元）</span>
                   <el-input-number
@@ -2971,10 +2882,11 @@ onMounted(() => {
                     :controls="false"
                     :disabled="!isEditable"
                     style="width: 100%"
+                    @change="handleDetailChanged"
                   />
                 </label>
                 <label class="field">
-                  <span class="field-label">已获保险 / 赔偿（元）</span>
+                  <span class="field-label">已获保险/赔偿（元）</span>
                   <el-input-number
                     v-model="row.compensationPaid"
                     :min="0"
@@ -2982,35 +2894,37 @@ onMounted(() => {
                     :controls="false"
                     :disabled="!isEditable"
                     style="width: 100%"
+                    @change="handleDetailChanged"
                   />
                 </label>
-                <label class="field">
-                  <span class="field-label">责任认定情况</span>
-                  <el-input v-model="row.responsibilityDesc" :disabled="!isEditable" />
-                </label>
-                <label class="field">
-                  <span class="field-label">佐证材料说明</span>
-                  <el-input v-model="row.materialDesc" :disabled="!isEditable" />
-                </label>
               </div>
+              <label class="field field--spaced">
+                <span class="field-label">责任认定情况</span>
+                <el-input v-model="row.responsibilityDesc" :disabled="!isEditable" @change="handleDetailChanged" />
+              </label>
+              <label class="field field--spaced">
+                <span class="field-label">佐证材料说明</span>
+                <el-input v-model="row.materialDesc" :disabled="!isEditable" @change="handleDetailChanged" />
+              </label>
             </article>
 
             <p v-if="accidents.length === 0" class="empty-note">尚未添加意外灾害明细。</p>
           </div>
 
-          <div v-else-if="form.difficultyType === '教育支出'" class="detail-block">
+          <!-- 教育支出明细 -->
+          <div v-if="form.difficultyType === '教育支出'" class="detail-block">
             <div class="detail-head">
-              <div>
+              <div class="detail-head__title">
                 <p class="group-title">教育支出明细</p>
-                <p class="section-note">可多条，最多 {{ MAX_DETAIL_ROWS }} 条。</p>
+                <span class="section-note">（困难类型为教育支出时，可多条，最多 10 条）</span>
               </div>
-              <el-button v-if="isEditable" size="small" :icon="Plus" @click="addEducation">
+              <el-button size="small" :icon="Plus" :disabled="!isEditable" @click="addEducation">
                 添加教育支出
               </el-button>
             </div>
 
-            <article v-for="(row, index) in educations" :key="row.key" class="detail-card">
-              <div class="detail-card__head">
+            <article v-for="(row, index) in educations" :key="row.key" class="row-card">
+              <div class="row-card__head">
                 <span>教育支出 {{ index + 1 }}</span>
                 <el-button
                   v-if="isEditable"
@@ -3023,14 +2937,14 @@ onMounted(() => {
                   删除
                 </el-button>
               </div>
-              <div class="form-grid">
+              <div class="form-grid form-grid--2">
                 <label class="field">
                   <span class="field-label">学生姓名 *</span>
-                  <el-input v-model="row.studentName" :disabled="!isEditable" />
+                  <el-input v-model="row.studentName" :disabled="!isEditable" @change="handleDetailChanged" />
                 </label>
                 <label class="field">
                   <span class="field-label">就学阶段 *</span>
-                  <el-select v-model="row.educationStage" :disabled="!isEditable">
+                  <el-select v-model="row.educationStage" :disabled="!isEditable" @change="handleDetailChanged">
                     <el-option
                       v-for="option in EDUCATION_STAGE_OPTIONS"
                       :key="option"
@@ -3039,13 +2953,20 @@ onMounted(() => {
                     />
                   </el-select>
                 </label>
+              </div>
+              <div class="form-grid form-grid--2 form-grid--spaced">
                 <label class="field">
                   <span class="field-label">就读学校</span>
-                  <el-input v-model="row.schoolName" :disabled="!isEditable" />
+                  <el-input v-model="row.schoolName" :disabled="!isEditable" @change="handleDetailChanged" />
                 </label>
                 <label class="field">
                   <span class="field-label">学年制</span>
-                  <el-select v-model="row.schoolDuration" :disabled="!isEditable" clearable>
+                  <el-select
+                    v-model="row.schoolDuration"
+                    :disabled="!isEditable"
+                    clearable
+                    @change="handleDetailChanged"
+                  >
                     <el-option
                       v-for="option in SCHOOL_DURATION_OPTIONS"
                       :key="option.value"
@@ -3054,8 +2975,10 @@ onMounted(() => {
                     />
                   </el-select>
                 </label>
+              </div>
+              <div class="form-grid form-grid--2 form-grid--spaced">
                 <label class="field">
-                  <span class="field-label">学费 / 住宿费（元）</span>
+                  <span class="field-label">学费/住宿费（元）</span>
                   <el-input-number
                     v-model="row.tuitionFee"
                     :min="0"
@@ -3063,6 +2986,7 @@ onMounted(() => {
                     :controls="false"
                     :disabled="!isEditable"
                     style="width: 100%"
+                    @change="handleDetailChanged"
                   />
                 </label>
                 <label class="field">
@@ -3073,6 +2997,7 @@ onMounted(() => {
                     value-format="YYYY-MM-DD"
                     :disabled="!isEditable"
                     style="width: 100%"
+                    @change="handleDetailChanged"
                   />
                 </label>
               </div>
@@ -3081,119 +3006,219 @@ onMounted(() => {
             <p v-if="educations.length === 0" class="empty-note">尚未添加教育支出明细。</p>
           </div>
 
-          <p v-else class="empty-note">遇困类型为「其他困难」，无需填写专项明细。</p>
+          <label class="field field--spaced">
+            <span class="field-label">申请救助原因 / 困难情况 *</span>
+            <el-input
+              v-model="form.difficultyReason"
+              type="textarea"
+              :rows="4"
+              :disabled="!isEditable"
+              placeholder="如：因病、因灾等突发困难，家庭基本生活暂时陷入困境..."
+            />
+          </label>
+          <label class="field field--spaced">
+            <span class="field-label">享受的政策救助情况</span>
+            <el-input
+              v-model="form.policyEnjoyed"
+              type="textarea"
+              :rows="3"
+              :disabled="!isEditable"
+              placeholder="如：最低生活保障/特困人员/最低生活保障边缘家庭等已享受政策..."
+            />
+          </label>
+          <label class="field field--spaced">
+            <span class="field-label">家庭成员状态</span>
+            <el-input
+              v-model="form.familyMemberStatus"
+              type="textarea"
+              :rows="3"
+              :disabled="!isEditable"
+              placeholder="如：家庭成员健康/患病/劳动能力等情况..."
+            />
+          </label>
         </NcCard>
-      </section>
+      </div>
 
+      <!-- ════════════ 第 4 页：金额与公示 ════════════ -->
+      <div v-show="activeSection === 2" class="form-section">
+        <NcCard v-if="isSmall" title="救助金额（小额快救）">
+          <div class="form-grid form-grid--3">
+            <label class="field">
+              <span class="field-label">遇困人数（含户主） *</span>
+              <el-input-number
+                v-model="form.reliefPersonCount"
+                :min="1"
+                :max="familySizeDisplay"
+                :disabled="!isEditable"
+                controls-position="right"
+                style="width: 100%"
+                @change="handlePersonCountChange"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">政策档位 *</span>
+              <el-select
+                v-model="form.standardTier"
+                :disabled="!isEditable || smallTiersLoading || smallTiers.length === 0"
+                @change="handleTierSelect"
+              >
+                <el-option
+                  v-for="tier in smallTiers"
+                  :key="tier.code"
+                  :label="`${tier.label}（上限 ${formatMoney(tier.ceilingAmount)}）`"
+                  :value="tier.code"
+                />
+              </el-select>
+            </label>
+            <label class="field">
+              <span class="field-label">确定金额（可下调） *</span>
+              <el-input-number
+                v-model="form.confirmAmount"
+                :min="0"
+                :max="selectedTier?.ceilingAmount"
+                :precision="2"
+                :step="10"
+                :disabled="!isEditable || !selectedTier"
+                controls-position="right"
+                style="width: 100%"
+              />
+            </label>
+          </div>
+          <el-alert
+            v-if="smallTiersError"
+            class="amount-alert"
+            type="error"
+            :title="smallTiersError"
+            :closable="false"
+            show-icon
+          >
+            <el-button link type="primary" @click="loadSmallTiers">重试</el-button>
+          </el-alert>
+          <p class="section-note section-note--spaced">{{ reliefPersonCountHint }}</p>
+          <p class="section-note">{{ amountHint }}</p>
+        </NcCard>
+
+        <NcCard v-else title="常规救助金额">
+          <span class="field-label">发放渠道 *</span>
+          <div class="choice-grid">
+            <button
+              type="button"
+              class="choice-card"
+              :class="{ 'is-selected': effectiveChannel === 'County', 'is-disabled': !isEditable }"
+              @click="selectChannel('County')"
+            >
+              <strong>上级部门发放</strong>
+              <span>金额由上级核定，系统不填</span>
+            </button>
+            <button
+              type="button"
+              class="choice-card"
+              :class="{ 'is-selected': effectiveChannel === 'Reserve', 'is-disabled': !isEditable }"
+              @click="selectChannel('Reserve')"
+            >
+              <strong>备用金发放</strong>
+              <span>乡镇备用金，手工填金额</span>
+            </button>
+          </div>
+
+          <label class="field field--spaced">
+            <span class="field-label">家庭遇困人数（含户主） *</span>
+            <el-input-number
+              v-model="form.reliefPersonCount"
+              :min="1"
+              :max="familySizeDisplay"
+              :disabled="!isEditable"
+              controls-position="right"
+              style="width: 100%"
+              @change="handlePersonCountChange"
+            />
+            <span class="field-hint">{{ reliefPersonCountHint }}</span>
+          </label>
+
+          <label v-if="effectiveChannel === 'Reserve'" class="field field--spaced">
+            <span class="field-label">备用金救助金额（元） *</span>
+            <el-input-number
+              v-model="form.confirmAmount"
+              :min="0"
+              :precision="2"
+              :step="100"
+              :disabled="!isEditable"
+              controls-position="right"
+              style="width: 100%"
+            />
+          </label>
+          <p class="section-note section-note--spaced">{{ amountHint }}</p>
+        </NcCard>
+
+        <NcCard title="入户核实">
+          <label class="field">
+            <span class="field-label">入户核实情况</span>
+            <el-input
+              v-model="form.verifyResult"
+              type="textarea"
+              :rows="3"
+              :disabled="!isEditable"
+              placeholder="入户调查核实情况..."
+            />
+          </label>
+          <p v-if="isSmall" class="section-note section-note--spaced">
+            小额快救免公示、免经济状况核对（保留入户调查记录）。
+          </p>
+          <div class="form-grid form-grid--3 form-grid--spaced">
+            <label v-if="!isSmall" class="field">
+              <span class="field-label">公示开始日期（申请日次日）</span>
+              <el-input :model-value="publicizeStartText" readonly />
+            </label>
+            <label v-if="!isSmall" class="field">
+              <span class="field-label">公示结束日期（公示第3天）</span>
+              <el-input :model-value="publicizeEndText" readonly />
+            </label>
+            <label class="field" :class="{ 'field--start': isSmall }">
+              <span class="field-label">乡镇验收人</span>
+              <el-input v-model="form.acceptancePerson" :disabled="!isEditable" maxlength="50" />
+            </label>
+          </div>
+        </NcCard>
+      </div>
+
+      <el-alert
+        v-if="saveError"
+        class="save-error"
+        type="error"
+        :title="saveError"
+        :closable="false"
+        show-icon
+      />
+
+      <!-- 底部固定按钮栏：仅 PC 的 4 个动作 -->
       <div class="action-bar">
         <div class="action-bar__info">
           <el-tag size="small" effect="plain">{{ statusText }}</el-tag>
-          <span>{{ actionHint }}</span>
+          <span>第 {{ sectionPosition + 1 }} / {{ SECTION_ORDER.length }} 页</span>
+          <span v-if="modeHint">{{ modeHint }}</span>
         </div>
 
         <div class="action-bar__buttons">
-          <el-button @click="backToList">取消</el-button>
-
-          <template v-if="form.id > 0 && !isView">
-            <el-button
-              v-if="isEditable"
-              type="danger"
-              plain
-              :title="deleteDisabledReason"
-              :disabled="!canDeleteAction || Boolean(actionLoading) || saving"
-              :loading="actionLoading === 'delete'"
-              @click="runStatusAction('delete')"
-            >
-              删除
-            </el-button>
-            <el-button
-              :title="returnDisabledReason"
-              :disabled="!canReturnAction || Boolean(actionLoading) || saving"
-              :loading="actionLoading === 'return'"
-              @click="runStatusAction('return')"
-            >
-              退回补正
-            </el-button>
-            <el-button
-              type="danger"
-              plain
-              :title="rejectDisabledReason"
-              :disabled="!canRejectAction || Boolean(actionLoading) || saving"
-              :loading="actionLoading === 'reject'"
-              @click="runStatusAction('reject')"
-            >
-              不予救助
-            </el-button>
-            <el-button
-              type="warning"
-              plain
-              :title="stopDisabledReason"
-              :disabled="!canStopAction || Boolean(actionLoading) || saving"
-              :loading="actionLoading === 'stop'"
-              @click="runStatusAction('stop')"
-            >
-              终止
-            </el-button>
-            <el-button
-              type="success"
-              plain
-              :title="fileDisabledReason"
-              :disabled="!canFileAction || Boolean(actionLoading) || saving"
-              :loading="actionLoading === 'file'"
-              @click="runStatusAction('file')"
-            >
-              登记备案
-            </el-button>
-            <el-button
-              type="success"
-              :title="confirmDisabledReason"
-              :disabled="!canConfirmAction || Boolean(actionLoading) || saving"
-              :loading="actionLoading === 'confirm'"
-              @click="runStatusAction('confirm')"
-            >
-              {{ confirmLabel }}
-            </el-button>
-          </template>
-
+          <el-button :disabled="!canGoPrevious" @click="goPrevious">上一页</el-button>
+          <el-button :disabled="!canGoNext" @click="goNext">下一页</el-button>
           <el-button
-            v-if="form.id > 0"
-            :icon="Document"
-            :disabled="Boolean(actionLoading) || saving"
-            @click="openPrint"
+            v-if="isEditable"
+            :loading="saving"
+            :disabled="confirming"
+            @click="saveDraft"
           >
-            打印
+            保存草稿
           </el-button>
-
-          <template v-if="isEditable">
-            <el-button :loading="saving" :disabled="Boolean(actionLoading)" @click="saveDraft">
-              保存草稿
-            </el-button>
-            <el-button
-              type="primary"
-              plain
-              :loading="saving || actionLoading === 'submit'"
-              :disabled="Boolean(actionLoading)"
-              @click="saveAndSubmit"
-            >
-              保存并提交
-            </el-button>
-            <el-button
-              type="primary"
-              :icon="Document"
-              :loading="saving"
-              :disabled="Boolean(actionLoading)"
-              @click="saveAndPrint"
-            >
-              保存并打印
-            </el-button>
-          </template>
-          <el-button v-else-if="isView && form.id > 0" @click="backToList">返回列表</el-button>
+          <el-button
+            v-if="canSaveAndConfirm"
+            type="primary"
+            :loading="saving || confirming"
+            @click="saveAndConfirm"
+          >
+            保存并确认
+          </el-button>
         </div>
       </div>
-
-      <p v-if="autoFilling" class="auto-fill-note">
-        正在回填申请人来源、政策快照与家庭健康摘要…
-      </p>
     </template>
 
     <el-dialog
@@ -3203,7 +3228,7 @@ onMounted(() => {
       append-to-body
     >
       <p class="change-date-note">
-        改期后将重新生成申请编号，并按新日期重算公示、验收与办理时限；已打印文书需重新打印。
+        修改后将重新生成申请编号（LZ…），并重算公示、验收与办理时限；已打印的文书需重新出文书才会更新。
       </p>
       <el-date-picker
         v-model="changeDateValue"
@@ -3216,19 +3241,10 @@ onMounted(() => {
       <template #footer>
         <el-button :disabled="changeDateSaving" @click="changeDateVisible = false">取消</el-button>
         <el-button type="primary" :loading="changeDateSaving" @click="submitChangeDate">
-          确认改期
+          确认修改
         </el-button>
       </template>
     </el-dialog>
-
-    <TempReliefPrintDialog
-      v-model="printVisible"
-      :application-id="printableId"
-      :application-no="form.applicationNo"
-      :applicant-name="applicant.name"
-      :relief-type="form.reliefType"
-      mode="print"
-    />
 
     <TempReliefPhotoPanel
       v-model="photoVisible"
@@ -3255,7 +3271,8 @@ onMounted(() => {
   gap: 14px;
 }
 
-.load-error {
+.load-error,
+.save-error {
   margin: 0;
 }
 
@@ -3291,13 +3308,17 @@ onMounted(() => {
   font-size: var(--nc-text-xs);
 }
 
-.section-nav {
+.form-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
 }
 
-.section-nav__item {
+.form-tabs__item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   padding: 11px 12px;
   border: 1px solid var(--nc-line);
   border-radius: var(--nc-radius-sm);
@@ -3308,7 +3329,7 @@ onMounted(() => {
   cursor: pointer;
 }
 
-.section-nav__item.is-active {
+.form-tabs__item.is-active {
   border-color: var(--nc-seal);
   background: var(--nc-seal-soft);
   color: var(--nc-seal);
@@ -3319,13 +3340,75 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  scroll-margin-top: 76px;
+}
+
+.card-hint {
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
+}
+
+.choice-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.choice-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--nc-line);
+  border-radius: var(--nc-radius-sm);
+  background: var(--nc-paper-3);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.choice-card strong {
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-lg);
+}
+
+.choice-card span {
+  color: var(--nc-muted);
+  font-size: var(--nc-text-sm);
+  line-height: 1.55;
+}
+
+.choice-card.is-selected {
+  border-color: var(--nc-seal);
+  background: var(--nc-seal-soft);
+}
+
+.choice-card.is-selected strong {
+  color: var(--nc-seal);
+}
+
+.choice-card.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
 }
 
 .form-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px 14px;
+}
+
+.form-grid--3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.form-grid--2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.form-grid--spaced {
+  margin-top: 14px;
 }
 
 .field {
@@ -3335,12 +3418,20 @@ onMounted(() => {
   min-width: 0;
 }
 
-.field--wide {
+.field--spaced {
+  margin-top: 14px;
+}
+
+.field--span-2 {
   grid-column: span 2;
 }
 
-.field--spaced {
-  margin-top: 14px;
+.field--span-3 {
+  grid-column: span 3;
+}
+
+.field--start {
+  grid-column-start: 3;
 }
 
 .field-hint {
@@ -3354,6 +3445,18 @@ onMounted(() => {
   font-size: var(--nc-text-sm);
 }
 
+.inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.inline-actions :deep(.el-input) {
+  flex: 1;
+  min-width: 0;
+}
+
 .readonly-with-action {
   display: flex;
   align-items: center;
@@ -3362,18 +3465,6 @@ onMounted(() => {
 
 .readonly-with-action :deep(.el-input) {
   flex: 1;
-}
-
-.group-title {
-  margin: 0;
-  color: var(--nc-ink);
-  font-family: var(--nc-font-serif);
-  font-size: var(--nc-text-md);
-  font-weight: 700;
-}
-
-.group-title--spaced {
-  margin-top: 18px;
 }
 
 .section-note {
@@ -3387,84 +3478,10 @@ onMounted(() => {
   margin-top: 10px;
 }
 
-.scenario-grid {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.scenario-card {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 10px 12px;
-  border: 1px solid var(--nc-line);
-  border-radius: var(--nc-radius-sm);
-  background: var(--nc-paper-3);
-}
-
-.scenario-card__label {
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: 10px;
-  letter-spacing: 0.12em;
-}
-
-.scenario-card__value {
-  color: var(--nc-ink-2);
-  font-size: var(--nc-text-sm);
-  line-height: 1.5;
-}
-
-.scenario-foot {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 18px;
-  margin-top: 10px;
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-}
-
-.type-choice {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 14px;
-}
-
-.type-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 5px;
-  padding: 14px 16px;
-  border: 1px solid var(--nc-line);
-  border-radius: var(--nc-radius-sm);
-  background: var(--nc-paper-3);
-  font-family: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.type-card strong {
-  color: var(--nc-ink);
-  font-family: var(--nc-font-serif);
-  font-size: var(--nc-text-lg);
-}
-
-.type-card span {
-  color: var(--nc-muted);
-  font-size: var(--nc-text-sm);
-  line-height: 1.55;
-}
-
-.type-card.is-selected {
-  border-color: var(--nc-seal);
-  background: var(--nc-seal-soft);
-}
-
-.type-card.is-selected strong {
+.error-note {
+  margin: 6px 0 0;
   color: var(--nc-seal);
+  font-size: var(--nc-text-xs);
 }
 
 .candidate-search {
@@ -3482,6 +3499,8 @@ onMounted(() => {
   display: grid;
   gap: 8px;
   margin-top: 12px;
+  max-height: 360px;
+  overflow-y: auto;
 }
 
 .candidate-card {
@@ -3489,10 +3508,19 @@ onMounted(() => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  width: 100%;
   padding: 12px 14px;
   border: 1px solid var(--nc-line);
   border-radius: var(--nc-radius-sm);
   background: var(--nc-paper-soft);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.candidate-card.is-selected {
+  border-color: var(--nc-seal);
+  background: var(--nc-seal-soft);
 }
 
 .candidate-card__main {
@@ -3538,6 +3566,13 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+.candidate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .candidate-summary {
   display: flex;
   align-items: center;
@@ -3552,144 +3587,122 @@ onMounted(() => {
   font-size: var(--nc-text-sm);
 }
 
-.manual-alert,
-.annual-alert {
+.manual-alert {
   margin-top: 12px;
 }
 
-.identity-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.identity-actions__hint {
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-}
-
-.population-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 14px;
-  padding: 12px 14px;
+.sub-card {
+  margin-top: 16px;
+  padding: 14px 16px;
   border: 1px solid var(--nc-line);
   border-radius: var(--nc-radius-sm);
   background: var(--nc-paper-3);
 }
 
-.population-panel__head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.population-panel__loading {
-  color: var(--nc-muted);
-  font-size: var(--nc-text-xs);
-}
-
-.population-panel__basis {
-  margin: 0;
-  color: var(--nc-ink-2);
-  font-size: var(--nc-text-sm);
-  line-height: 1.6;
-}
-
-.population-panel__ledgers {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.population-panel__alert {
-  margin-top: 2px;
-}
-
-.population-panel__error {
-  margin: 0;
-  color: var(--nc-seal);
-  font-size: var(--nc-text-xs);
-}
-
-.difficulty-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin: 18px 0 10px;
-}
-
-.policy-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.small-amount {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.small-amount__head {
+.sub-card__head {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  justify-content: space-between;
   gap: 8px;
+  margin-bottom: 12px;
 }
 
-.amount-alert {
-  margin: 0;
+.sub-card__title {
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-md);
+  font-weight: 700;
 }
 
-.amount-placeholder {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 12px 14px;
-  border: 1px dashed var(--nc-line-strong);
-  border-radius: var(--nc-radius-sm);
-  background: var(--nc-paper-3);
-}
-
-.amount-placeholder span {
+.sub-card__hint {
   color: var(--nc-muted);
   font-size: var(--nc-text-xs);
 }
 
-.amount-placeholder strong {
-  color: var(--nc-ink-2);
-  font-size: var(--nc-text-sm);
+.address-extra {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 12px 14px;
+  margin-top: 12px;
 }
 
-.overdue-note {
+.beneficiary-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
   margin-top: 12px;
-  padding: 8px 10px;
-  border-left: 3px solid var(--nc-seal);
+  padding: 10px 12px;
+  border-radius: var(--nc-radius-sm);
   background: var(--nc-seal-soft);
   color: var(--nc-seal-dark);
   font-size: var(--nc-text-sm);
 }
 
-.member-card,
-.detail-card {
+.group-title {
+  margin: 0;
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-md);
+  font-weight: 700;
+}
+
+.detail-block {
+  margin-top: 18px;
+  padding: 12px;
+  border: 1px solid var(--nc-line);
+  border-radius: var(--nc-radius-sm);
+  background: var(--nc-paper-3);
+}
+
+.detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.detail-head__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.detail-head__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.switch-label {
+  color: var(--nc-ink-2);
+  font-size: var(--nc-text-sm);
+}
+
+.shared-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--nc-line-faint);
+  border-radius: var(--nc-radius-sm);
+  background: var(--nc-paper);
+}
+
+.row-card {
   margin-top: 10px;
   padding: 12px 14px;
   border: 1px solid var(--nc-line);
   border-radius: var(--nc-radius-sm);
-  background: var(--nc-paper-soft);
+  background: var(--nc-paper);
 }
 
-.member-card__head,
-.detail-card__head {
+.row-card__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -3701,33 +3714,6 @@ onMounted(() => {
   letter-spacing: 0.06em;
 }
 
-.detail-block {
-  margin-top: 4px;
-}
-
-.detail-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.detail-total {
-  display: flex;
-  justify-content: flex-end;
-  align-items: baseline;
-  gap: 10px;
-  margin-top: 10px;
-  color: var(--nc-muted);
-  font-size: var(--nc-text-sm);
-}
-
-.detail-total strong {
-  color: var(--nc-ink);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-md);
-}
-
 .empty-note {
   margin: 10px 0 0;
   padding: 12px;
@@ -3736,6 +3722,18 @@ onMounted(() => {
   color: var(--nc-muted);
   font-size: var(--nc-text-sm);
   text-align: center;
+}
+
+.amount-alert {
+  margin: 12px 0 0;
+}
+
+.auto-fill-note {
+  margin: 12px 0 0;
+  color: var(--nc-muted);
+  font-family: var(--nc-font-mono);
+  font-size: var(--nc-text-xs);
+  text-align: right;
 }
 
 .action-bar {
@@ -3769,14 +3767,6 @@ onMounted(() => {
   gap: 8px;
 }
 
-.auto-fill-note {
-  margin: 0;
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-xs);
-  text-align: right;
-}
-
 .change-date-note {
   margin: 0 0 10px;
   color: var(--nc-ink-2);
@@ -3789,37 +3779,50 @@ onMounted(() => {
 }
 
 @media (max-width: 1200px) {
-  .scenario-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
   .form-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .field--wide {
+  .form-grid--3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .field--span-3 {
     grid-column: span 2;
+  }
+
+  .field--start {
+    grid-column-start: auto;
   }
 }
 
 @media (max-width: 700px) {
-  .section-nav,
-  .scenario-grid,
+  .form-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .choice-grid,
   .form-grid,
-  .type-choice {
+  .form-grid--2,
+  .form-grid--3,
+  .address-extra {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .field--wide {
+  .field--span-2,
+  .field--span-3 {
     grid-column: auto;
   }
 
-  .candidate-card,
   .candidate-summary,
   .detail-head,
-  .difficulty-head {
+  .sub-card__head {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .inline-actions {
+    flex-wrap: wrap;
   }
 
   .action-bar {
@@ -3839,10 +3842,6 @@ onMounted(() => {
 
   .readonly-with-action {
     flex-wrap: wrap;
-  }
-
-  .section-nav__item {
-    text-align: left;
   }
 }
 </style>

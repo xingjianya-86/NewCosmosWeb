@@ -1,16 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { MoreFilled, Plus, Printer, Refresh, Search } from '@element-plus/icons-vue'
+import { Clock, CircleCheck, Plus, Search, Warning } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
 import {
-  changeTempReliefApplyDate,
   confirmTempReliefApplication,
   deleteTempReliefApplication,
   fileTempReliefApplication,
-  getArchivedTempReliefApplications,
-  getTempReliefApplication,
   getTempReliefSummary,
   listTempReliefApplications,
   rejectTempReliefApplication,
@@ -23,7 +20,6 @@ import NcPageHeader from '@/components/NcPageHeader.vue'
 import NcStat from '@/components/NcStat.vue'
 import { useMediaQuery } from '@/composables/useMediaQuery'
 import type {
-  TempReliefDetail,
   TempReliefListItem,
   TempReliefPaymentChannel,
   TempReliefPopulationStatus,
@@ -31,13 +27,11 @@ import type {
   TempReliefStatus,
   TempReliefSummary,
 } from '@/types/tempRelief'
+import TempReliefListPhotoDialog from './TempReliefListPhotoDialog.vue'
 import TempReliefPrintDialog from './TempReliefPrintDialog.vue'
 
-type StatusTab = 'pending' | 'submitted' | 'confirmed' | 'closed' | 'all'
-type ViewMode = 'active' | 'archive'
 type PopulationFilter = '' | TempReliefPopulationStatus
 type CategoryFilter = '' | 'large-county' | 'large-reserve' | 'small'
-type PrintDialogMode = 'print' | 'reprint'
 type ButtonTone = 'primary' | 'success' | 'warning' | 'danger' | 'info'
 type ActionKey =
   | 'view'
@@ -48,41 +42,59 @@ type ActionKey =
   | 'confirm'
   | 'file'
   | 'stop'
-  | 'change-date'
   | 'delete'
-  | 'print'
+  | 'photo'
   | 'reprint'
 
 interface RowAction {
   key: ActionKey
   label: string
   type: ButtonTone
+  plain?: boolean
 }
 
 interface StatusTabDefinition {
-  value: StatusTab
+  value: number
   label: string
-  status?: string
+  statuses: string
+  emptyText: string
+  pageSize: number
 }
 
 const STATUS_TABS: StatusTabDefinition[] = [
-  { value: 'pending', label: '待办', status: 'Draft,Returned' },
-  { value: 'submitted', label: '已提交', status: 'Submitted' },
-  { value: 'confirmed', label: '已确认', status: 'Confirmed' },
-  { value: 'closed', label: '已终止·不予', status: 'Stopped,Rejected' },
-  { value: 'all', label: '全部' },
+  {
+    value: 0,
+    label: '办理中',
+    statuses: 'Draft,Submitted,Returned',
+    emptyText: '暂无办理中记录',
+    pageSize: 20,
+  },
+  {
+    value: 1,
+    label: '已确认',
+    statuses: 'Confirmed',
+    emptyText: '暂无已确认记录',
+    pageSize: 10,
+  },
+  {
+    value: 2,
+    label: '已终结',
+    statuses: 'Stopped,Rejected',
+    emptyText: '暂无已终结记录',
+    pageSize: 20,
+  },
 ]
 
 const POPULATION_OPTIONS: Array<{ value: PopulationFilter; label: string }> = [
-  { value: '', label: '全部大类' },
-  { value: 'Insured', label: '在册' },
-  { value: 'Uninsured', label: '非在册' },
+  { value: '', label: '全部人群' },
+  { value: 'Insured', label: '在保障人群内' },
+  { value: 'Uninsured', label: '不在保障人群内' },
 ]
 
 const CATEGORY_OPTIONS: Array<{ value: CategoryFilter; label: string }> = [
   { value: '', label: '全部小类' },
-  { value: 'large-county', label: '常规·上级' },
-  { value: 'large-reserve', label: '常规·备用金' },
+  { value: 'large-county', label: '常规·上级发放' },
+  { value: 'large-reserve', label: '常规·备用金发放' },
   { value: 'small', label: '小额快救' },
 ]
 
@@ -98,141 +110,43 @@ const STATUS_TEXT_FALLBACK: Record<TempReliefStatus, string> = {
 const router = useRouter()
 const isNarrow = useMediaQuery('(max-width: 960px)')
 
-const mode = ref<ViewMode>('active')
-const activeTab = ref<StatusTab>('pending')
+/** PC 默认选中第 2 个 Tab「已确认」。 */
+const activeTab = ref(1)
 const keyword = ref('')
 const populationFilter = ref<PopulationFilter>('')
 const categoryFilter = ref<CategoryFilter>('')
-const townFilter = ref('')
-
-const currentYear = new Date().getFullYear()
-const yearOptions = Array.from({ length: 11 }, (_, index) => currentYear + 1 - index)
-const monthOptions = Array.from({ length: 12 }, (_, index) => index + 1)
-const yearFilter = ref<number | ''>(currentYear)
-const monthFilter = ref<number | ''>('')
 
 const page = ref(1)
-const pageSize = ref(20)
 const items = ref<TempReliefListItem[]>([])
-const summary = ref<TempReliefSummary | null>(null)
-/** 待办理精确件数（Draft + Returned），独立计数避免与「已提交」重叠。 */
-const pendingTodoCount = ref<number | null>(null)
 const totalCount = ref(0)
 const totalPages = ref(0)
 const loading = ref(false)
-const summaryLoading = ref(false)
 const loadError = ref('')
 
+const counts = ref<{ draft: number | null; confirmed: number | null; stopped: number | null }>({
+  draft: null,
+  confirmed: null,
+  stopped: null,
+})
+const summary = ref<TempReliefSummary | null>(null)
+
+const photoVisible = ref(false)
+const photoTarget = ref<TempReliefListItem | null>(null)
 const printVisible = ref(false)
-const printMode = ref<PrintDialogMode>('print')
 const printTarget = ref<TempReliefListItem | null>(null)
 
 let requestTicket = 0
+let countsTicket = 0
 
-/**
- * 列表契约目前未返回「遇困人数 / 备案状态」，按页懒补详情；
- * 服务端列表补齐这些字段后 needsRowDetail 自动跳过，不再产生额外请求。
- */
-const detailCache = new Map<number, TempReliefDetail>()
-const detailPromises = new Map<number, Promise<TempReliefDetail>>()
-
-const isArchive = computed(() => mode.value === 'archive')
+const currentTab = computed(() => STATUS_TABS[activeTab.value] ?? STATUS_TABS[0])
+const pageSize = computed(() => currentTab.value.pageSize)
 const displayTotalPages = computed(() => Math.max(totalPages.value, 1))
-const hasKeyword = computed(() => keyword.value.trim().length > 0)
-const hasFilter = computed(() => {
-  if (isArchive.value) {
-    return hasKeyword.value || monthFilter.value !== '' || yearFilter.value !== currentYear
-  }
-  return (
-    hasKeyword.value ||
-    populationFilter.value !== '' ||
-    categoryFilter.value !== '' ||
-    townFilter.value.trim().length > 0
-  )
-})
-const paginationLayout = computed(() =>
-  isNarrow.value ? 'prev, pager, next' : 'total, sizes, prev, pager, next, jumper',
-)
-const currentTab = computed(
-  () => STATUS_TABS.find((tab) => tab.value === activeTab.value) ?? STATUS_TABS[0],
-)
-const currentTabLabel = computed(() => currentTab.value.label)
-
-const tabCounts = computed<Record<StatusTab, number | null>>(() => {
-  const value = summary.value
-  if (!value) {
-    return {
-      pending: pendingTodoCount.value,
-      submitted: null,
-      confirmed: null,
-      closed: null,
-      all: null,
-    }
-  }
-  const pending = pendingTodoCount.value ?? value.pendingCount
-  const submitted = value.submittedCount
-  const confirmed = value.confirmedCount
-  const closed = value.stoppedCount
-  const all =
-    pending !== null && submitted !== null && confirmed !== null && closed !== null
-      ? pending + submitted + confirmed + closed
-      : null
-  return { pending, submitted, confirmed, closed, all }
-})
-
-const summaryAmountText = computed(() => {
-  const amount = summary.value?.yearConfirmedAmount
-  return amount === null || amount === undefined ? '—' : formatNumber(amount)
-})
-
-const listSubtitle = computed(() => {
-  if (loadError.value) return '数据加载失败'
-  if (loading.value && items.value.length === 0) return '正在读取临时救助记录…'
-  if (isArchive.value) {
-    const period =
-      yearFilter.value === ''
-        ? '全部年份'
-        : monthFilter.value === ''
-          ? `${yearFilter.value} 年`
-          : `${yearFilter.value} 年 ${monthFilter.value} 月`
-    return `${period} · 已完结 ${totalCount.value} 条`
-  }
-  const suffix = hasKeyword.value ? ' · 已应用关键字筛选' : ''
-  return `${currentTabLabel.value} · 共 ${totalCount.value} 条记录${suffix}`
-})
-
-const emptyText = computed(() => {
-  if (isArchive.value) {
-    if (hasKeyword.value) return '没有找到匹配的已完结临时救助档案'
-    return monthFilter.value === ''
-      ? '该年份暂无已完结的临时救助档案'
-      : '该月份暂无已完结的临时救助档案'
-  }
-  if (hasKeyword.value) return '没有找到匹配的临时救助申请'
-  switch (activeTab.value) {
-    case 'pending':
-      return '暂无待办理的临时救助申请'
-    case 'submitted':
-      return '暂无已提交、等待县确认的申请'
-    case 'confirmed':
-      return '暂无已确认的临时救助记录'
-    case 'closed':
-      return '暂无已终止或不予救助的记录'
-    default:
-      return '暂无临时救助记录'
-  }
-})
-
-function formatNumber(value: number): string {
-  return new Intl.NumberFormat('zh-CN', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(value)
-}
-
-function formatMoney(value: number | null | undefined): string {
-  return value === null || value === undefined ? '—' : `${formatNumber(value)} 元`
-}
+const paginationLayout = 'prev, pager, next'
+const tabCounts = computed<number[]>(() => [
+  counts.value.draft ?? 0,
+  counts.value.confirmed ?? 0,
+  counts.value.stopped ?? 0,
+])
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return '—'
@@ -240,96 +154,43 @@ function formatDate(value: string | null | undefined): string {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : '—'
 }
 
-function statValue(value: number | null | undefined): string | number {
-  return value ?? '—'
+function formatInt(value: number): string {
+  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(value)
 }
 
-function rowNumber(index: number): number {
-  return (page.value - 1) * pageSize.value + index + 1
+function statText(value: number | null | undefined): string | number {
+  return value === null || value === undefined ? '—' : formatInt(value)
 }
 
-function isTerminal(status: TempReliefStatus): boolean {
-  return status === 'Confirmed' || status === 'Stopped' || status === 'Rejected'
-}
-
-function categoryText(row: TempReliefListItem): string {
-  if (row.categoryDisplayName) return row.categoryDisplayName
-  const population =
-    row.populationStatusText ||
-    (row.populationStatus === 'Insured' ? '在保障人群内' : '不在保障人群内')
-  const channel =
-    row.paymentChannelText || (row.paymentChannel === 'County' ? '上级部门发放' : '备用金发放')
-  const sub = row.reliefType === 'Small' ? '小额快救' : `常规救助（${channel}）`
-  return `${population} · ${sub}`
-}
-
-function personText(row: TempReliefListItem): string {
-  const count = row.reliefPersonCount
-  return count === null || count === undefined || count <= 0 ? '—' : `${count} 人`
+/** 对齐 PC ConfirmAmountDisplay：`{0:F2}元`，空值不伪造 0。 */
+function confirmAmountText(row: TempReliefListItem): string {
+  return row.confirmAmount === null || row.confirmAmount === undefined
+    ? ''
+    : `${row.confirmAmount.toFixed(2)}元`
 }
 
 function statusText(row: TempReliefListItem): string {
   return row.statusText || STATUS_TEXT_FALLBACK[row.status] || row.status
 }
 
-function statusClass(row: TempReliefListItem): string {
-  const map: Record<TempReliefStatus, string> = {
-    Draft: 'is-draft',
-    Submitted: 'is-submitted',
-    Confirmed: 'is-confirmed',
-    Returned: 'is-returned',
-    Rejected: 'is-rejected',
-    Stopped: 'is-stopped',
-  }
-  return map[row.status] ?? 'is-draft'
-}
-
-function filingText(row: TempReliefListItem): string {
-  if (row.filingStatusText) return row.filingStatusText
-  if (row.filingStatus === 'Filed') return '已备案'
-  if (row.filingStatus === 'Pending') return '待备案'
-  if (row.status === 'Confirmed') {
-    return row.paymentChannel === 'County' ? '待备案' : '无需备案'
-  }
-  return '—'
-}
-
-function filingClass(row: TempReliefListItem): string {
-  const text = filingText(row)
-  if (text === '已备案') return 'is-filed'
-  if (text === '待备案') return 'is-pending'
-  if (text === '无需备案') return 'is-none'
-  return 'is-none'
-}
-
-function deadlineLabel(row: TempReliefListItem): string {
-  if (isTerminal(row.status)) return '—'
-  if (row.deadlineText) return row.deadlineText
-  if (!row.deadlineDate) return '—'
-  const due = new Date(`${row.deadlineDate.slice(0, 10)}T00:00:00`)
-  if (Number.isNaN(due.getTime())) return '—'
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  const days = Math.round((due.getTime() - today.getTime()) / 86_400_000)
-  if (days < 0) return `已逾期 ${-days} 天`
-  if (days === 0) return '今日到期'
-  return `剩余 ${days} 天`
-}
-
-function isOverdueRow(row: TempReliefListItem): boolean {
-  return row.isOverdue || deadlineLabel(row).startsWith('已逾期')
+function deadlineText(row: TempReliefListItem): string {
+  return (row.deadlineText ?? '').trim()
 }
 
 function hasFlag(value: boolean | undefined): value is boolean {
   return typeof value === 'boolean'
 }
 
-function canEditRow(row: TempReliefListItem): boolean {
-  return row.status === 'Draft' || row.status === 'Returned'
+function canSubmitRow(row: TempReliefListItem): boolean {
+  return hasFlag(row.canSubmit)
+    ? row.canSubmit
+    : row.status === 'Draft' || row.status === 'Returned'
 }
 
-function canSubmitRow(row: TempReliefListItem): boolean {
-  return hasFlag(row.canSubmit) ? row.canSubmit : row.status === 'Draft' || row.status === 'Returned'
+function canConfirmRow(row: TempReliefListItem): boolean {
+  return hasFlag(row.canConfirm)
+    ? row.canConfirm
+    : row.status === 'Draft' || row.status === 'Submitted'
 }
 
 function canReturnRow(row: TempReliefListItem): boolean {
@@ -342,15 +203,17 @@ function canRejectRow(row: TempReliefListItem): boolean {
     : row.status === 'Draft' || row.status === 'Submitted'
 }
 
-function canConfirmRow(row: TempReliefListItem): boolean {
-  return hasFlag(row.canConfirm)
-    ? row.canConfirm
-    : row.status === 'Draft' || row.status === 'Submitted'
+function canEditRow(row: TempReliefListItem): boolean {
+  return row.status === 'Draft' || row.status === 'Returned'
 }
 
-function canFileRow(row: TempReliefListItem): boolean {
-  if (hasFlag(row.canFile)) return row.canFile
+function canDeleteRow(row: TempReliefListItem): boolean {
+  return row.status === 'Draft'
+}
+
+function canMarkFiledRow(row: TempReliefListItem): boolean {
   if (hasFlag(row.canMarkFiled)) return row.canMarkFiled
+  if (hasFlag(row.canFile)) return row.canFile
   return (
     row.status === 'Confirmed' &&
     row.paymentChannel === 'County' &&
@@ -358,46 +221,35 @@ function canFileRow(row: TempReliefListItem): boolean {
   )
 }
 
-function canStopRow(row: TempReliefListItem): boolean {
-  return row.status === 'Confirmed'
-}
-
-function canDeleteRow(row: TempReliefListItem): boolean {
-  return row.status === 'Draft'
-}
-
-function confirmLabel(row: TempReliefListItem): string {
-  return row.paymentChannel === 'County' ? '县确认' : '乡镇确认'
-}
-
+/** 按钮集合严格按 PC 的 Tab / 状态顺序；不可用动作直接不渲染。 */
 function actionsFor(row: TempReliefListItem): RowAction[] {
-  const actions: RowAction[] = [{ key: 'view', label: '查看', type: 'primary' }]
-  if (canEditRow(row)) actions.push({ key: 'edit', label: '编辑', type: 'warning' })
+  if (activeTab.value === 1) {
+    const actions: RowAction[] = [
+      { key: 'view', label: '查看档案', type: 'primary' },
+      { key: 'photo', label: '照片', type: 'info', plain: true },
+      { key: 'reprint', label: '补打', type: 'info' },
+    ]
+    if (canMarkFiledRow(row)) actions.push({ key: 'file', label: '备案', type: 'success' })
+    actions.push({ key: 'stop', label: '终止', type: 'warning' })
+    return actions
+  }
+
+  if (activeTab.value === 2) {
+    return [
+      { key: 'view', label: '查看档案', type: 'primary' },
+      { key: 'photo', label: '照片', type: 'info', plain: true },
+      { key: 'reprint', label: '补打', type: 'info' },
+    ]
+  }
+
+  const actions: RowAction[] = []
   if (canSubmitRow(row)) actions.push({ key: 'submit', label: '提交', type: 'primary' })
-  if (canConfirmRow(row)) {
-    actions.push({ key: 'confirm', label: confirmLabel(row), type: 'success' })
-  }
-  if (canFileRow(row)) actions.push({ key: 'file', label: '备案', type: 'success' })
-  if (canReturnRow(row)) actions.push({ key: 'return', label: '退回补正', type: 'warning' })
-  if (canRejectRow(row)) actions.push({ key: 'reject', label: '不予救助', type: 'danger' })
-  if (canStopRow(row)) actions.push({ key: 'stop', label: '终止', type: 'warning' })
-  if (canEditRow(row)) actions.push({ key: 'change-date', label: '改期', type: 'info' })
-  if (!isArchive.value && !isTerminal(row.status)) {
-    actions.push({ key: 'print', label: '打印', type: 'info' })
-  }
-  if (isArchive.value || isTerminal(row.status)) {
-    actions.push({ key: 'reprint', label: '补打', type: 'primary' })
-  }
+  if (canConfirmRow(row)) actions.push({ key: 'confirm', label: '确认', type: 'success' })
+  if (canReturnRow(row)) actions.push({ key: 'return', label: '退回', type: 'warning' })
+  if (canRejectRow(row)) actions.push({ key: 'reject', label: '不予', type: 'danger' })
+  if (canEditRow(row)) actions.push({ key: 'edit', label: '编辑', type: 'warning' })
   if (canDeleteRow(row)) actions.push({ key: 'delete', label: '删除', type: 'danger' })
   return actions
-}
-
-function inlineActions(row: TempReliefListItem): RowAction[] {
-  return actionsFor(row).slice(0, 3)
-}
-
-function overflowActions(row: TempReliefListItem): RowAction[] {
-  return actionsFor(row).slice(3)
 }
 
 function resolveCategoryFilter(): {
@@ -422,35 +274,22 @@ async function load(): Promise<void> {
   loadError.value = ''
 
   try {
-    let response
-    if (isArchive.value) {
-      response = await getArchivedTempReliefApplications({
-        page: page.value,
-        pageSize: pageSize.value,
-        keyword: keyword.value.trim() || undefined,
-        year: yearFilter.value === '' ? undefined : yearFilter.value,
-        month: monthFilter.value === '' ? undefined : monthFilter.value,
-      })
-    } else {
-      const category = resolveCategoryFilter()
-      response = await listTempReliefApplications({
-        page: page.value,
-        pageSize: pageSize.value,
-        keyword: keyword.value.trim() || undefined,
-        status: currentTab.value.status,
-        populationStatus: populationFilter.value || undefined,
-        reliefType: category.reliefType,
-        paymentChannel: category.paymentChannel,
-        town: townFilter.value.trim() || undefined,
-      })
-    }
+    const category = resolveCategoryFilter()
+    const response = await listTempReliefApplications({
+      page: page.value,
+      pageSize: pageSize.value,
+      keyword: keyword.value.trim() || undefined,
+      status: currentTab.value.statuses,
+      populationStatus: populationFilter.value || undefined,
+      reliefType: category.reliefType,
+      paymentChannel: category.paymentChannel,
+    })
     if (ticket !== requestTicket) return
 
     items.value = response.items ?? []
     page.value = response.pageIndex || page.value
     totalCount.value = response.totalCount ?? 0
     totalPages.value = response.totalPages ?? 0
-    void enrichRows(ticket)
   } catch (error) {
     if (ticket !== requestTicket) return
     items.value = []
@@ -462,137 +301,68 @@ async function load(): Promise<void> {
   }
 }
 
-function mergeDetail(row: TempReliefListItem, detail: TempReliefDetail): TempReliefListItem {
-  const sameStatus = detail.status === row.status
-  return {
-    ...row,
-    reliefPersonCount:
-      row.reliefPersonCount !== null && row.reliefPersonCount !== undefined && row.reliefPersonCount > 0
-        ? row.reliefPersonCount
-        : detail.reliefPersonCount,
-    filingStatus: row.filingStatus ?? (sameStatus ? detail.filingStatus : null),
-    filingStatusText: row.filingStatusText || (sameStatus ? detail.filingStatusText : ''),
+/** Tab 计数与 PC LoadAllCountsAsync 同口径：按当前人群 / 小类筛选，关键字不参与。 */
+async function loadCounts(): Promise<void> {
+  const ticket = ++countsTicket
+  const category = resolveCategoryFilter()
+  const base = {
+    page: 1,
+    pageSize: 1,
+    populationStatus: populationFilter.value || undefined,
+    reliefType: category.reliefType,
+    paymentChannel: category.paymentChannel,
+  }
+
+  const [draft, confirmed, stopped] = await Promise.allSettled([
+    listTempReliefApplications({ ...base, status: 'Draft,Submitted,Returned' }),
+    listTempReliefApplications({ ...base, status: 'Confirmed' }),
+    listTempReliefApplications({ ...base, status: 'Stopped,Rejected' }),
+  ])
+  if (ticket !== countsTicket) return
+
+  counts.value = {
+    draft: draft.status === 'fulfilled' ? (draft.value.totalCount ?? null) : null,
+    confirmed: confirmed.status === 'fulfilled' ? (confirmed.value.totalCount ?? null) : null,
+    stopped: stopped.status === 'fulfilled' ? (stopped.value.totalCount ?? null) : null,
   }
 }
 
-function applyCachedDetails(rows: TempReliefListItem[]): TempReliefListItem[] {
-  return rows.map((row) => {
-    const detail = detailCache.get(row.id)
-    return detail ? mergeDetail(row, detail) : row
-  })
-}
-
-function loadDetail(id: number): Promise<TempReliefDetail> {
-  const existing = detailPromises.get(id)
-  if (existing) return existing
-
-  const promise = getTempReliefApplication(id)
-    .then((detail) => {
-      detailCache.set(id, detail)
-      return detail
-    })
-    .finally(() => {
-      detailPromises.delete(id)
-    })
-  detailPromises.set(id, promise)
-  return promise
-}
-
-async function enrichRows(ticket: number): Promise<void> {
-  items.value = applyCachedDetails(items.value)
-
-  const targets = items.value.filter((row) => {
-    if (row.reliefPersonCount === null || row.reliefPersonCount === undefined) return true
-    if (row.status !== 'Confirmed' || row.paymentChannel !== 'County') return false
-    if (row.filingStatus !== null && row.filingStatus !== undefined) return false
-    const cached = detailCache.get(row.id)
-    return cached === undefined || cached.status !== row.status
-  })
-  if (targets.length === 0) return
-
-  await Promise.allSettled(targets.map((row) => loadDetail(row.id)))
-
-  if (ticket !== requestTicket) return
-  items.value = applyCachedDetails(items.value)
-}
-
+/** 页头「本年确认 / 本年确认金额」；失败保持 null 显示「—」。 */
 async function loadSummary(): Promise<void> {
-  summaryLoading.value = true
   try {
-    const [summaryResult, pendingResult] = await Promise.allSettled([
-      getTempReliefSummary(),
-      listTempReliefApplications({ page: 1, pageSize: 1, status: 'Draft,Returned' }),
-    ])
-    summary.value = summaryResult.status === 'fulfilled' ? summaryResult.value : null
-    pendingTodoCount.value =
-      pendingResult.status === 'fulfilled' ? (pendingResult.value.totalCount ?? null) : null
-  } finally {
-    summaryLoading.value = false
+    summary.value = await getTempReliefSummary()
+  } catch {
+    summary.value = null
   }
 }
 
-async function refreshAll(invalidateId?: number): Promise<void> {
-  if (invalidateId === undefined) {
-    detailCache.clear()
-  } else {
-    detailCache.delete(invalidateId)
-  }
-  await Promise.all([load(), loadSummary()])
+async function refreshAll(): Promise<void> {
+  await Promise.all([load(), loadCounts(), loadSummary()])
 }
 
-function switchMode(next: ViewMode): void {
-  if (mode.value === next) return
-  mode.value = next
-  page.value = 1
-  keyword.value = ''
-  if (next === 'archive' && yearFilter.value === '') {
-    yearFilter.value = currentYear
-  }
-  void load()
-}
-
-function toggleArchive(): void {
-  switchMode(isArchive.value ? 'active' : 'archive')
-}
-
-function switchTab(next: StatusTab): void {
+function switchTab(next: number): void {
   if (activeTab.value === next) return
   activeTab.value = next
+  keyword.value = ''
   page.value = 1
+  items.value = []
+  totalCount.value = 0
+  totalPages.value = 0
   void load()
+}
+
+function handleFilterChange(): void {
+  page.value = 1
+  void Promise.all([load(), loadCounts()])
 }
 
 function handleSearch(): void {
-  if (isArchive.value && monthFilter.value !== '' && yearFilter.value === '') {
-    ElMessage.warning('按月补打时请先选择年份')
-    return
-  }
   page.value = 1
-  void load()
-}
-
-function handleReset(): void {
-  keyword.value = ''
-  page.value = 1
-  if (isArchive.value) {
-    yearFilter.value = currentYear
-    monthFilter.value = ''
-  } else {
-    populationFilter.value = ''
-    categoryFilter.value = ''
-    townFilter.value = ''
-  }
   void load()
 }
 
 function handlePageChange(value: number): void {
   page.value = value
-  void load()
-}
-
-function handleSizeChange(value: number): void {
-  pageSize.value = value
-  page.value = 1
   void load()
 }
 
@@ -608,9 +378,13 @@ function openEdit(row: TempReliefListItem): void {
   void router.push(`/social-assistance/temp-relief/${row.id}/edit`)
 }
 
-function openPrint(row: TempReliefListItem, nextMode: PrintDialogMode): void {
+function openPhotos(row: TempReliefListItem): void {
+  photoTarget.value = row
+  photoVisible.value = true
+}
+
+function openReprint(row: TempReliefListItem): void {
   printTarget.value = row
-  printMode.value = nextMode
   printVisible.value = true
 }
 
@@ -647,26 +421,39 @@ async function handleSubmit(row: TempReliefListItem): Promise<void> {
   try {
     await submitTempReliefApplication(row.id)
     ElMessage.success('临时救助申请已提交')
-    await refreshAll(row.id)
+    await refreshAll()
   } catch (error) {
     ElMessage.error(getErrorMessage(error, '提交申请失败'))
+  }
+}
+
+async function handleConfirm(row: TempReliefListItem): Promise<void> {
+  const confirmed = await askConfirm(
+    `确定要确认 [${row.applicationNo}] ${row.applicantName} 的临时救助申请生效吗？`,
+    '确认生效',
+    '确认',
+  )
+  if (!confirmed) return
+
+  try {
+    await confirmTempReliefApplication(row.id)
+    ElMessage.success('临时救助申请已确认生效')
+    await refreshAll()
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '确认生效失败'))
   }
 }
 
 async function handleReturn(row: TempReliefListItem): Promise<void> {
   let reason = ''
   try {
-    const result = await ElMessageBox.prompt(
-      `请填写 [${row.applicationNo}] ${row.applicantName} 的退回补正原因：`,
-      '退回补正',
-      {
-        confirmButtonText: '退回',
-        cancelButtonText: '取消',
-        inputPlaceholder: '如：材料不全 / 信息需核实',
-        inputValidator: (value: string) => Boolean(value && value.trim()) || '请填写退回补正原因',
-        type: 'warning',
-      },
-    )
+    const result = await ElMessageBox.prompt('请填写退回原因：', '退回补正', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      inputPlaceholder: '如：材料不全/信息需核实等',
+      inputValidator: (value: string) => Boolean(value && value.trim()) || '请填写退回原因',
+      type: 'warning',
+    })
     reason = result.value.trim()
   } catch (error) {
     if (isDialogCancel(error)) return
@@ -677,7 +464,7 @@ async function handleReturn(row: TempReliefListItem): Promise<void> {
   try {
     await returnTempReliefApplication(row.id, reason)
     ElMessage.success('已退回补正')
-    await refreshAll(row.id)
+    await refreshAll()
   } catch (error) {
     ElMessage.error(getErrorMessage(error, '退回补正失败'))
   }
@@ -686,17 +473,13 @@ async function handleReturn(row: TempReliefListItem): Promise<void> {
 async function handleReject(row: TempReliefListItem): Promise<void> {
   let reason = ''
   try {
-    const result = await ElMessageBox.prompt(
-      `请填写 [${row.applicationNo}] ${row.applicantName} 的不予救助理由。\n将以书面方式告知，告知时间记为当前时间。`,
-      '不予救助',
-      {
-        confirmButtonText: '确定',
-        cancelButtonText: '取消',
-        inputPlaceholder: '如：不符合救助条件',
-        inputValidator: (value: string) => Boolean(value && value.trim()) || '请填写不予救助理由',
-        type: 'warning',
-      },
-    )
+    const result = await ElMessageBox.prompt('请填写不予救助理由：', '不予救助', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      inputPlaceholder: '如：不符合救助条件等',
+      inputValidator: (value: string) => Boolean(value && value.trim()) || '请填写不予救助理由',
+      type: 'warning',
+    })
     reason = result.value.trim()
   } catch (error) {
     if (isDialogCancel(error)) return
@@ -711,29 +494,9 @@ async function handleReject(row: TempReliefListItem): Promise<void> {
       noticeMethod: '书面',
     })
     ElMessage.success('已登记不予救助')
-    await refreshAll(row.id)
+    await refreshAll()
   } catch (error) {
     ElMessage.error(getErrorMessage(error, '登记不予救助失败'))
-  }
-}
-
-async function handleConfirm(row: TempReliefListItem): Promise<void> {
-  const label = confirmLabel(row)
-  const confirmed = await askConfirm(
-    `确定要${label} [${row.applicationNo}] ${row.applicantName} 的临时救助申请吗？\n${
-      label === '县确认' ? '县确认后进入待备案。' : '乡镇确认后即生效。'
-    }`,
-    label,
-    '确认',
-  )
-  if (!confirmed) return
-
-  try {
-    await confirmTempReliefApplication(row.id)
-    ElMessage.success(`已${label}`)
-    await refreshAll(row.id)
-  } catch (error) {
-    ElMessage.error(getErrorMessage(error, `${label}失败`))
   }
 }
 
@@ -749,26 +512,29 @@ async function handleFile(row: TempReliefListItem): Promise<void> {
   try {
     await fileTempReliefApplication(row.id)
     ElMessage.success('已登记备案')
-    await refreshAll(row.id)
+    await refreshAll()
   } catch (error) {
     ElMessage.error(getErrorMessage(error, '登记备案失败'))
   }
 }
 
 async function handleStop(row: TempReliefListItem): Promise<void> {
+  const confirmed = await askConfirm(
+    `确定要终止 [${row.applicationNo}] ${row.applicantName} 的临时救助申请吗？\n终止后本年度仍占用唯一申请名额。`,
+    '终止申请',
+    '终止',
+  )
+  if (!confirmed) return
+
   let reason = ''
   try {
-    const result = await ElMessageBox.prompt(
-      `确定要终止 [${row.applicationNo}] ${row.applicantName} 的临时救助申请吗？\n终止后本年度仍占用唯一申请名额。`,
-      '终止申请',
-      {
-        confirmButtonText: '终止',
-        cancelButtonText: '取消',
-        inputPlaceholder: '请填写终止原因',
-        inputValidator: (value: string) => Boolean(value && value.trim()) || '请填写终止原因',
-        type: 'warning',
-      },
-    )
+    const result = await ElMessageBox.prompt('请填写终止原因：', '终止原因', {
+      confirmButtonText: '确定',
+      cancelButtonText: '取消',
+      inputPlaceholder: '如：信息录入错误/不符合救助条件等',
+      inputValidator: (value: string) => Boolean(value && value.trim()) || '请填写终止原因',
+      type: 'warning',
+    })
     reason = result.value.trim()
   } catch (error) {
     if (isDialogCancel(error)) return
@@ -779,7 +545,7 @@ async function handleStop(row: TempReliefListItem): Promise<void> {
   try {
     await stopTempReliefApplication(row.id, reason)
     ElMessage.success('临时救助申请已终止')
-    await refreshAll(row.id)
+    await refreshAll()
   } catch (error) {
     ElMessage.error(getErrorMessage(error, '终止申请失败'))
   }
@@ -796,67 +562,9 @@ async function handleDelete(row: TempReliefListItem): Promise<void> {
   try {
     await deleteTempReliefApplication(row.id)
     ElMessage.success('临时救助申请已删除')
-    await refreshAll(row.id)
+    await refreshAll()
   } catch (error) {
     ElMessage.error(getErrorMessage(error, '删除申请失败'))
-  }
-}
-
-function dateToIso(date: Date): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function maxApplyDateText(): string {
-  const today = new Date()
-  const target = new Date(today.getFullYear(), today.getMonth() + 1, 1)
-  const lastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate()
-  target.setDate(Math.min(today.getDate(), lastDay))
-  return dateToIso(target)
-}
-
-function validateApplyDate(value: string): true | string {
-  const text = value.trim()
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return '日期格式应为 yyyy-MM-dd'
-  const date = new Date(`${text}T00:00:00`)
-  if (Number.isNaN(date.getTime()) || dateToIso(date) !== text) return '日期无效'
-  const max = maxApplyDateText()
-  if (text > max) return `申请日期最晚为 ${max}`
-  return true
-}
-
-async function handleChangeDate(row: TempReliefListItem): Promise<void> {
-  let applyDate = ''
-  try {
-    const result = await ElMessageBox.prompt(
-      `请输入 [${row.applicationNo}] 的新申请日期（yyyy-MM-dd）。\n改期后申请编号将按新日期重排。`,
-      '改期',
-      {
-        confirmButtonText: '改期',
-        cancelButtonText: '取消',
-        inputValue: row.applyDate?.slice(0, 10) ?? '',
-        inputPlaceholder: 'yyyy-MM-dd',
-        inputValidator: (value: string) => validateApplyDate(value),
-        type: 'warning',
-      },
-    )
-    applyDate = result.value.trim()
-  } catch (error) {
-    if (isDialogCancel(error)) return
-    ElMessage.error(getErrorMessage(error, '改期失败'))
-    return
-  }
-
-  try {
-    const result = await changeTempReliefApplyDate(row.id, applyDate)
-    ElMessage.success(
-      result.applicationNo ? `已改期，新申请编号 ${result.applicationNo}` : '申请日期已修改',
-    )
-    await refreshAll(row.id)
-  } catch (error) {
-    ElMessage.error(getErrorMessage(error, '改期失败'))
   }
 }
 
@@ -871,14 +579,14 @@ function runAction(key: ActionKey, row: TempReliefListItem): void {
     case 'submit':
       void handleSubmit(row)
       return
+    case 'confirm':
+      void handleConfirm(row)
+      return
     case 'return':
       void handleReturn(row)
       return
     case 'reject':
       void handleReject(row)
-      return
-    case 'confirm':
-      void handleConfirm(row)
       return
     case 'file':
       void handleFile(row)
@@ -886,98 +594,49 @@ function runAction(key: ActionKey, row: TempReliefListItem): void {
     case 'stop':
       void handleStop(row)
       return
-    case 'change-date':
-      void handleChangeDate(row)
-      return
     case 'delete':
       void handleDelete(row)
       return
-    case 'print':
-      openPrint(row, 'print')
+    case 'photo':
+      openPhotos(row)
       return
     case 'reprint':
-      openPrint(row, 'reprint')
+      openReprint(row)
   }
 }
 
-function handleRowCommand(command: string, row: TempReliefListItem): void {
-  runAction(command as ActionKey, row)
-}
-
-watch(yearFilter, (next) => {
-  if (next === '') monthFilter.value = ''
-})
-
 onMounted(() => {
-  void load()
-  void loadSummary()
+  void refreshAll()
 })
 </script>
 
 <template>
   <div class="nc-page temp-relief-list-page">
-    <NcPageHeader
-      title="临时救助"
-      description="两类人群 × 三种救助场景，按 2 / 5 / 15 日时限办理；已确认档案可随时补打。"
-      kicker="低收入人口救助帮扶 · 临时救助"
-    >
+    <NcPageHeader title="临时救助" description="急难型 / 支出型临时救助申请办理">
+      <div class="header-stats">
+        <NcStat label="办理中（件）" :value="statText(counts.draft)" tone="amber" compact />
+        <NcStat label="已确认累计（件）" :value="statText(counts.confirmed)" tone="pine" compact />
+        <NcStat
+          label="本年确认（人次）"
+          :value="statText(summary?.yearConfirmed)"
+          tone="seal"
+          compact
+        />
+        <NcStat
+          label="本年确认金额（元）"
+          :value="statText(summary?.yearConfirmedAmount)"
+          tone="ink"
+          compact
+        />
+      </div>
+
       <template #actions>
-        <el-button :icon="Printer" :loading="loading" @click="toggleArchive">
-          {{ isArchive ? '返回办理列表' : '已完结 / 补打' }}
-        </el-button>
-        <el-button :icon="Refresh" :loading="loading || summaryLoading" @click="refreshAll()">
-          刷新
-        </el-button>
         <el-button type="primary" :icon="Plus" @click="handleCreate">新增申请</el-button>
       </template>
     </NcPageHeader>
 
-    <div class="summary">
-      <NcStat
-        label="待办理（件）"
-        :value="statValue(pendingTodoCount ?? summary?.pendingCount)"
-        hint="草稿 + 退回补正"
-        tone="amber"
-        compact
-      />
-      <NcStat
-        label="已提交（件）"
-        :value="statValue(summary?.submittedCount)"
-        hint="等待县确认"
-        tone="seal"
-        compact
-      />
-      <NcStat
-        label="本年已确认（件）"
-        :value="statValue(summary?.yearConfirmed)"
-        tone="pine"
-        compact
-      />
-      <NcStat
-        label="逾期件数"
-        :value="statValue(summary?.overdueCount)"
-        hint="待办中超时限"
-        tone="seal"
-        compact
-      />
-      <NcStat
-        label="本年确认金额（元）"
-        :value="summaryAmountText"
-        tone="ink"
-        compact
-      />
-      <span v-if="summaryLoading" class="summary-loading">统计更新中…</span>
-    </div>
-
-    <NcCard padding="none" class="filter-card">
-      <div v-if="isArchive" class="archive-note">
-        <div>
-          <strong>已完结档案 · 补打</strong>
-          <p>仅显示已确认、已终止、不予救助记录；可按年 / 月及姓名、身份证、编号检索后补打。</p>
-        </div>
-      </div>
-
-      <div v-else class="status-tabs" role="tablist" aria-label="按状态筛选">
+    <NcCard padding="none" class="list-card">
+      <div class="status-tabs" role="tablist" aria-label="按办理状态筛选">
         <button
           v-for="tab in STATUS_TABS"
           :key="tab.value"
@@ -988,9 +647,14 @@ onMounted(() => {
           :aria-selected="activeTab === tab.value"
           @click="switchTab(tab.value)"
         >
+          <el-icon class="status-tab__icon">
+            <Clock v-if="tab.value === 0" />
+            <CircleCheck v-else-if="tab.value === 1" />
+            <Warning v-else />
+          </el-icon>
           <span>{{ tab.label }}</span>
           <span
-            v-if="tabCounts[tab.value] !== null"
+            v-if="tabCounts[tab.value] > 0"
             class="status-tab__count"
             :class="`status-tab__count--${tab.value}`"
           >
@@ -999,291 +663,80 @@ onMounted(() => {
         </button>
       </div>
 
-      <form v-if="isArchive" class="filter-bar archive-filter" @submit.prevent="handleSearch">
-        <label class="filter-field">
-          <span class="filter-field__label">年份</span>
-          <el-select v-model="yearFilter" placeholder="全部年份">
-            <el-option label="全部年份" value="" />
-            <el-option
-              v-for="year in yearOptions"
-              :key="year"
-              :label="`${year} 年`"
-              :value="year"
-            />
-          </el-select>
-        </label>
-        <label class="filter-field">
-          <span class="filter-field__label">月份</span>
-          <el-select v-model="monthFilter" :disabled="yearFilter === ''" placeholder="全部月份">
-            <el-option label="全部月份" value="" />
-            <el-option
-              v-for="month in monthOptions"
-              :key="month"
-              :label="`${month} 月`"
-              :value="month"
-            />
-          </el-select>
-        </label>
-        <label class="filter-field filter-field--search">
-          <span class="filter-field__label">关键字</span>
-          <el-input
-            v-model="keyword"
-            clearable
-            :prefix-icon="Search"
-            placeholder="姓名 / 身份证 / 申请编号"
-            @clear="handleSearch"
+      <form class="filter-bar" @submit.prevent="handleSearch">
+        <el-select
+          v-model="populationFilter"
+          aria-label="人群筛选"
+          placeholder="全部人群"
+          @change="handleFilterChange"
+        >
+          <el-option
+            v-for="option in POPULATION_OPTIONS"
+            :key="option.value || 'all'"
+            :label="option.label"
+            :value="option.value"
           />
-        </label>
-        <div class="filter-actions">
-          <el-button type="primary" :icon="Search" native-type="submit" :loading="loading">
-            查询
-          </el-button>
-          <el-button v-if="hasFilter" text native-type="button" @click="handleReset">
-            重置
-          </el-button>
-        </div>
+        </el-select>
+
+        <el-select
+          v-model="categoryFilter"
+          aria-label="小类筛选"
+          placeholder="全部小类"
+          @change="handleFilterChange"
+        >
+          <el-option
+            v-for="option in CATEGORY_OPTIONS"
+            :key="option.value || 'all'"
+            :label="option.label"
+            :value="option.value"
+          />
+        </el-select>
+
+        <el-input
+          v-model="keyword"
+          class="filter-search"
+          clearable
+          :prefix-icon="Search"
+          placeholder="搜索姓名、身份证号..."
+          @clear="handleSearch"
+        />
+
+        <el-button type="primary" :icon="Search" native-type="submit" :loading="loading">
+          查询
+        </el-button>
       </form>
 
-      <form v-else class="filter-bar" @submit.prevent="handleSearch">
-        <label class="filter-field">
-          <span class="filter-field__label">大类</span>
-          <el-select v-model="populationFilter" placeholder="全部大类">
-            <el-option
-              v-for="option in POPULATION_OPTIONS"
-              :key="option.value || 'all'"
-              :label="option.label"
-              :value="option.value"
-            />
-          </el-select>
-        </label>
-        <label class="filter-field">
-          <span class="filter-field__label">小类</span>
-          <el-select v-model="categoryFilter" placeholder="全部小类">
-            <el-option
-              v-for="option in CATEGORY_OPTIONS"
-              :key="option.value || 'all'"
-              :label="option.label"
-              :value="option.value"
-            />
-          </el-select>
-        </label>
-        <label class="filter-field filter-field--town">
-          <span class="filter-field__label">乡镇</span>
-          <el-input v-model="townFilter" clearable placeholder="乡镇 / 街道" />
-        </label>
-        <label class="filter-field filter-field--search">
-          <span class="filter-field__label">关键字</span>
-          <el-input
-            v-model="keyword"
-            clearable
-            :prefix-icon="Search"
-            placeholder="姓名 / 身份证 / 申请编号"
-            @clear="handleSearch"
-          />
-        </label>
-        <div class="filter-actions">
-          <el-button type="primary" :icon="Search" native-type="submit" :loading="loading">
-            查询
-          </el-button>
-          <el-button v-if="hasFilter" text native-type="button" @click="handleReset">
-            重置
-          </el-button>
-        </div>
-      </form>
-    </NcCard>
+      <el-alert
+        v-if="loadError"
+        class="load-error"
+        type="error"
+        :title="loadError"
+        :closable="false"
+        show-icon
+      >
+        <el-button link type="primary" @click="load()">重新加载</el-button>
+      </el-alert>
 
-    <el-alert
-      v-if="loadError"
-      class="load-error"
-      type="error"
-      :title="loadError"
-      :closable="false"
-      show-icon
-    >
-      <el-button link type="primary" @click="load()">重新加载</el-button>
-    </el-alert>
-
-    <NcCard
-      :title="isArchive ? '已完结档案' : '临时救助列表'"
-      :subtitle="listSubtitle"
-      padding="none"
-      class="list-card"
-    >
       <div v-loading="loading && items.length > 0" class="list-area">
         <el-skeleton v-if="loading && items.length === 0" :rows="5" animated class="list-skeleton" />
 
-        <template v-else-if="items.length > 0">
-          <el-table v-if="!isNarrow" :data="items" row-key="id" class="relief-table">
-            <el-table-column label="序号" width="58" align="center">
-              <template #default="{ $index }">
-                <span class="row-index">{{ rowNumber($index) }}</span>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="申请编号" min-width="132">
-              <template #default="{ row }">
-                <span class="app-no">{{ (row as TempReliefListItem).applicationNo || '—' }}</span>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="申请人" min-width="92">
-              <template #default="{ row }">
-                <strong class="applicant-name">
-                  {{ (row as TempReliefListItem).applicantName || '—' }}
-                </strong>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="身份证（脱敏）" min-width="152">
-              <template #default="{ row }">
-                <span class="id-card">
-                  {{ (row as TempReliefListItem).applicantIdCardMasked || '—' }}
-                </span>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="大类 / 小类" min-width="196">
-              <template #default="{ row }">
-                <span class="category" :title="categoryText(row as TempReliefListItem)">
-                  {{ categoryText(row as TempReliefListItem) }}
-                </span>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="遇困人数" width="86" align="right">
-              <template #default="{ row }">
-                <span class="person-count">{{ personText(row as TempReliefListItem) }}</span>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="金额" width="108" align="right">
-              <template #default="{ row }">
-                <span class="amount">
-                  {{ formatMoney((row as TempReliefListItem).confirmAmount) }}
-                </span>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="申请日期" width="108">
-              <template #default="{ row }">
-                {{ formatDate((row as TempReliefListItem).applyDate) }}
-              </template>
-            </el-table-column>
-
-            <el-table-column label="办理时限" min-width="126">
-              <template #default="{ row }">
-                <div
-                  class="deadline-cell"
-                  :class="{ 'is-overdue': isOverdueRow(row as TempReliefListItem) }"
+        <div v-else-if="items.length > 0" class="relief-cards">
+          <article
+            v-for="(row, index) in items"
+            :key="row.id"
+            class="relief-card"
+            :class="{ 'is-alt': index % 2 === 1 }"
+          >
+            <header class="card-head">
+              <div class="card-person">
+                <strong class="card-name">{{ row.applicantName || '—' }}</strong>
+                <span
+                  class="status-chip"
+                  :class="activeTab === 1 ? 'is-success' : 'is-danger'"
                 >
-                  <span>{{ deadlineLabel(row as TempReliefListItem) }}</span>
-                  <small v-if="deadlineLabel(row as TempReliefListItem) !== '—'">
-                    {{ formatDate((row as TempReliefListItem).deadlineDate) }}
-                  </small>
-                </div>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="状态" width="96">
-              <template #default="{ row }">
-                <span class="status" :class="statusClass(row as TempReliefListItem)">
-                  {{ statusText(row as TempReliefListItem) }}
+                  {{ statusText(row) }}
                 </span>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="备案状态" width="96">
-              <template #default="{ row }">
-                <span class="filing" :class="filingClass(row as TempReliefListItem)">
-                  {{ filingText(row as TempReliefListItem) }}
-                </span>
-              </template>
-            </el-table-column>
-
-            <el-table-column label="操作" width="252" fixed="right" align="right">
-              <template #default="{ row }">
-                <div class="row-actions">
-                  <el-button
-                    v-for="action in inlineActions(row as TempReliefListItem)"
-                    :key="action.key"
-                    link
-                    :type="action.type"
-                    @click="runAction(action.key, row as TempReliefListItem)"
-                  >
-                    {{ action.label }}
-                  </el-button>
-                  <el-dropdown
-                    v-if="overflowActions(row as TempReliefListItem).length > 0"
-                    trigger="click"
-                    @command="handleRowCommand($event, row as TempReliefListItem)"
-                  >
-                    <el-button link :icon="MoreFilled" class="more-button">更多</el-button>
-                    <template #dropdown>
-                      <el-dropdown-menu>
-                        <el-dropdown-item
-                          v-for="action in overflowActions(row as TempReliefListItem)"
-                          :key="action.key"
-                          :command="action.key"
-                        >
-                          {{ action.label }}
-                        </el-dropdown-item>
-                      </el-dropdown-menu>
-                    </template>
-                  </el-dropdown>
-                </div>
-              </template>
-            </el-table-column>
-          </el-table>
-
-          <div v-else class="relief-cards">
-            <article v-for="(row, index) in items" :key="row.id" class="relief-card">
-              <header class="card-head">
-                <div class="card-person">
-                  <span class="card-index">{{ rowNumber(index) }}</span>
-                  <strong>{{ row.applicantName || '—' }}</strong>
-                  <span class="status" :class="statusClass(row)">{{ statusText(row) }}</span>
-                </div>
-                <span class="app-no">{{ row.applicationNo || '—' }}</span>
-              </header>
-
-              <p class="id-card">{{ row.applicantIdCardMasked || '—' }}</p>
-
-              <dl class="card-meta">
-                <div class="card-meta__wide">
-                  <dt>大类 / 小类</dt>
-                  <dd :title="categoryText(row)">{{ categoryText(row) }}</dd>
-                </div>
-                <div>
-                  <dt>遇困人数</dt>
-                  <dd>{{ personText(row) }}</dd>
-                </div>
-                <div>
-                  <dt>金额</dt>
-                  <dd class="amount">{{ formatMoney(row.confirmAmount) }}</dd>
-                </div>
-                <div>
-                  <dt>申请日期</dt>
-                  <dd>{{ formatDate(row.applyDate) }}</dd>
-                </div>
-                <div>
-                  <dt>办理时限</dt>
-                  <dd class="deadline-cell" :class="{ 'is-overdue': isOverdueRow(row) }">
-                    {{ deadlineLabel(row) }}
-                  </dd>
-                </div>
-                <div>
-                  <dt>备案状态</dt>
-                  <dd>
-                    <span class="filing" :class="filingClass(row)">{{ filingText(row) }}</span>
-                  </dd>
-                </div>
-                <div v-if="row.stoppedAt || row.stopReason" class="card-meta__wide">
-                  <dt>终止信息</dt>
-                  <dd :title="row.stopReason">
-                    {{ formatDate(row.stoppedAt) }} · {{ row.stopReason || '—' }}
-                  </dd>
-                </div>
-              </dl>
+              </div>
 
               <div class="card-actions">
                 <el-button
@@ -1291,23 +744,60 @@ onMounted(() => {
                   :key="action.key"
                   size="small"
                   :type="action.type"
-                  plain
+                  :plain="action.plain"
                   @click="runAction(action.key, row)"
                 >
                   {{ action.label }}
                 </el-button>
               </div>
-            </article>
-          </div>
-        </template>
+            </header>
+
+            <p class="card-id-card">{{ row.applicantIdCardMasked || '—' }}</p>
+
+            <div class="card-lines">
+              <span class="card-no">编号: {{ row.applicationNo || '—' }}</span>
+              <span
+                v-if="deadlineText(row)"
+                class="card-deadline"
+                :class="{ 'is-overdue': row.isOverdue }"
+              >
+                {{ deadlineText(row) }}
+              </span>
+            </div>
+
+            <dl class="card-meta" :class="`card-meta--tab${activeTab}`">
+              <div>
+                <dt>救助类型</dt>
+                <dd :title="row.categoryDisplayName">{{ row.categoryDisplayName || '—' }}</dd>
+              </div>
+              <div>
+                <dt>申请日期</dt>
+                <dd>{{ formatDate(row.applyDate) }}</dd>
+              </div>
+
+              <template v-if="activeTab === 1">
+                <div>
+                  <dt>确定金额</dt>
+                  <dd class="amount">{{ confirmAmountText(row) || '—' }}</dd>
+                </div>
+              </template>
+
+              <template v-else-if="activeTab === 2">
+                <div>
+                  <dt>终止时间</dt>
+                  <dd>{{ formatDate(row.stoppedAt) }}</dd>
+                </div>
+                <div class="card-meta__wide">
+                  <dt>终止原因</dt>
+                  <dd :title="row.stopReason">{{ row.stopReason || '—' }}</dd>
+                </div>
+              </template>
+            </dl>
+          </article>
+        </div>
 
         <div v-else-if="!loading && !loadError" class="empty-wrap">
-          <el-empty :description="emptyText">
-            <el-button v-if="hasFilter" :icon="Refresh" @click="handleReset">
-              清除筛选
-            </el-button>
-            <el-button v-else-if="isArchive" @click="switchMode('active')">返回办理列表</el-button>
-          </el-empty>
+          <el-empty :description="currentTab.emptyText" />
         </div>
       </div>
 
@@ -1319,25 +809,30 @@ onMounted(() => {
           <el-pagination
             :current-page="page"
             :page-size="pageSize"
-            :page-sizes="[10, 20, 50]"
             :total="totalCount"
             :layout="paginationLayout"
             :pager-count="isNarrow ? 5 : 7"
             :small="isNarrow"
             background
             @current-change="handlePageChange"
-            @size-change="handleSizeChange"
           />
         </div>
       </template>
     </NcCard>
+
+    <TempReliefListPhotoDialog
+      v-model="photoVisible"
+      :application-id="photoTarget?.id ?? null"
+      :applicant-name="photoTarget?.applicantName ?? ''"
+    />
 
     <TempReliefPrintDialog
       v-model="printVisible"
       :application-id="printTarget?.id ?? null"
       :application-no="printTarget?.applicationNo ?? ''"
       :applicant-name="printTarget?.applicantName ?? ''"
-      :mode="printMode"
+      :relief-type="printTarget?.reliefType"
+      mode="reprint"
     />
   </div>
 </template>
@@ -1349,47 +844,30 @@ onMounted(() => {
   gap: 15px;
 }
 
-.summary {
+.temp-relief-list-page :deep(.nc-page-header__main) {
+  flex: 1;
+}
+
+.header-stats {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
+  margin-top: 14px;
 }
 
-.summary-loading {
-  grid-column: 1 / -1;
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-xs);
-}
-
-.filter-card,
 .list-card {
   overflow: hidden;
 }
 
-.archive-note {
-  padding: 13px 16px;
-  border-bottom: 1px solid var(--nc-line-faint);
-  background-color: var(--nc-amber-soft);
-}
-
-.archive-note strong {
-  color: var(--nc-ink);
-  font-family: var(--nc-font-serif);
-  font-size: var(--nc-text-sm);
-  letter-spacing: 0.04em;
-}
-
-.archive-note p {
-  margin: 3px 0 0;
-  color: var(--nc-muted-2);
-  font-size: var(--nc-text-xs);
-  line-height: 1.65;
+.list-card :deep(.nc-card__foot) {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
 }
 
 .status-tabs {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--nc-line-faint);
@@ -1400,7 +878,7 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 9px 10px;
+  padding: 10px 12px;
   border: 1px solid var(--nc-line);
   border-radius: var(--nc-radius-xs);
   background-color: var(--nc-paper-3);
@@ -1412,16 +890,21 @@ onMounted(() => {
 
 .status-tab.is-active {
   border-color: var(--nc-seal);
-  background-color: var(--nc-seal-soft);
+  background-color: var(--nc-paper-2);
   color: var(--nc-ink);
   font-weight: 700;
+  box-shadow: var(--nc-shadow-xs);
+}
+
+.status-tab__icon {
+  color: var(--nc-seal);
+  font-size: 15px;
 }
 
 .status-tab__count {
   min-width: 20px;
   padding: 0 6px;
   border-radius: 999px;
-  background-color: var(--nc-ink-2);
   color: #fff;
   font-family: var(--nc-font-mono);
   font-size: 11px;
@@ -1430,70 +913,35 @@ onMounted(() => {
   text-align: center;
 }
 
-.status-tab__count--pending {
-  background-color: var(--nc-amber);
-}
-
-.status-tab__count--submitted {
+.status-tab__count--0 {
   background-color: var(--nc-seal);
 }
 
-.status-tab__count--confirmed {
+.status-tab__count--1 {
   background-color: var(--nc-pine);
 }
 
-.status-tab__count--closed {
-  background-color: var(--nc-muted);
+.status-tab__count--2 {
+  background-color: var(--nc-seal-soft);
+  color: var(--nc-seal-dark);
 }
 
 .filter-bar {
   display: grid;
-  grid-template-columns: 150px 178px 152px minmax(200px, 1fr) auto;
-  align-items: end;
+  grid-template-columns: 172px 190px minmax(180px, 1fr) auto;
+  align-items: center;
   gap: 10px;
   padding: 14px 16px;
+  border-bottom: 1px solid var(--nc-line-faint);
 }
 
-.archive-filter {
-  grid-template-columns: 126px 122px minmax(220px, 1fr) auto;
-}
-
-.filter-field {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  gap: 4px;
-}
-
-.filter-field__label {
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
-}
-
-.filter-field :deep(.el-select),
-.filter-field :deep(.el-input) {
+.filter-bar :deep(.el-select),
+.filter-bar :deep(.el-input) {
   width: 100%;
 }
 
-.filter-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  padding-bottom: 1px;
-}
-
 .load-error {
-  margin: 0;
-}
-
-.list-card :deep(.nc-card__foot) {
-  margin-top: 0;
-  padding-top: 0;
-  border-top: none;
+  margin: 10px 16px 0;
 }
 
 .list-area {
@@ -1504,184 +952,30 @@ onMounted(() => {
   padding: 22px;
 }
 
-.relief-table {
-  width: 100%;
-}
-
-.row-index {
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-xs);
-}
-
-.app-no {
-  color: var(--nc-ink-2);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-sm);
-  letter-spacing: 0.02em;
-  white-space: nowrap;
-}
-
-.applicant-name {
-  color: var(--nc-ink);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.id-card {
-  color: var(--nc-ink-2);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-sm);
-  white-space: nowrap;
-}
-
-.category {
-  display: block;
-  overflow: hidden;
-  color: var(--nc-ink-2);
-  font-size: var(--nc-text-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.person-count {
-  color: var(--nc-ink-2);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-sm);
-}
-
-.amount {
-  color: var(--nc-seal);
-  font-family: var(--nc-font-mono);
-  font-size: var(--nc-text-sm);
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.deadline-cell {
+.relief-cards {
   display: flex;
   flex-direction: column;
-  min-width: 0;
-  gap: 1px;
-  color: var(--nc-ink-2);
-  font-size: var(--nc-text-xs);
-  white-space: nowrap;
-}
-
-.deadline-cell small {
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: 10px;
-}
-
-.deadline-cell.is-overdue {
-  color: var(--nc-seal);
-  font-weight: 700;
-}
-
-.deadline-cell.is-overdue small {
-  color: var(--nc-seal);
-}
-
-.status,
-.filing {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 7px;
-  border: 1px solid transparent;
-  font-size: var(--nc-text-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  white-space: nowrap;
-}
-
-.status.is-draft {
-  border-color: rgba(150, 104, 28, 0.32);
-  background-color: var(--nc-amber-soft);
-  color: var(--nc-amber-dark);
-}
-
-.status.is-returned {
-  border-style: dashed;
-  border-color: rgba(150, 104, 28, 0.55);
-  background-color: var(--nc-paper-2);
-  color: var(--nc-amber-dark);
-}
-
-.status.is-submitted {
-  border-color: var(--nc-line-strong);
-  background-color: var(--nc-paper-3);
-  color: var(--nc-ink-2);
-}
-
-.status.is-confirmed {
-  border-color: rgba(46, 71, 56, 0.35);
-  background-color: var(--nc-pine-soft);
-  color: var(--nc-pine-dark);
-}
-
-.status.is-rejected {
-  border-color: rgba(171, 50, 39, 0.3);
-  background-color: var(--nc-seal-soft);
-  color: var(--nc-seal-dark);
-}
-
-.status.is-stopped {
-  border-color: var(--nc-line-strong);
-  background-color: var(--nc-paper-3);
-  color: var(--nc-muted);
-}
-
-.filing.is-filed {
-  border-color: rgba(46, 71, 56, 0.28);
-  background-color: var(--nc-pine-soft);
-  color: var(--nc-pine-dark);
-}
-
-.filing.is-pending {
-  border-color: rgba(150, 104, 28, 0.3);
-  background-color: var(--nc-amber-soft);
-  color: var(--nc-amber-dark);
-}
-
-.filing.is-none {
-  color: var(--nc-muted);
-}
-
-.row-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 2px 4px;
-}
-
-.row-actions :deep(.el-button + .el-button) {
-  margin-left: 0;
-}
-
-.more-button {
-  color: var(--nc-muted);
-}
-
-.relief-cards {
-  display: grid;
-  gap: 10px;
+  gap: 8px;
   padding: 10px;
 }
 
 .relief-card {
-  padding: 14px 15px;
+  padding: 14px 16px;
   border: 1px solid var(--nc-line);
   border-radius: var(--nc-radius-sm);
-  background-color: var(--nc-paper-soft);
+  background-color: var(--nc-paper-2);
+  box-shadow: var(--nc-shadow-xs);
+}
+
+.relief-card.is-alt {
+  background-color: #f8f9fa;
 }
 
 .card-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 10px;
+  gap: 10px 16px;
 }
 
 .card-person {
@@ -1689,43 +983,96 @@ onMounted(() => {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
 }
 
-.card-index {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 22px;
-  height: 22px;
-  padding: 0 4px;
-  border: 1px solid var(--nc-line);
-  border-radius: 999px;
-  color: var(--nc-muted);
-  font-family: var(--nc-font-mono);
-  font-size: 10px;
-}
-
-.card-person strong {
+.card-name {
   color: var(--nc-ink);
   font-family: var(--nc-font-serif);
-  font-size: var(--nc-text-lg);
+  font-size: 18px;
   font-weight: 700;
   letter-spacing: 0.03em;
 }
 
-.card-head .app-no {
-  flex: none;
-  color: var(--nc-muted);
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
   font-size: var(--nc-text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.status-chip.is-danger {
+  border-color: rgba(171, 50, 39, 0.28);
+  background-color: var(--nc-seal-soft);
+  color: var(--nc-seal-dark);
+}
+
+.status-chip.is-success {
+  border-color: rgba(46, 71, 56, 0.28);
+  background-color: var(--nc-pine-soft);
+  color: var(--nc-pine-dark);
+}
+
+.card-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.card-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.card-id-card {
+  margin: 4px 0 0;
+  color: var(--nc-ink-2);
+  font-family: var(--nc-font-mono);
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+.card-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 8px;
+}
+
+.card-no {
+  color: var(--nc-ink-2);
+  font-family: var(--nc-font-mono);
+  font-size: 15px;
+  letter-spacing: 0.02em;
+  word-break: break-all;
+}
+
+.card-deadline {
+  color: var(--nc-amber-dark);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.card-deadline.is-overdue {
+  color: var(--nc-seal);
 }
 
 .card-meta {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 14px;
+  gap: 8px 16px;
   margin: 10px 0 0;
-  padding-top: 10px;
-  border-top: 1px solid var(--nc-line-faint);
+}
+
+.card-meta--tab1 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .card-meta div {
@@ -1739,16 +1086,15 @@ onMounted(() => {
 .card-meta dt {
   color: var(--nc-muted);
   font-family: var(--nc-font-mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
+  font-size: 13px;
+  letter-spacing: 0.04em;
 }
 
 .card-meta dd {
   margin: 2px 0 0;
   overflow: hidden;
   color: var(--nc-ink-2);
-  font-size: var(--nc-text-sm);
-  font-weight: 600;
+  font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1756,23 +1102,7 @@ onMounted(() => {
 .card-meta dd.amount {
   color: var(--nc-seal);
   font-family: var(--nc-font-mono);
-}
-
-.card-meta dd.deadline-cell {
-  display: block;
-}
-
-.card-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--nc-line-faint);
-}
-
-.card-actions :deep(.el-button + .el-button) {
-  margin-left: 0;
+  font-weight: 700;
 }
 
 .empty-wrap {
@@ -1796,72 +1126,65 @@ onMounted(() => {
 }
 
 @media (max-width: 1280px) {
-  .summary {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .header-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .filter-bar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .filter-field--search {
+  .filter-search {
     grid-column: 1 / -1;
-  }
-
-  .filter-actions {
-    grid-column: 1 / -1;
-  }
-
-  .archive-filter {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 1100px) {
-  .status-tabs {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 960px) {
-  .summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .card-head {
+    flex-direction: column;
+    align-items: stretch;
   }
 
-  .filter-bar,
-  .archive-filter {
+  .card-actions {
+    justify-content: flex-start;
+  }
+
+  .card-meta--tab1 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    padding: 12px;
   }
 }
 
 @media (max-width: 640px) {
-  .status-tabs {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    padding: 12px;
-  }
-
-  .filter-bar,
-  .archive-filter {
+  .header-stats {
     grid-template-columns: 1fr;
   }
 
-  .filter-field--search,
-  .filter-actions {
+  .status-tabs {
+    padding: 12px;
+  }
+
+  .status-tab {
+    padding: 9px 6px;
+    font-size: var(--nc-text-xs);
+  }
+
+  .filter-bar {
+    grid-template-columns: 1fr;
+    padding: 12px;
+  }
+
+  .filter-search {
     grid-column: auto;
   }
 
-  .filter-actions {
-    justify-content: stretch;
+  .card-id-card,
+  .card-no {
+    font-size: 13px;
   }
 
-  .filter-actions .el-button {
-    flex: 1;
-  }
-
-  .card-head {
-    flex-direction: column;
-    align-items: stretch;
+  .card-meta,
+  .card-meta--tab1 {
+    grid-template-columns: 1fr;
   }
 
   .pagination {
@@ -1872,16 +1195,6 @@ onMounted(() => {
   .pagination-note {
     width: 100%;
     text-align: center;
-  }
-}
-
-@media (max-width: 420px) {
-  .summary {
-    grid-template-columns: 1fr;
-  }
-
-  .summary :deep(.nc-stat:last-of-type) {
-    grid-column: auto;
   }
 }
 </style>
