@@ -13,6 +13,7 @@ import {
   evaluateElderlySpecial,
   getElderlyApplicationForm,
   getElderlyImportedByIdCard,
+  getElderlyOperatorAddress,
   ocrElderlyIdCard,
   updateElderlyApplication,
 } from '@/api/elderly'
@@ -20,6 +21,7 @@ import { getErrorMessage } from '@/api/http'
 import type {
   ElderlyApplicationFormRequest,
   ElderlyEvaluateResult,
+  ElderlyOperatorAddress,
   ElderlyPaybackSegment,
 } from '@/types/elderly'
 
@@ -118,6 +120,13 @@ const segments = ref<ElderlyPaybackSegment[]>([])
 const evaluated = ref(false)
 const ocrInputRef = ref<HTMLInputElement | null>(null)
 const ocrRunning = ref(false)
+const addressScope = ref<ElderlyOperatorAddress | null>(null)
+const addressScopeLoading = ref(false)
+const addressScopeError = ref('')
+
+const addressUnavailable = computed(
+  () => isCreate.value && addressScope.value !== null && addressScope.value.lockLevel === 0,
+)
 
 const age = computed(() => calculateAge(form.birthDate))
 const categoryText = computed(
@@ -262,6 +271,41 @@ async function runEvaluation(showMessage = true): Promise<void> {
   }
 }
 
+async function loadOperatorAddress(): Promise<void> {
+  addressScopeLoading.value = true
+  addressScopeError.value = ''
+  try {
+    const scope = await getElderlyOperatorAddress()
+    addressScope.value = scope
+    if (isCreate.value) {
+      applyOperatorScope(scope)
+    }
+  } catch (error) {
+    addressScope.value = null
+    addressScopeError.value = getErrorMessage(error, '读取经办机构区划失败')
+  } finally {
+    addressScopeLoading.value = false
+  }
+}
+
+function applyOperatorScope(scope: ElderlyOperatorAddress): void {
+  const province = scope.provinceName || '黑龙江省'
+  const village = scope.villageName || scope.villages[0]?.name || ''
+
+  form.hukouProvince = province
+  form.hukouCity = scope.cityName
+  form.hukouCounty = scope.countyName
+  form.hukouTown = scope.townName
+  form.hukouVillage = village
+  form.hukouDetailAddress = ''
+
+  form.familyProvince = province
+  form.familyCity = scope.cityName
+  form.familyCounty = scope.countyName
+  form.familyTown = scope.townName
+  form.familyVillage = village
+}
+
 async function handleIdCardBlur(): Promise<void> {
   if (isView.value) return
   const idCard = form.idCard.trim()
@@ -278,9 +322,6 @@ async function handleIdCardBlur(): Promise<void> {
         form.phone = form.phone || imported.phone || ''
         form.gender = form.gender || imported.gender || ''
         form.birthDate = form.birthDate || imported.birthDate?.slice(0, 10) || null
-        if (!form.hukouDetailAddress && imported.address) {
-          form.hukouDetailAddress = imported.address
-        }
       }
     } catch {
       // 导入名册查询失败不阻断手工录入。
@@ -339,7 +380,6 @@ async function handleOcrFile(event: Event): Promise<void> {
     if (result.idCard) form.idCard = result.idCard
     if (result.gender) form.gender = result.gender
     if (result.birthDate) form.birthDate = result.birthDate.slice(0, 10)
-    if (result.address && !form.hukouDetailAddress) form.hukouDetailAddress = result.address
     ElMessage.success('身份证识别完成')
     await handleIdCardBlur()
   } catch (error) {
@@ -390,7 +430,7 @@ function buildRequest(): ElderlyApplicationFormRequest {
     hukouCounty: form.hukouCounty,
     hukouTown: form.hukouTown,
     hukouVillage: form.hukouVillage,
-    hukouDetailAddress: form.hukouDetailAddress.trim(),
+    hukouDetailAddress: '',
     familyProvince: form.familyProvince,
     familyCity: form.familyCity,
     familyCounty: form.familyCounty,
@@ -466,6 +506,7 @@ function backToList(): void {
 async function load(): Promise<void> {
   if (isCreate.value) {
     form.applyDate = today
+    await loadOperatorAddress()
     return
   }
   if (!applicationId.value) {
@@ -473,6 +514,7 @@ async function load(): Promise<void> {
     return
   }
 
+  await loadOperatorAddress()
   loading.value = true
   loadError.value = ''
   try {
@@ -664,6 +706,17 @@ onMounted(() => {
         </NcCard>
 
         <NcCard title="户籍与住址">
+          <p v-if="addressScopeLoading" class="section-note">正在读取经办机构区划…</p>
+          <p v-else-if="addressScopeError" class="section-note scope-warning">
+            {{ addressScopeError }}
+          </p>
+          <p v-else-if="addressUnavailable" class="section-note scope-warning">
+            当前账号未绑定任何区划，地址不可选择。请先到「用户与权限管理 → 经办机构管理」为本单位补齐省/市/县/镇/村后再录入。
+          </p>
+          <p v-else-if="addressScope" class="section-note">
+            {{ addressScope.scopeDescription }}
+          </p>
+
           <p class="section-note">户籍地址（限本单位管辖范围）</p>
           <div class="address-block">
             <AddressCascader
@@ -672,16 +725,9 @@ onMounted(() => {
               v-model:district="form.hukouCounty"
               v-model:town="form.hukouTown"
               v-model:village="form.hukouVillage"
-              :disabled="isView"
+              :disabled="isView || addressUnavailable"
+              :locked-level="addressScope?.lockLevel ?? 0"
             />
-            <label class="field">
-              <span class="field-label">户籍详细地址（门牌号）</span>
-              <el-input
-                v-model="form.hukouDetailAddress"
-                :readonly="isView"
-                placeholder="如：柳树村99号"
-              />
-            </label>
           </div>
 
           <p class="section-note section-note--spaced">家庭住址（独立区划 · 全国可选）</p>
@@ -692,7 +738,8 @@ onMounted(() => {
               v-model:district="form.familyCounty"
               v-model:town="form.familyTown"
               v-model:village="form.familyVillage"
-              :disabled="isView"
+              :disabled="isView || addressUnavailable"
+              :locked-level="0"
             />
             <label class="field">
               <span class="field-label">家庭详细地址（门牌号）</span>
@@ -1038,6 +1085,10 @@ onMounted(() => {
 
 .section-note--spaced {
   margin-top: 18px;
+}
+
+.scope-warning {
+  color: var(--el-color-danger);
 }
 
 .address-block {

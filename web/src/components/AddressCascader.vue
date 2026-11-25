@@ -26,10 +26,13 @@ const props = withDefaults(
     village: string
     provinceReadonly?: boolean
     disabled?: boolean
+    /** 0=不锁定；1=省、2=市、3=县、4=镇、5=村，该级及以上全部锁定。 */
+    lockedLevel?: number
   }>(),
   {
     provinceReadonly: false,
     disabled: false,
+    lockedLevel: 0,
   },
 )
 
@@ -65,6 +68,12 @@ function withLegacyValue(options: RegionOption[], value: string): RegionOption[]
   if (options.some((option) => option.name.trim() === name)) return options
   return [{ id: -1, name }, ...options]
 }
+
+const provinceLocked = computed(() => props.lockedLevel >= 1)
+const cityLocked = computed(() => props.lockedLevel >= 2)
+const countyLocked = computed(() => props.lockedLevel >= 3)
+const townLocked = computed(() => props.lockedLevel >= 4)
+const villageLocked = computed(() => props.lockedLevel >= 5)
 
 const provinceOptions = computed(() => withLegacyValue(provinces.value, props.province))
 const cityOptions = computed(() => withLegacyValue(cities.value, props.city))
@@ -227,7 +236,7 @@ watch(
         filterable
         clearable
         placeholder="请选择省份"
-        :disabled="disabled"
+        :disabled="disabled || provinceLocked"
         @change="onProvinceChange"
       >
         <el-option
@@ -246,7 +255,7 @@ watch(
         filterable
         clearable
         placeholder="请选择城市"
-        :disabled="disabled"
+        :disabled="disabled || cityLocked"
         @change="onCityChange"
       >
         <el-option v-for="item in cityOptions" :key="item.name" :label="item.name" :value="item.name" />
@@ -260,7 +269,7 @@ watch(
         filterable
         clearable
         placeholder="请选择区县"
-        :disabled="disabled"
+        :disabled="disabled || countyLocked"
         @change="onDistrictChange"
       >
         <el-option
@@ -279,7 +288,7 @@ watch(
         filterable
         clearable
         placeholder="请选择乡镇/街道"
-        :disabled="disabled"
+        :disabled="disabled || townLocked"
         @change="onTownChange"
       >
         <el-option v-for="item in townOptions" :key="item.name" :label="item.name" :value="item.name" />
@@ -293,7 +302,7 @@ watch(
         filterable
         clearable
         placeholder="请选择村/社区"
-        :disabled="disabled"
+        :disabled="disabled || villageLocked"
         @change="onVillageChange"
       >
         <el-option

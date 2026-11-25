@@ -248,6 +248,24 @@ public sealed record ElderlyOcrResponse(
     string Address,
     IReadOnlyDictionary<string, string> Fields);
 
+/// <summary>当前账号经办机构区划（高龄表单默认值与户籍锁定）。</summary>
+public sealed record ElderlyOperatorAddressDto(
+    int? ProvinceId,
+    int? CityId,
+    int? CountyId,
+    int? TownId,
+    int? VillageId,
+    string ProvinceName,
+    string CityName,
+    string CountyName,
+    string TownName,
+    string VillageName,
+    int LockLevel,
+    string ScopeDescription,
+    IReadOnlyList<ElderlyOperatorVillageDto> Villages);
+
+public sealed record ElderlyOperatorVillageDto(long Id, string Name, string Code);
+
 /// <summary>停发办理请求（当前库在享人员或导入名册建档并停发共用）。</summary>
 public sealed class ElderlyStopRequest
 {

@@ -340,6 +340,29 @@ export interface ElderlyApplicationCreated {
   applicationNo: string
 }
 
+/** 当前账号经办机构区划（表单默认值与户籍锁定）。 */
+export interface ElderlyOperatorVillage {
+  id: number
+  name: string
+  code: string
+}
+
+export interface ElderlyOperatorAddress {
+  provinceId: number | null
+  cityId: number | null
+  countyId: number | null
+  townId: number | null
+  villageId: number | null
+  provinceName: string
+  cityName: string
+  countyName: string
+  townName: string
+  villageName: string
+  lockLevel: number
+  scopeDescription: string
+  villages: ElderlyOperatorVillage[]
+}
+
 /** 停发办理页头统计。 */
 export interface ElderlyStopStats {
   activeCount: number | null

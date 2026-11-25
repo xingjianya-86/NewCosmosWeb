@@ -9,6 +9,7 @@ using NewCosmos.Services.Core;
 using NewCosmos.Services.Database;
 using NewCosmos.Services.Domain.ElderlyBenefits;
 using NewCosmos.Services.Domain.Reporting;
+using NewCosmos.Services.Domain.UserManagement;
 using NewCosmos.Services.System;
 using NewCosmos.Services.UserManagement;
 
@@ -49,6 +50,7 @@ public static class ElderlyEndpoints
         app.MapPost("/api/elderly/applications/{id:long}/stop", StopApplicationAsync);
         app.MapPost("/api/elderly/stops/from-history/{historyId:long}", StopFromHistoryAsync);
         app.MapGet("/api/elderly/stops/stats", GetStopStatsAsync);
+        app.MapGet("/api/elderly/operator-address", GetOperatorAddressAsync);
 
         // 身份证 OCR（multipart file；请求体上限略大于 10MB，端点再按文件大小拦截）
         app.MapPost("/api/elderly/ocr/idcard", RecognizeIdCardAsync)
@@ -429,6 +431,93 @@ public static class ElderlyEndpoints
     }
 
     // ───────────────────────────── 停发办理 ─────────────────────────────
+
+    private static async Task<IResult> GetOperatorAddressAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.ELDERLY_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        var empty = new ElderlyOperatorAddressDto(
+            null, null, null, null, null,
+            string.Empty, string.Empty, string.Empty, string.Empty, string.Empty,
+            0, "当前账号未绑定区划，地址不可选择", []);
+
+        if (user.OrganizationId is not > 0)
+        {
+            return Results.Json(empty);
+        }
+
+        var services = context.RequestServices;
+        var organizationService = services.GetRequiredService<IOrganizationService>();
+        var organizationResult = await organizationService.GetByIdAsync(user.OrganizationId.Value, ct);
+        if (organizationResult.IsFailure || organizationResult.Value is null)
+        {
+            return Results.Json(empty);
+        }
+
+        var org = organizationResult.Value;
+        var lockLevel = ComputeAddressLockLevel(org);
+        var scopeDescription = lockLevel switch
+        {
+            >= 5 => $"户籍地址限本单位管辖范围（{org.ProvinceName}{org.CityName}{org.CountyName}{org.TownName}{org.VillageName}）",
+            >= 4 => $"户籍地址限本单位管辖范围（{org.ProvinceName}{org.CityName}{org.CountyName}{org.TownName}，村/社区可选）",
+            >= 3 => $"户籍地址限本单位管辖范围（{org.ProvinceName}{org.CityName}{org.CountyName}，乡镇村可选）",
+            >= 2 => $"户籍地址限本单位管辖范围（{org.ProvinceName}{org.CityName}，县乡村可选）",
+            >= 1 => $"户籍地址限本省范围（{org.ProvinceName}）",
+            _ => "当前账号未绑定区划，地址不可选择"
+        };
+
+        var villages = new List<ElderlyOperatorVillageDto>();
+        if (org.TownId is > 0)
+        {
+            var regionService = services.GetRequiredService<IRegionService>();
+            var villageResult = await regionService.GetVillagesByTownIdAsync(org.TownId.Value, ct);
+            if (villageResult.IsSuccess)
+            {
+                villages = (villageResult.Value ?? [])
+                    .Select(item => new ElderlyOperatorVillageDto(
+                        item.Id, item.VillageName ?? string.Empty, item.VillageCode ?? string.Empty))
+                    .ToList();
+            }
+        }
+
+        return Results.Json(new ElderlyOperatorAddressDto(
+            org.ProvinceId,
+            org.CityId,
+            org.CountyId,
+            org.TownId,
+            org.VillageId,
+            org.ProvinceName ?? string.Empty,
+            org.CityName ?? string.Empty,
+            org.CountyName ?? string.Empty,
+            org.TownName ?? string.Empty,
+            org.VillageName ?? string.Empty,
+            lockLevel,
+            scopeDescription,
+            villages));
+    }
+
+    private static int ComputeAddressLockLevel(Organization org)
+    {
+        if (org.VillageId is > 0 && !string.IsNullOrWhiteSpace(org.VillageName)) return 5;
+        if (org.TownId is > 0 && !string.IsNullOrWhiteSpace(org.TownName)) return 4;
+        if (org.CountyId is > 0 && !string.IsNullOrWhiteSpace(org.CountyName)) return 3;
+        if (org.CityId is > 0 && !string.IsNullOrWhiteSpace(org.CityName)) return 2;
+        if (org.ProvinceId is > 0 && !string.IsNullOrWhiteSpace(org.ProvinceName)) return 1;
+        return 0;
+    }
 
     private static async Task<IResult> GetStopStatsAsync(
         HttpContext context,

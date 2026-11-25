@@ -7,6 +7,7 @@ import type {
   ElderlyEvaluateResult,
   ElderlyIdCardOcrResult,
   ElderlyImportedItem,
+  ElderlyOperatorAddress,
   ElderlyPendingResponse,
   ElderlyReviewListResponse,
   ElderlyStopRequest,
@@ -153,6 +154,13 @@ export function deleteElderlyApplication(id: number | string): Promise<void> {
   return apiHttp
     .delete(`/elderly/applications/${encodeURIComponent(String(id))}`)
     .then(() => undefined)
+}
+
+/** 当前账号经办机构区划（高龄表单默认地址与户籍锁定）。 */
+export function getElderlyOperatorAddress(): Promise<ElderlyOperatorAddress> {
+  return apiHttp
+    .get<ElderlyOperatorAddress>('/elderly/operator-address')
+    .then((response) => response.data)
 }
 
 /** 停发办理页头统计（在享人数 / 本月停发人次）。 */
