@@ -149,7 +149,8 @@ export async function exportMonthlyReport(
   params.set('onlyCurrent', request.onlyCurrentStatusPersons ? 'true' : 'false')
 
   const headers: Record<string, string> = {
-    Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    Accept:
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/zip',
     'X-NC-Device': getDeviceId(),
   }
   const sessionId = getStoredSessionId()

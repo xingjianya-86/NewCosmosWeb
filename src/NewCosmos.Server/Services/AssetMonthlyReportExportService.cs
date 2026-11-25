@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.IO.Compression;
+using System.Text.Json;
 using NewCosmos.Constants;
 using NewCosmos.Helpers;
 using NewCosmos.Models.Results;
@@ -28,8 +30,16 @@ public sealed class AssetMonthlyReportExportService(
     public const string ContentType =
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
+    public const string ZipContentType = "application/zip";
+
     private const int MaxExportRows = 100_000;
     private const string WorksheetName = "核对名册";
+
+    /// <summary>旧版《通用_经济核查汇总表》模板分类（nc_biz_templates.categories）。</summary>
+    private const string MonthlyReportTemplateCategory = "AssetVerificationMonthlyReport";
+
+    /// <summary>模板每页最多 28 人；超过该页数时回退名册，避免一次生成上千个文件。</summary>
+    private const int MaxTemplatePages = 200;
 
     private const string SelectColumns =
         @"v.id, v.batch_id, v.applicant_name, v.applicant_id_card, v.applicant_id_type,
@@ -41,7 +51,7 @@ public sealed class AssetMonthlyReportExportService(
                     WHERE i.category = 'IdTypes'
                       AND i.item_key = v.applicant_id_type AND i.is_active LIMIT 1),
                    NULLIF(v.applicant_id_type, '')) AS id_type_display,
-          v.is_head, v.family_address,
+          v.relationship, v.head_id_card, v.is_head, v.family_address,
           COALESCE((SELECT rv.village_name FROM nc_regions_villages rv
                     WHERE rv.village_code = v.community LIMIT 1),
                    NULLIF(v.community, '')) AS community_display,
@@ -132,6 +142,26 @@ public sealed class AssetMonthlyReportExportService(
             .ThenBy(row => row.Id)
             .ToList();
 
+        // 旧版核对月报表走 ArchiveOutputPage 的模板输出：
+        // nc_biz_templates 中 categories 含 AssetVerificationMonthlyReport 的 xlsx 模板，
+        // 按 FAMILY_MEMBER_NAME_1..28 索引槽每页 28 人；超过一页时生成多个独立 xlsx。
+        try
+        {
+            var template = await LoadTemplateAsync(ct);
+            if (template is not null)
+            {
+                var files = BuildTemplateFiles(template, exportRows, request, period);
+                if (files.Count > 0)
+                {
+                    return Result.Success(PackTemplateFiles(files, period.FileName));
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // 模板损坏/格式不符时回退到名册导出，避免整次导出失败。
+        }
+
         byte[] content;
         try
         {
@@ -143,7 +173,388 @@ public sealed class AssetMonthlyReportExportService(
                 ErrorCodes.UNKNOWN_ERROR, $"生成核对月报表失败: {ex.Message}");
         }
 
-        return Result.Success(new AssetMonthlyReportExportFile(content, period.FileName));
+        return Result.Success(
+            new AssetMonthlyReportExportFile(content, period.FileName, ContentType));
+    }
+
+    /// <summary>读取旧版《通用_经济核查汇总表》模板（分类 AssetVerificationMonthlyReport）。</summary>
+    private async Task<MonthlyReportTemplate?> LoadTemplateAsync(CancellationToken ct)
+    {
+        const string sql = @"
+            SELECT file_data, config_json::text AS config_json
+            FROM nc_biz_templates
+            WHERE file_type = 'xlsx'
+              AND $1 = ANY(categories)
+            ORDER BY sort_order, id
+            LIMIT 1";
+
+        var result = await database.QuerySingleAsync<MonthlyReportTemplateRow>(
+            sql, ct, MonthlyReportTemplateCategory);
+        if (result.IsFailure)
+        {
+            return null;
+        }
+
+        var row = result.Value;
+        if (row is null || row.FileData is not { Length: > 0 })
+        {
+            return null;
+        }
+
+        return new MonthlyReportTemplate(row.FileData, row.ConfigJson);
+    }
+
+    /// <summary>
+    /// 按模板生成一页一个 xlsx：每页最多 28 人，超出时拆成多个独立文件。
+    /// 页数过多（&gt; <see cref="MaxTemplatePages"/>）时返回空列表，由调用方回退名册导出。
+    /// </summary>
+    private static List<TemplateExportFile> BuildTemplateFiles(
+        MonthlyReportTemplate template,
+        IReadOnlyList<AssetMonthlyReportRow> rows,
+        AssetMonthlyReportExportRequest request,
+        ExportPeriod period)
+    {
+        var fields = ParseTemplateFields(template.ConfigJson);
+        var capacity = GetIndexSlotCapacity(fields);
+        if (capacity <= 0)
+        {
+            return [];
+        }
+
+        // 与旧版 MonthlyReportViewModel 一致：按户主身份证聚在一起，户主/配偶优先。
+        var orderedRows = rows
+            .OrderBy(row => row.HeadIdCard ?? string.Empty, StringComparer.Ordinal)
+            .ThenBy(RelationPriority)
+            .ThenBy(row => row.Id)
+            .ToList();
+
+        var pageCount = Math.Max(1, (orderedRows.Count + capacity - 1) / capacity);
+        if (pageCount > MaxTemplatePages)
+        {
+            return [];
+        }
+
+        var baseName = Path.GetFileNameWithoutExtension(period.FileName);
+        var contextValues = BuildReportContextValues(request, period);
+        var files = new List<TemplateExportFile>(pageCount);
+
+        for (var page = 0; page < pageCount; page++)
+        {
+            var pageRows = orderedRows
+                .Skip(page * capacity)
+                .Take(capacity)
+                .ToList();
+
+            var content = BuildTemplatePage(template.Data, fields, capacity, pageRows, contextValues);
+            var fileName = pageCount == 1
+                ? $"{baseName}.xlsx"
+                : $"{baseName}_{page + 1}.xlsx";
+
+            files.Add(new TemplateExportFile(fileName, content));
+        }
+
+        return files;
+    }
+
+    private static byte[] BuildTemplatePage(
+        byte[] templateData,
+        IReadOnlyList<TemplateField> fields,
+        int capacity,
+        IReadOnlyList<AssetMonthlyReportRow> rows,
+        IReadOnlyDictionary<string, string> contextValues)
+    {
+        ExcelPackage.License.SetNonCommercialOrganization("民政社会救助管理系统");
+
+        using var package = new ExcelPackage(new MemoryStream(templateData, writable: false));
+        var sheet = package.Workbook.Worksheets[0]
+            ?? throw new InvalidOperationException("模板缺少工作表");
+
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (key, value) in contextValues)
+        {
+            values[key] = value;
+        }
+
+        for (var index = 0; index < capacity; index++)
+        {
+            var row = index < rows.Count ? rows[index] : null;
+            var suffix = index + 1;
+
+            values[$"FAMILY_MEMBER_NAME_{suffix}"] = row?.ApplicantName ?? string.Empty;
+            values[$"FAMILY_MEMBER_ID_CARD_{suffix}"] = row?.ApplicantIdCard ?? string.Empty;
+            values[$"FAMILY_MEMBER_RELATION_{suffix}"] = row?.RelationshipDisplay ?? string.Empty;
+            values[$"HEAD_ID_CARD_{suffix}"] = row?.HeadIdCard ?? string.Empty;
+            values[$"FAMILY_MEMBER_ADDRESS_{suffix}"] = row is null
+                ? string.Empty
+                : BuildTemplateAddress(row);
+        }
+
+        var placeholders = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var field in fields)
+        {
+            if (IsImageFieldKey(field.FieldKey))
+            {
+                continue;
+            }
+
+            if (values.TryGetValue(field.FieldKey, out var value))
+            {
+                placeholders[field.Placeholder] = value ?? string.Empty;
+            }
+            else if (!string.IsNullOrEmpty(field.DefaultValue))
+            {
+                placeholders[field.Placeholder] = field.DefaultValue!;
+            }
+        }
+
+        ReplacePlaceholders(sheet, placeholders);
+        return package.GetAsByteArray();
+    }
+
+    private static void ReplacePlaceholders(
+        ExcelWorksheet sheet,
+        IReadOnlyDictionary<string, string> placeholders)
+    {
+        if (placeholders.Count == 0 || sheet.Dimension is not { } dimension)
+        {
+            return;
+        }
+
+        for (var row = dimension.Start.Row; row <= dimension.End.Row; row++)
+        {
+            for (var column = dimension.Start.Column; column <= dimension.End.Column; column++)
+            {
+                var cell = sheet.Cells[row, column];
+                var text = cell.Text;
+                if (string.IsNullOrEmpty(text) || !text.Contains('{'))
+                {
+                    continue;
+                }
+
+                var replaced = text;
+                foreach (var (placeholder, value) in placeholders)
+                {
+                    if (replaced.Contains(placeholder, StringComparison.Ordinal))
+                    {
+                        replaced = replaced.Replace(placeholder, value, StringComparison.Ordinal);
+                    }
+                }
+
+                if (!string.Equals(replaced, text, StringComparison.Ordinal))
+                {
+                    cell.Value = replaced;
+                    if (replaced.Contains('\n'))
+                    {
+                        cell.Style.WrapText = true;
+                    }
+                }
+            }
+        }
+    }
+
+    private static List<TemplateField> ParseTemplateFields(string? configJson)
+    {
+        if (string.IsNullOrWhiteSpace(configJson))
+        {
+            return [];
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(configJson);
+            if (!document.RootElement.TryGetProperty("fields", out var fields)
+                || fields.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            var result = new List<TemplateField>();
+            foreach (var item in fields.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                var fieldKey = ReadString(item, "fieldKey");
+                var placeholder = ReadString(item, "placeholder");
+                if (string.IsNullOrWhiteSpace(fieldKey) || string.IsNullOrWhiteSpace(placeholder))
+                {
+                    continue;
+                }
+
+                result.Add(new TemplateField(
+                    fieldKey!,
+                    placeholder!,
+                    ReadString(item, "defaultValue")));
+            }
+
+            return result;
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static string? ReadString(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var property)
+            || property.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return property.GetString();
+    }
+
+    private static int GetIndexSlotCapacity(IReadOnlyList<TemplateField> fields)
+    {
+        const string prefix = "FAMILY_MEMBER_NAME_";
+        var capacity = 0;
+
+        foreach (var field in fields)
+        {
+            if (!field.FieldKey.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (int.TryParse(field.FieldKey[prefix.Length..], out var index) && index > capacity)
+            {
+                capacity = index;
+            }
+        }
+
+        return capacity;
+    }
+
+    private static int RelationPriority(AssetMonthlyReportRow row)
+    {
+        var relationship = (row.Relationship ?? string.Empty).Trim();
+        if (row.IsHead || string.Equals(relationship, "Head", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        if (string.Equals(relationship, "Spouse", StringComparison.OrdinalIgnoreCase))
+        {
+            return 1;
+        }
+
+        return 2;
+    }
+
+    /// <summary>
+    /// 与旧版 AddressResolver.BuildAddress 同口径：
+    /// 详细地址为空时用村社区名；详细地址已含镇/村/街道时直接使用；否则村社区名 + 门牌。
+    /// </summary>
+    private static string BuildTemplateAddress(AssetMonthlyReportRow row)
+    {
+        var detail = (row.FamilyAddress ?? string.Empty).Trim();
+        var community = (row.CommunityDisplay ?? string.Empty).Trim();
+
+        if (detail.Length == 0)
+        {
+            return community;
+        }
+
+        if (detail.Contains('镇') || detail.Contains('村') || detail.Contains("街道", StringComparison.Ordinal))
+        {
+            return detail;
+        }
+
+        if (community.Length == 0
+            || detail.StartsWith(community, StringComparison.Ordinal))
+        {
+            return detail;
+        }
+
+        return community + detail;
+    }
+
+    private static Dictionary<string, string> BuildReportContextValues(
+        AssetMonthlyReportExportRequest request,
+        ExportPeriod period)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["REPORT_PERIOD"] = DescribePeriod(request, period),
+            ["REPORT_ROSTER_SCOPE"] = request.OnlyCurrent ? "当前状态人员" : "整户名册",
+            ["REPORT_LABEL"] = DescribeReportLabel(request.Status),
+        };
+
+        if (period.Start is { } start)
+        {
+            values["REPORT_START_DATE"] = start.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        if (period.EndExclusive is { } end)
+        {
+            values["REPORT_END_DATE"] = end
+                .AddDays(-1)
+                .ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        }
+
+        return values;
+    }
+
+    private static string DescribePeriod(
+        AssetMonthlyReportExportRequest request,
+        ExportPeriod period)
+    {
+        if (request.AllMonths)
+        {
+            return "全部月份";
+        }
+
+        if (request.WeekStart is { } weekStart)
+        {
+            return $"{ISOWeek.GetYear(weekStart)}年第{ISOWeek.GetWeekOfYear(weekStart)}周";
+        }
+
+        var year = request.Year ?? DateTime.Now.Year;
+        return request.Month is { } month ? $"{year}年{month}月" : $"{year}年";
+    }
+
+    private static string DescribeReportLabel(string? status)
+        => status?.Trim() switch
+        {
+            AssetCheckStatusConstants.SUBMITTED => "已提交申请",
+            AssetCheckStatusConstants.VERIFIED => "有报告未建档",
+            AssetCheckStatusConstants.INCLUDED => "已建档",
+            AssetCheckStatusConstants.REFUSED => "不予认定",
+            _ => "全部导出",
+        };
+
+    private static bool IsImageFieldKey(string fieldKey)
+        => fieldKey.StartsWith("SIGNATURE_", StringComparison.OrdinalIgnoreCase)
+           || fieldKey.StartsWith("PHOTO_", StringComparison.OrdinalIgnoreCase);
+
+    private static AssetMonthlyReportExportFile PackTemplateFiles(
+        IReadOnlyList<TemplateExportFile> files,
+        string baseFileName)
+    {
+        if (files.Count == 1)
+        {
+            return new AssetMonthlyReportExportFile(
+                files[0].Content, files[0].FileName, ContentType);
+        }
+
+        var zipName = Path.GetFileNameWithoutExtension(baseFileName) + ".zip";
+        using var buffer = new MemoryStream();
+        using (var archive = new ZipArchive(buffer, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var file in files)
+            {
+                var entry = archive.CreateEntry(
+                    file.FileName, System.IO.Compression.CompressionLevel.Fastest);
+                using var stream = entry.Open();
+                stream.Write(file.Content, 0, file.Content.Length);
+            }
+        }
+
+        return new AssetMonthlyReportExportFile(buffer.ToArray(), zipName, ZipContentType);
     }
 
     private async Task<(string Where, List<object?> Parameters)> BuildWhereAsync(
@@ -363,8 +774,14 @@ public sealed class AssetMonthlyReportExportRequest
     public string? Keyword { get; init; }
 }
 
-/// <summary>导出文件快照：内容 + 下载文件名（中文名由端点写入 Content-Disposition）。</summary>
-public sealed record AssetMonthlyReportExportFile(byte[] Content, string FileName);
+/// <summary>
+/// 导出文件快照：内容 + 下载文件名 + Content-Type。
+/// 单页模板/名册回退为 xlsx；多页模板打包为 zip，内含多个独立 xlsx。
+/// </summary>
+public sealed record AssetMonthlyReportExportFile(
+    byte[] Content,
+    string FileName,
+    string ContentType);
 
 /// <summary>名册行：字典 / 区划已在上游 SQL 转成可展示文案。</summary>
 public sealed class AssetMonthlyReportRow
@@ -374,9 +791,11 @@ public sealed class AssetMonthlyReportRow
     public string? ApplicantName { get; set; }
     public string? ApplicantIdCard { get; set; }
     public string? ApplicantIdType { get; set; }
+    public string? Relationship { get; set; }
     public string? RelationshipDisplay { get; set; }
     public string? IdTypeDisplay { get; set; }
     public bool IsHead { get; set; }
+    public string? HeadIdCard { get; set; }
     public string? FamilyAddress { get; set; }
     public string? CommunityDisplay { get; set; }
     public string? ApplicationReasonDisplay { get; set; }
@@ -385,3 +804,15 @@ public sealed class AssetMonthlyReportRow
     public string? OperatorName { get; set; }
     public string? OperatorUnitName { get; set; }
 }
+
+internal sealed class MonthlyReportTemplateRow
+{
+    public byte[]? FileData { get; set; }
+    public string? ConfigJson { get; set; }
+}
+
+internal sealed record MonthlyReportTemplate(byte[] Data, string? ConfigJson);
+
+internal sealed record TemplateField(string FieldKey, string Placeholder, string? DefaultValue);
+
+internal sealed record TemplateExportFile(string FileName, byte[] Content);

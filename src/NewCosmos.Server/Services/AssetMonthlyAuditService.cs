@@ -157,7 +157,24 @@ public sealed class AssetMonthlyAuditService(IDatabaseService database)
                 checkResult.ErrorCode!, checkResult.Message!);
         }
 
-        const string sql = @"
+        // 报告按户归档：同户任一成员行的报告都属于本户。
+        // 旧版 PdfVerificationService.GetReportHistoryByCheckIdAsync 同样按 head_id_card 查询；
+        // 只按 check_id 查询会让同户非报告行（如配偶）显示“暂无报告”。
+        var headIdCard = (checkResult.Value.HeadIdCard ?? string.Empty).Trim();
+
+        const string householdSql = @"
+            SELECT r.id, r.report_file_name, r.report_date, r.version, r.is_current,
+                   COALESCE(r.report_size, octet_length(r.report_data)) AS size
+            FROM nc_biz_asset_check_reports r
+            WHERE r.check_id IN (
+                SELECT c.id
+                FROM nc_biz_asset_checks c
+                WHERE c.head_id_card = $1 AND c.deleted_at IS NULL
+            )
+            ORDER BY r.version DESC, r.id DESC
+            LIMIT 200";
+
+        const string checkSql = @"
             SELECT id, report_file_name, report_date, version, is_current,
                    COALESCE(report_size, octet_length(report_data)) AS size
             FROM nc_biz_asset_check_reports
@@ -165,7 +182,9 @@ public sealed class AssetMonthlyAuditService(IDatabaseService database)
             ORDER BY version DESC, id DESC
             LIMIT 200";
 
-        var rowsResult = await database.QueryAsync<CheckReportRow>(sql, ct, checkId);
+        var rowsResult = headIdCard.Length > 0
+            ? await database.QueryAsync<CheckReportRow>(householdSql, ct, headIdCard)
+            : await database.QueryAsync<CheckReportRow>(checkSql, ct, checkId);
         if (rowsResult.IsFailure)
         {
             return Result.Failure<AssetCheckReportListResponse>(
@@ -213,11 +232,19 @@ public sealed class AssetMonthlyAuditService(IDatabaseService database)
 
         var check = checkResult.Value;
         var headIdCard = (check.HeadIdCard ?? string.Empty).Trim();
+        var householdScoped = headIdCard.Length > 0;
 
-        var versionResult = await database.ExecuteScalarAsync<int>(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM nc_biz_asset_check_reports WHERE check_id = $1",
-            ct,
-            checkId);
+        // 版本号按户计算（与旧版一致）：报告可能从同户任一成员行上传，
+        // 若按 check_id 计算，同户不同成员会各自从 v1 开始，历史版本号重复。
+        var versionResult = householdScoped
+            ? await database.ExecuteScalarAsync<int>(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM nc_biz_asset_check_reports WHERE head_id_card = $1",
+                ct,
+                headIdCard)
+            : await database.ExecuteScalarAsync<int>(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM nc_biz_asset_check_reports WHERE check_id = $1",
+                ct,
+                checkId);
         if (versionResult.IsFailure)
         {
             return Result.Failure<AssetCheckReportUploadResult>(
@@ -228,14 +255,17 @@ public sealed class AssetMonthlyAuditService(IDatabaseService database)
 
         // 每户只允许一条 is_current（ux_check_reports_current_per_head 为 head_id_card 唯一索引），
         // 因此同户其他成员行上的当前报告也一并转历史；无 head_id_card 的旧数据按 check_id 兜底。
-        const string supersedeSql = @"
-            UPDATE nc_biz_asset_check_reports
-            SET is_current = FALSE, superseded_at = NOW()
-            WHERE is_current
-              AND (head_id_card = $1 OR check_id = $2)";
+        var supersedeSql = householdScoped
+            ? @"UPDATE nc_biz_asset_check_reports
+                SET is_current = FALSE, superseded_at = NOW()
+                WHERE is_current AND head_id_card = $1"
+            : @"UPDATE nc_biz_asset_check_reports
+                SET is_current = FALSE, superseded_at = NOW()
+                WHERE is_current AND check_id = $1";
 
-        var supersedeResult = await database.ExecuteNonQueryAsync(
-            supersedeSql, ct, headIdCard, checkId);
+        var supersedeResult = householdScoped
+            ? await database.ExecuteNonQueryAsync(supersedeSql, ct, headIdCard)
+            : await database.ExecuteNonQueryAsync(supersedeSql, ct, checkId);
         if (supersedeResult.IsFailure)
         {
             return Result.Failure<AssetCheckReportUploadResult>(

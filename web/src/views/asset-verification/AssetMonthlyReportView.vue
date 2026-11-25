@@ -431,7 +431,9 @@ onMounted(() => {
     </NcCard>
 
     <NcCard :title="`${reportTypeLabel}表输出`">
-      <p class="export-desc">选择时间周期后，点击下方按钮导出核查人员名册。</p>
+      <p class="export-desc">
+        选择时间周期后，按旧版《经济核查汇总表》模板导出核查人员名册。
+      </p>
 
       <el-checkbox v-model="onlyCurrentStatusPersons" class="roster-scope">
         仅导出当前状态人员（不展开整户）
@@ -481,7 +483,10 @@ onMounted(() => {
         </el-button>
       </div>
 
-      <p class="export-note">导出为 xlsx 文件；默认展开同户全部成员，勾选后仅导出状态匹配人员。</p>
+      <p class="export-note">
+        按旧版模板输出，每页 28 人；超过一页时生成多个独立 xlsx 并打包为 zip。
+        默认展开同户全部成员，勾选后仅导出状态匹配人员。
+      </p>
     </NcCard>
 
     <NcCard title="全局导出">

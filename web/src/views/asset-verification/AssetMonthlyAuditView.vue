@@ -154,9 +154,9 @@ const activeReport = computed(
 )
 
 const previewSubtitle = computed(() => {
-  if (!selectedTask.value) return '选中待核对人员后查看其核查报告'
+  if (!selectedTask.value) return '选中待核对人员后查看本户核查报告'
   if (reportsLoading.value) return '正在读取报告版本…'
-  if (!activeReport.value) return '该人员暂无报告文件'
+  if (!activeReport.value) return '本户暂无报告文件'
   const current = activeReport.value.isCurrent ? ' · 当前版本' : ''
   return `v${activeReport.value.version} · ${textOrDash(activeReport.value.fileName)}${current}`
 })
@@ -955,7 +955,7 @@ onMounted(() => {
 
           <p v-if="batchMessage" class="card-note upload-footnote">{{ batchMessage }}</p>
           <p v-else class="card-note upload-footnote">
-            上传前请确认已选中人员，报告会归属到该人员的核对记录。
+            上传前请确认已选中人员；报告按户归档，会归属到本户核对记录。
           </p>
         </NcCard>
 
@@ -1014,7 +1014,7 @@ onMounted(() => {
 
             <div v-else-if="reports.length === 0" class="preview-placeholder">
               <span class="preview-badge" aria-hidden="true">PDF</span>
-              <strong class="preview-title">该人员暂无报告</strong>
+              <strong class="preview-title">本户暂无报告</strong>
               <p class="preview-note">
                 可通过“保存报告”上传单个文件，或在下方“报告上传”中批量上传文件夹。
               </p>
@@ -1057,7 +1057,7 @@ onMounted(() => {
           <div v-if="!selectedTask" class="versions-empty">选中左侧人员后显示报告版本</div>
           <div v-else-if="reportsLoading" class="versions-empty">正在读取报告版本…</div>
           <div v-else-if="reportsError" class="versions-empty">{{ reportsError }}</div>
-          <div v-else-if="reports.length === 0" class="versions-empty">该人员暂无报告版本</div>
+          <div v-else-if="reports.length === 0" class="versions-empty">本户暂无报告版本</div>
 
           <ul v-else class="version-list">
             <li v-for="report in reports" :key="report.id">

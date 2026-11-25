@@ -107,7 +107,7 @@ public static class AssetMonthlyReportEndpoints
 
         return Results.File(
             result.Value.Content,
-            AssetMonthlyReportExportService.ContentType,
+            result.Value.ContentType,
             result.Value.FileName);
     }
 
