@@ -303,6 +303,15 @@ function normalizeFamilyCategory(value: string): string {
   return text
 }
 
+/** 兼容旧档：standard_tier 为空时从旧文本档位（50%/75%/100%）反推。 */
+function legacyTierCode(level: string | null | undefined): string {
+  const text = (level ?? '').trim()
+  if (text.includes('100')) return 'S100'
+  if (text.includes('75')) return 'S75'
+  if (text.includes('50')) return 'S50'
+  return ''
+}
+
 function normalizeDifficulty(value: string | null | undefined): DifficultyType {
   const text = (value ?? '').trim()
   return (DIFFICULTY_TYPES as readonly string[]).includes(text)
@@ -994,7 +1003,7 @@ function applyDetail(current: TempReliefDetail): void {
   form.familyMemberStatus = current.familyMemberStatus
   form.verifyResult = current.verifyResult
   form.acceptancePerson = current.acceptancePerson
-  form.standardTier = current.standardTier ?? ''
+  form.standardTier = current.standardTier || legacyTierCode(current.smallAmountLevel)
   form.confirmAmount = current.confirmAmount ?? undefined
   form.reliefPersonCount = Math.max(
     current.reliefPersonCount || current.familySize || 1,
