@@ -566,6 +566,7 @@ const manualHitsLedger = computed(
 const scenarioFresh = computed(() => {
   const current = detail.value
   if (!current) return false
+  if (manualEntry.value && !identity.value) return false
   const currentPopulation = identity.value?.populationStatus ?? current.populationStatus
   return (
     current.reliefType === form.reliefType
@@ -716,7 +717,9 @@ const countyConfirmText = computed(() => {
 const filingText = computed(() => {
   if (!detail.value) return '保存后生成'
   if (!detail.value.filingRequired) return '不适用（备用金 / 小额）'
-  return detail.value.filingStatusText || (detail.value.filingStatus === 'Filed' ? '已备案' : '待备案')
+  if (detail.value.filingStatus === 'Filed' || detail.value.filingStatusText === '已备案') return '已备案'
+  if (detail.value.status === 'Confirmed') return '待备案'
+  return '确认后进入备案'
 })
 
 const economicCheckText = computed(() => {
@@ -742,8 +745,10 @@ const actionHint = computed(() => {
   if (manualHitsLedger.value) notes.push('身份证命中四类在册台账，禁止手工登记，请改用检索选择')
   if (isCreate.value) {
     notes.push('新建申请保存后可执行提交、确认、打印等动作')
+  } else if (isView.value) {
+    notes.push('查看模式：仅可查看与打印')
   } else if (isReadonly.value) {
-    notes.push(`当前状态「${statusText.value}」为只读，仅可查看与打印`)
+    notes.push(`当前状态「${statusText.value}」不可编辑；可执行下方可用的状态动作或打印`)
   } else {
     notes.push('当前可编辑；保存后按状态显示可执行动作')
   }
@@ -1283,6 +1288,11 @@ function enterManualEntry(): void {
   annualMessage.value = ''
   candidates.value = []
   candidateSearched.value = false
+  diseases.value = []
+  accidents.value = []
+  educations.value = []
+  form.difficultyType = '其他困难'
+  form.difficultyReason = ''
 }
 
 function backToSearch(): void {
@@ -1298,6 +1308,13 @@ function backToSearch(): void {
   identityError.value = ''
   annualBlocked.value = false
   annualMessage.value = ''
+  candidates.value = []
+  candidateSearched.value = false
+  diseases.value = []
+  accidents.value = []
+  educations.value = []
+  form.difficultyType = '其他困难'
+  form.difficultyReason = ''
 }
 
 function handleManualIdInput(): void {
@@ -1925,14 +1942,14 @@ async function handleOcrResult(result: TempReliefOcrResponse): Promise<void> {
     pending.push(apply)
   }
 
-  assign('姓名', applicant.name, result.name, () => { applicant.name = result.name })
-  assign('身份证号', applicant.idCard, result.idCard.toUpperCase(), () => {
-    applicant.idCard = result.idCard.toUpperCase()
+  assign('姓名', applicant.name, result.name.trim(), () => { applicant.name = result.name.trim() })
+  assign('身份证号', applicant.idCard, result.idCard.trim().toUpperCase(), () => {
+    applicant.idCard = result.idCard.trim().toUpperCase()
   })
   assign('住址（详细地址）', applicant.detailAddress, stripKnownAddressPrefix(result.address), () => {
     applicant.detailAddress = stripKnownAddressPrefix(result.address)
   })
-  assign('性别', applicant.gender, result.gender, () => { applicant.gender = result.gender })
+  assign('性别', applicant.gender, result.gender.trim(), () => { applicant.gender = result.gender.trim() })
 
   if (conflicts.length > 0) {
     const message = conflicts
@@ -1951,8 +1968,8 @@ async function handleOcrResult(result: TempReliefOcrResponse): Promise<void> {
         },
       )
       overwrite = true
-    } catch (error) {
-      if (error === 'close') return
+    } catch {
+      // 取消/关闭均视为「仅填空」：不覆盖已修改内容。
     }
     if (overwrite) {
       pending.forEach((apply) => apply())
@@ -1966,7 +1983,7 @@ async function handleOcrResult(result: TempReliefOcrResponse): Promise<void> {
   if (!applicant.gender) applicant.gender = result.gender || genderFromIdCard(applicant.idCard)
 
   if (emptyFields.length === 0) {
-    ElMessage.info('识别结果与现有内容一致，无需回填')
+    ElMessage.info('未回填任何字段，现有内容已保留')
     return
   }
 
@@ -2214,7 +2231,7 @@ onMounted(() => {
         <NcCard
           v-if="candidateSelected || manualEntry"
           title="申请人信息"
-          :subtitle="manualEntry ? '手工登记可填写身份与住址；保存时服务端仍会复核在册身份。' : '姓名、身份证号与地址分列来自来源记录；联系电话与银行账户可修正。'"
+          :subtitle="manualEntry ? '手工登记可填写身份与住址；保存时服务端仍会复核在册身份。' : '姓名、身份证号与地址分列来自来源记录；详细地址可修正。'"
         >
           <div class="form-grid">
             <label class="field">
@@ -2254,17 +2271,6 @@ onMounted(() => {
             <label class="field">
               <span class="field-label">户籍分类</span>
               <el-input :model-value="formatHukouType(applicant.hukouType)" readonly />
-            </label>
-            <label class="field">
-              <span class="field-label">家庭类别</span>
-              <el-select v-model="applicant.familyCategory" :disabled="!isEditable" filterable clearable>
-                <el-option
-                  v-for="option in familyCategoryOptions"
-                  :key="option"
-                  :label="option"
-                  :value="option"
-                />
-              </el-select>
             </label>
             <label class="field">
               <span class="field-label">家庭人口</span>
@@ -2431,6 +2437,17 @@ onMounted(() => {
             <label class="field">
               <span class="field-label">联系电话</span>
               <el-input v-model="applicant.phone" :disabled="!isEditable" maxlength="30" />
+            </label>
+            <label class="field">
+              <span class="field-label">家庭类别</span>
+              <el-select v-model="applicant.familyCategory" :disabled="!isEditable" filterable clearable>
+                <el-option
+                  v-for="option in familyCategoryOptions"
+                  :key="option"
+                  :label="option"
+                  :value="option"
+                />
+              </el-select>
             </label>
             <label class="field">
               <span class="field-label">救助对象 *</span>
