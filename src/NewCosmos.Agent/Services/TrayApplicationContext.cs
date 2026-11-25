@@ -110,6 +110,9 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
         var bindPrinters = new Forms.ToolStripMenuItem("绑定本机打印机…");
         bindPrinters.Click += async (_, _) => await BindPrintersAsync().ConfigureAwait(true);
 
+        var openOutput = new Forms.ToolStripMenuItem("打开输出目录");
+        openOutput.Click += (_, _) => OpenOutputDirectory();
+
         var openConfig = new Forms.ToolStripMenuItem("打开配置文件");
         openConfig.Click += (_, _) => OpenConfigFile();
 
@@ -119,6 +122,7 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
         menu.Items.Add(openLogs);
         menu.Items.Add(heartbeatNow);
         menu.Items.Add(bindPrinters);
+        menu.Items.Add(openOutput);
         menu.Items.Add(openConfig);
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add(exit);
@@ -223,6 +227,26 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
         {
             _logger.Warn($"[Tray] 打开日志目录失败: {ex.Message}");
             ShowBalloon("打开日志目录失败", ex.Message, Forms.ToolTipIcon.Error);
+        }
+    }
+
+    /// <summary>托盘菜单：打开批量保存输出目录（{OutputRoot}\高龄月报），不存在时先创建。</summary>
+    private void OpenOutputDirectory()
+    {
+        try
+        {
+            var folder = OutputFolderService.EnsureCategoryFolder(
+                _settings.OutputRoot, OutputFolderService.DefaultCategory);
+            OutputFolderService.OpenFolder(folder);
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"[Tray] 打开输出目录失败: {ex.Message}");
+            Forms.MessageBox.Show(
+                $"打开输出目录失败: {ex.Message}",
+                "打开输出目录",
+                Forms.MessageBoxButtons.OK,
+                Forms.MessageBoxIcon.Warning);
         }
     }
 

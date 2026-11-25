@@ -118,6 +118,64 @@ public sealed class AgentJobPayload
     public string? TableStartMarker { get; set; }
 
     public string? TableEndMarker { get; set; }
+
+    /// <summary>
+    /// 批量模板任务（JobKind=TemplateBatch）：一次渲染多份模板/多页并合并预览、打印或保存。
+    /// 非空时 Agent 走批量执行路径，忽略上面的单模板字段。
+    /// </summary>
+    public AgentBatchPayload? Batch { get; set; }
+}
+
+/// <summary>
+/// 批量模板任务负载（payload.batch）。
+/// <para>
+/// templates 每个模板只出现一次（带模板字节/哈希）；parts 每个元素代表一页/一份渲染产物
+/// （高龄月报每页 13 人；满 90 岁一人一份）。mode=open-folder 时 parts 可为空。
+/// </para>
+/// </summary>
+public sealed class AgentBatchPayload
+{
+    /// <summary>preview / print / save / open-folder。</summary>
+    public string Mode { get; set; } = "preview";
+
+    /// <summary>输出分类目录名，默认「高龄月报」。</summary>
+    public string Category { get; set; } = "高龄月报";
+
+    /// <summary>期间（月报为 yyyyMM，如 202611），用于输出目录。</summary>
+    public string Period { get; set; } = "";
+
+    public List<AgentBatchTemplate> Templates { get; set; } = new();
+
+    public List<AgentBatchPart> Parts { get; set; } = new();
+}
+
+/// <summary>批量任务中的模板（每个模板只出现一次，模板字节只下发一次）。</summary>
+public sealed class AgentBatchTemplate
+{
+    public long TemplateId { get; set; }
+
+    public string FileName { get; set; } = "";
+
+    public string FileType { get; set; } = "xlsx";
+
+    public string FileBase64 { get; set; } = "";
+
+    public string? ConfigJson { get; set; }
+
+    public string? TemplateHash { get; set; }
+}
+
+/// <summary>批量任务中的一页/一份渲染产物（fields 为 FieldKey → 值，由模板 configJson 映射占位符）。</summary>
+public sealed class AgentBatchPart
+{
+    public long TemplateId { get; set; }
+
+    /// <summary>保存到输出目录时的文件名（不含扩展名或带扩展名均可；为空时按任务号兜底）。</summary>
+    public string? FileName { get; set; }
+
+    public Dictionary<string, string> Fields { get; set; } = new(StringComparer.Ordinal);
+
+    public List<Dictionary<string, string>> TableRows { get; set; } = new();
 }
 
 /// <summary>POST /api/agent/jobs/{id}/fail 请求体。</summary>

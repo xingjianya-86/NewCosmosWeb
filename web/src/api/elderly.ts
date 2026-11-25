@@ -7,8 +7,11 @@ import type {
   ElderlyEvaluateResult,
   ElderlyIdCardOcrResult,
   ElderlyImportedItem,
+  ElderlyMonthlyReport,
   ElderlyOperatorAddress,
   ElderlyPendingResponse,
+  ElderlyReportJobInput,
+  ElderlyReportJobResult,
   ElderlyReviewListResponse,
   ElderlyStopRequest,
   ElderlyStopStats,
@@ -197,5 +200,28 @@ export function ocrElderlyIdCard(file: File): Promise<ElderlyIdCardOcrResult> {
   form.append('file', file)
   return apiHttp
     .post<ElderlyIdCardOcrResult>('/elderly/ocr/idcard', form, { timeout: 120_000 })
+    .then((response) => response.data)
+}
+
+/** 高龄津贴月报统计（自然月新增/停止与明细表清单）。 */
+export function getElderlyMonthlyReport(
+  year: number,
+  month: number,
+): Promise<ElderlyMonthlyReport> {
+  return apiHttp
+    .get<ElderlyMonthlyReport>('/elderly/reports', { params: { year, month } })
+    .then((response) => response.data)
+}
+
+/**
+ * 创建月报任务（预览 / 打印 / 保存 / 打开输出目录）。
+ *
+ * 预览与打印由 PC Agent 领取并打开/发送到本机设备；Web 不内嵌 PDF。
+ */
+export function createElderlyReportJob(
+  input: ElderlyReportJobInput,
+): Promise<ElderlyReportJobResult> {
+  return apiHttp
+    .post<ElderlyReportJobResult>('/elderly/reports/jobs', input)
     .then((response) => response.data)
 }

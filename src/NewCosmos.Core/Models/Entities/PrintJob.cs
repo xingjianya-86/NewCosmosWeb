@@ -47,6 +47,9 @@ public class PrintJob
     /// <summary>表格行数据 JSON（List&lt;Dictionary&lt;string,string&gt;&gt;）</summary>
     public string? TableRowsJson { get; set; }
 
+    /// <summary>批量任务快照 JSON（<see cref="PrintBatchDefinition"/>，JobKind=TemplateBatch 时有值）</summary>
+    public string? BatchJson { get; set; }
+
     /// <summary>赡养人表格数据 JSON</summary>
     public string? SupporterTableDataJson { get; set; }
 
@@ -153,6 +156,12 @@ public static class PrintJobConstants
     /// </summary>
     public const string JobKindPreview = "Preview";
 
+    /// <summary>
+    /// 任务类型：批量模板（多模板/多明细页一次入队，payload 走 batch 分支）。
+    /// 执行动作由 batch.mode（preview/print/save/open-folder）决定。
+    /// </summary>
+    public const string JobKindTemplateBatch = "TemplateBatch";
+
     public static string GetStatusName(string? status) => status switch
     {
         StatusPending => "待打印",
@@ -166,6 +175,7 @@ public static class PrintJobConstants
     {
         JobKindPhoto => "照片",
         JobKindPreview => "预览",
+        JobKindTemplateBatch => "批量文书",
         _ => "模板文书",
     };
 }
@@ -206,6 +216,12 @@ public class PrintJobRequest
 
     public List<Dictionary<string, string>> TableRows { get; set; } = new();
 
+    /// <summary>
+    /// 批量任务定义（JobKind=TemplateBatch 时必填）：一次任务内多模板/多明细页，
+    /// 入队时序列化到 batch_json，Agent payload 按模板集合 + 逐 part 字段下发。
+    /// </summary>
+    public PrintBatchDefinition? Batch { get; set; }
+
     public List<Dictionary<string, string>>? SupporterTableData { get; set; }
 
     public int? RequestedBy { get; set; }
@@ -245,4 +261,39 @@ public class PrintImagePayload
     public string? FileName { get; set; }
 
     public string? FieldKey { get; set; }
+}
+
+/// <summary>
+/// 批量打印任务定义（<see cref="PrintJob.BatchJson"/> / <see cref="PrintJobRequest.Batch"/>）。
+/// 一次任务可包含多个模板的多个明细页（如高龄月报：4 类新增 + 4 类停止 + 满 90 周岁逐人页）。
+/// </summary>
+public sealed class PrintBatchDefinition
+{
+    /// <summary>preview | print | save | open-folder</summary>
+    public string Mode { get; set; } = "preview";
+
+    /// <summary>业务分类（如「高龄月报」），用于展示/留痕。</summary>
+    public string Category { get; set; } = "高龄月报";
+
+    /// <summary>周期（yyyyMM，如 202611）。</summary>
+    public string Period { get; set; } = "";
+
+    public List<PrintBatchPart> Parts { get; set; } = new();
+}
+
+/// <summary>
+/// 批量任务的单个输出单元：一个模板 + 一份字段数据（= 一张明细页/逐人页）。
+/// </summary>
+public sealed class PrintBatchPart
+{
+    public long TemplateId { get; set; }
+
+    public string? TemplateName { get; set; }
+
+    /// <summary>输出文件名（含扩展名，Agent 保存/预览时使用）。</summary>
+    public string? FileName { get; set; }
+
+    public Dictionary<string, string> Fields { get; set; } = new(StringComparer.Ordinal);
+
+    public List<Dictionary<string, string>> TableRows { get; set; } = new();
 }

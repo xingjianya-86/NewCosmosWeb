@@ -14,7 +14,7 @@ namespace NewCosmos.Agent.Services;
 /// 含个人信息的渲染源文件/PDF 仍在任务结束后立即清理。
 /// </para>
 /// </summary>
-public sealed class JobTaskExecutor : IJobTaskExecutor
+public sealed partial class JobTaskExecutor : IJobTaskExecutor
 {
     private readonly ITemplateJobRenderer _renderer;
     private readonly IJobPrinter _printer;
@@ -22,6 +22,7 @@ public sealed class JobTaskExecutor : IJobTaskExecutor
     private readonly TemplateCache _templates;
     private readonly ILoggerService _logger;
     private readonly int _previewKeepCount;
+    private readonly string _outputRoot;
 
     public JobTaskExecutor(
         ITemplateJobRenderer renderer,
@@ -29,7 +30,8 @@ public sealed class JobTaskExecutor : IJobTaskExecutor
         JobFileStore files,
         TemplateCache templates,
         ILoggerService logger,
-        int previewKeepCount)
+        int previewKeepCount,
+        string? outputRoot = null)
     {
         _renderer = renderer ?? throw new ArgumentNullException(nameof(renderer));
         _printer = printer ?? throw new ArgumentNullException(nameof(printer));
@@ -37,12 +39,17 @@ public sealed class JobTaskExecutor : IJobTaskExecutor
         _templates = templates ?? throw new ArgumentNullException(nameof(templates));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _previewKeepCount = previewKeepCount < 1 ? 1 : previewKeepCount;
+        _outputRoot = OutputFolderService.ResolveRoot(outputRoot);
     }
 
     public async Task<string?> ExecuteAsync(AgentJob job, AgentJobPayload payload, CancellationToken ct)
     {
         if (payload == null)
             throw new BusinessException("JOB_PAYLOAD_INVALID", "任务负载为空");
+
+        // 批量模板任务优先：一份负载内含多个模板/多页，走独立执行路径。
+        if (payload.Batch is not null)
+            return await ExecuteBatchAsync(job, payload, payload.Batch, ct).ConfigureAwait(false);
 
         var jobNo = FirstNonEmpty(job.JobNo, $"job-{job.Id}")!;
         var fileType = _renderer.ResolveFileType(payload.TemplateFileType, payload.TemplateFileName);

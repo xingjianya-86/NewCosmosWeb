@@ -38,6 +38,13 @@ public sealed class AgentSettings
     /// <summary>预览 PDF 保留最近 N 个（默认 10），更早的尽力删除。</summary>
     public int PreviewKeepCount { get; set; } = 10;
 
+    /// <summary>
+    /// 批量模板任务/保存类任务的输出根目录，默认 %USERPROFILE%\Documents\NewCosmos。
+    /// 实际输出目录为 {OutputRoot}\{分类}\{期间}\（如 ...\NewCosmos\高龄月报\202611）。
+    /// 支持环境变量。
+    /// </summary>
+    public string OutputRoot { get; set; } = @"%USERPROFILE%\Documents\NewCosmos";
+
     /// <summary>上报的机器名，缺省取 Environment.MachineName。</summary>
     public string MachineName { get; set; } = string.Empty;
 
@@ -79,6 +86,16 @@ public sealed class AgentSettings
             ? Path.Combine(Path.GetTempPath(), "NewCosmos", "PrintJobs")
             : Environment.ExpandEnvironmentVariables(PrintJobsDirectory.Trim());
         PrintJobsDirectory = Path.GetFullPath(printJobsDirectory);
+
+        // 保存类任务输出根：缺失时回退默认（Documents\NewCosmos），保证老配置文件也有可用值。
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var defaultOutputRoot = string.IsNullOrWhiteSpace(userProfile)
+            ? Path.Combine(Path.GetTempPath(), "NewCosmos", "Output")
+            : Path.Combine(userProfile, "Documents", "NewCosmos");
+        var outputRoot = string.IsNullOrWhiteSpace(OutputRoot)
+            ? defaultOutputRoot
+            : Environment.ExpandEnvironmentVariables(OutputRoot.Trim());
+        OutputRoot = Path.GetFullPath(outputRoot);
 
         DeviceKeyFile = ResolveDeviceKeyFile(configFilePath);
     }

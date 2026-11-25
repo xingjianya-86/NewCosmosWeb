@@ -388,6 +388,9 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
         var imagesJson = request.Images is { Count: > 0 }
             ? JsonSerializer.Serialize(request.Images, JsonOptions)
             : null;
+        var batchJson = request.Batch is null
+            ? null
+            : JsonSerializer.Serialize(request.Batch, JsonOptions);
 
         var jobKind = string.IsNullOrWhiteSpace(request.JobKind)
             ? PrintJobConstants.JobKindTemplate
@@ -404,12 +407,12 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
                  fields_json, table_rows_json, supporter_table_data_json, images_json,
                  job_kind, photo_data, photo_layout, photo_category,
                  status, requested_by, requested_by_name, created_at,
-                 target_user_id, target_device_id, target_printer)
+                 target_user_id, target_device_id, target_printer, batch_json)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
                         $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb,
                         $16, $17, $18, $19,
                         $22, $20, $21, NOW(),
-                        $23, $24, $25)
+                        $23, $24, $25, $26::jsonb)
                 RETURNING id, job_no, status, created_at";
 
         var result = await database.QuerySingleAsync<PrintJob>(sql, ct,
@@ -421,7 +424,8 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
             jobKind, request.PhotoData, request.PhotoLayout, request.PhotoCategory,
             request.RequestedBy, request.RequestedByName,
             PrintJobConstants.StatusPending,
-            request.TargetUserId, request.TargetDeviceId, request.TargetPrinter);
+            request.TargetUserId, request.TargetDeviceId, request.TargetPrinter,
+            batchJson);
 
         if (result.IsFailure)
         {
@@ -657,6 +661,7 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
                                     table_rows_json::text AS TableRowsJson,
                                     supporter_table_data_json::text AS SupporterTableDataJson,
                                     images_json::text AS ImagesJson,
+                                    batch_json::text AS BatchJson,
                                     status, error_message, requested_by, requested_by_name, agent_machine,
                                     created_at, claimed_at, completed_at
                              FROM nc_biz_print_jobs WHERE id = $1 AND deleted_at IS NULL";

@@ -80,7 +80,7 @@ const featureCards: FeatureCard[] = [
     title: '高龄津贴月报表',
     description: '按月生成、导出发放统计报表',
     icon: Document,
-    to: '/coming-soon/elderly-report',
+    to: '/elderly/reports',
   },
   {
     key: 'review',

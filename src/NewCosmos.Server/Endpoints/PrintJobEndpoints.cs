@@ -570,6 +570,12 @@ public static class PrintJobEndpoints
             return Forbidden(context, "任务已被其他设备领取");
         }
 
+        // 批量任务：template_id 为空，模板集合由 batch.parts 的 template_id 去重后逐个下发。
+        if (!string.IsNullOrWhiteSpace(job.BatchJson))
+        {
+            return await BuildBatchPayloadAsync(context, job, queue, ct);
+        }
+
         if (job.TemplateId is not > 0)
         {
             return InvalidRequest(context, "任务缺少模板 ID");
@@ -619,7 +625,120 @@ public static class PrintJobEndpoints
             tableEndMarker,
             templateHash,
             images,
-            cacheHit));
+            cacheHit,
+            Batch: null));
+    }
+
+    /// <summary>
+    /// 批量任务 payload：反序列化 batch_json，按 distinct templateId 逐个取模板文件，
+    /// 一次下发模板集合（Base64 + config_json + file_hash）与逐 part 字段，Agent 逐 part 渲染。
+    /// </summary>
+    private static async Task<IResult> BuildBatchPayloadAsync(
+        HttpContext context,
+        PrintJob job,
+        ArchivePrintQueueService queue,
+        CancellationToken ct)
+    {
+        PrintBatchDefinition? batch;
+        try
+        {
+            batch = System.Text.Json.JsonSerializer.Deserialize<PrintBatchDefinition>(
+                job.BatchJson!,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            batch = null;
+        }
+
+        if (batch is null)
+        {
+            return Conflict(context, "批量任务数据损坏，无法下发");
+        }
+
+        // jsonb 历史/异常数据可能把 parts 写成 null；统一按空批次处理。
+        batch.Parts ??= [];
+
+        // open-folder 只让 Agent 打开输出目录，允许没有 part；其他模式必须有输出内容。
+        if (batch.Parts.Count == 0
+            && !string.Equals(batch.Mode, "open-folder", StringComparison.OrdinalIgnoreCase))
+        {
+            return Conflict(context, "批量任务没有可输出的明细页");
+        }
+
+        var templates = new List<AgentBatchTemplate>();
+        var templateIds = batch.Parts
+            .Select(part => part.TemplateId)
+            .Where(templateId => templateId > 0)
+            .Distinct()
+            .ToList();
+
+        foreach (var templateId in templateIds)
+        {
+            var templateResult = await queue.GetTemplateFileAsync(templateId, ct);
+            if (templateResult.IsFailure)
+            {
+                return MapResult(context, templateResult);
+            }
+
+            var template = templateResult.Value;
+            if (template is null)
+            {
+                return NotFound(context, $"批量任务模板不存在（ID={templateId}）");
+            }
+
+            if (template.FileData is not { Length: > 0 })
+            {
+                return ApiErrors.Write(context, StatusCodes.Status409Conflict,
+                    "TEMPLATE_FILE_EMPTY", $"模板文件为空，无法下发（ID={templateId}）");
+            }
+
+            var (fileType, extension) = ResolveFileType(template.FileType);
+            templates.Add(new AgentBatchTemplate
+            {
+                TemplateId = template.Id,
+                FileName = BuildFileName(template.Name, extension),
+                FileType = fileType,
+                FileBase64 = Convert.ToBase64String(template.FileData),
+                ConfigJson = template.ConfigJson,
+                TemplateHash = ResolveTemplateHash(template.FileHash, template.FileData),
+            });
+        }
+
+        var payload = new AgentBatchPayload
+        {
+            Mode = batch.Mode,
+            Category = batch.Category,
+            Period = batch.Period,
+            Templates = templates,
+            Parts = batch.Parts.Select(part => new AgentBatchPart
+            {
+                TemplateId = part.TemplateId,
+                FileName = part.FileName,
+                Fields = part.Fields,
+                TableRows = part.TableRows,
+            }).ToList(),
+        };
+
+        return Results.Json(new AgentJobPayloadResponse(
+            null,
+            string.Empty,
+            string.Empty,
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            [],
+            job.JobKind,
+            job.PrinterName,
+            job.Copies,
+            job.IsDuplex,
+            job.ApplicantName,
+            job.ApplicantIdCard,
+            null,
+            null,
+            null,
+            null,
+            [],
+            false,
+            payload));
     }
 
     /// <summary>POST /api/agent/jobs/{id}/complete（body 可选 { message }：降级打印等警告文案）。</summary>
@@ -1166,7 +1285,54 @@ public sealed record AgentJobPayloadResponse(
     string? TableEndMarker,
     string? TemplateHash,
     IReadOnlyList<PrintImagePayload> Images,
-    bool Cached);
+    bool Cached,
+    AgentBatchPayload? Batch);
+
+/// <summary>
+/// GET /api/agent/jobs/{id}/payload 批量任务段（JobKind=TemplateBatch）。
+/// 模板按 templateId 去重后放在 templates；parts 逐页引用 templateId 并提供 fields/tableRows。
+/// </summary>
+public sealed class AgentBatchPayload
+{
+    /// <summary>preview | print | save | open-folder</summary>
+    public string Mode { get; set; } = "preview";
+
+    public string Category { get; set; } = "高龄月报";
+
+    public string Period { get; set; } = "";
+
+    public List<AgentBatchTemplate> Templates { get; set; } = new();
+
+    public List<AgentBatchPart> Parts { get; set; } = new();
+}
+
+/// <summary>批量任务下发的模板文件（Base64 + config_json + file_hash）。</summary>
+public sealed class AgentBatchTemplate
+{
+    public long TemplateId { get; set; }
+
+    public string FileName { get; set; } = "";
+
+    public string FileType { get; set; } = "xlsx";
+
+    public string FileBase64 { get; set; } = "";
+
+    public string? ConfigJson { get; set; }
+
+    public string? TemplateHash { get; set; }
+}
+
+/// <summary>批量任务的单页输出单元（引用 templates 中的 templateId）。</summary>
+public sealed class AgentBatchPart
+{
+    public long TemplateId { get; set; }
+
+    public string? FileName { get; set; }
+
+    public Dictionary<string, string> Fields { get; set; } = new(StringComparer.Ordinal);
+
+    public List<Dictionary<string, string>> TableRows { get; set; } = new();
+}
 
 /// <summary>POST /api/agent/jobs/{id}/fail 请求体。</summary>
 public sealed record AgentFailRequest(string? ErrorMessage);

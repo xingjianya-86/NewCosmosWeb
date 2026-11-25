@@ -369,6 +369,49 @@ export interface ElderlyStopStats {
   monthlyStopped: number | null
 }
 
+/* ───────────────────────── 高龄津贴月报表 ───────────────────────── */
+
+/** 月报明细表选项（GET /api/elderly/reports）。 */
+export interface ElderlyMonthlyFormOption {
+  key: string
+  label: string
+  count: number
+  hasData: boolean
+}
+
+/** 高龄津贴月报统计（自然月口径）。 */
+export interface ElderlyMonthlyReport {
+  year: number
+  month: number
+  cycleRangeText: string
+  reportTitleText: string
+  newCount: number
+  stopCount: number
+  statusText: string
+  forms: ElderlyMonthlyFormOption[]
+}
+
+/** 月报任务模式：preview/print/save 需要 formKeys；open-folder 不需要。 */
+export type ElderlyReportJobMode = 'preview' | 'print' | 'save' | 'open-folder'
+
+/** 月报任务提交体（POST /api/elderly/reports/jobs）。 */
+export interface ElderlyReportJobInput {
+  year: number
+  month: number
+  formKeys: string[]
+  mode: ElderlyReportJobMode
+  copies?: number
+  isDuplex?: boolean
+}
+
+/** 月报任务创建结果；实际渲染/打印由 PC Agent 领取执行。 */
+export interface ElderlyReportJobResult {
+  id: number
+  jobNo: string
+  status: string
+  jobKind: string
+}
+
 /** 停发办理请求。 */
 export interface ElderlyStopRequest {
   dueStopDate: string | null

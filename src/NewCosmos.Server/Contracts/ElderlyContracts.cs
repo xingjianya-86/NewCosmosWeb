@@ -289,4 +289,49 @@ public sealed class ElderlyStopRequest
     public string? Remark { get; init; }
 }
 
+// ───────────────────────────── 高龄月报表（统计 + 批量打印） ─────────────────────────────
+
+/// <summary>高龄月报表单项：key/label 直接取 Core <c>GetMonthlyDetailFormOptions</c>。</summary>
+public sealed record ElderlyMonthlyReportFormDto(
+    string Key,
+    string Label,
+    int Count,
+    bool HasData);
+
+/// <summary>GET /api/elderly/reports 响应（自然月周期）。</summary>
+public sealed record ElderlyMonthlyReportStatisticsDto(
+    int Year,
+    int Month,
+    string CycleRangeText,
+    string ReportTitleText,
+    int NewCount,
+    int StopCount,
+    string StatusText,
+    IReadOnlyList<ElderlyMonthlyReportFormDto> Forms);
+
+/// <summary>POST /api/elderly/reports/jobs 请求体。</summary>
+public sealed class ElderlyMonthlyReportJobRequest
+{
+    public int? Year { get; init; }
+
+    public int? Month { get; init; }
+
+    /// <summary>明细表 key（如 CAT1_新增 / AGE90_调整）；open-folder 模式可为空。</summary>
+    public IReadOnlyList<string>? FormKeys { get; init; }
+
+    /// <summary>preview | print | save | open-folder（默认 preview）。</summary>
+    public string? Mode { get; init; }
+
+    public int? Copies { get; init; }
+
+    public bool? IsDuplex { get; init; }
+}
+
+/// <summary>POST /api/elderly/reports/jobs 响应。</summary>
+public sealed record ElderlyMonthlyReportJobCreatedResponse(
+    long Id,
+    string JobNo,
+    string Status,
+    string JobKind);
+
 #endregion

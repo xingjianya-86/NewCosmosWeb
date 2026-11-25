@@ -31,6 +31,8 @@ public static class ElderlyEndpoints
     public static IEndpointRouteBuilder MapElderlyEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapGet("/api/elderly/summary", GetSummaryAsync);
+        app.MapGet("/api/elderly/reports", GetMonthlyReportAsync);
+        app.MapPost("/api/elderly/reports/jobs", CreateMonthlyReportJobsAsync);
         app.MapGet("/api/elderly/applications", ListApplicationsAsync);
         app.MapGet("/api/elderly/applications/{id:long}", GetApplicationDetailAsync);
 
@@ -78,6 +80,93 @@ public static class ElderlyEndpoints
         return result.IsFailure
             ? ApiErrors.FromResult(context, result)
             : Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// GET /api/elderly/reports?year=&amp;month=
+    /// 高龄津贴月报表自然月统计：9 个明细表人数 + 新增/停止合计。
+    /// 计数失败一律 500（不允许按 0 返回，避免误读为当月真实无数据）。
+    /// </summary>
+    private static async Task<IResult> GetMonthlyReportAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        ILoggerService logger,
+        CancellationToken ct,
+        int? year,
+        int? month)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.ELDERLY_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (year is not (>= 1900 and <= 9999))
+        {
+            return InvalidRequest(context, "年份参数无效");
+        }
+
+        if (month is not (>= 1 and <= 12))
+        {
+            return InvalidRequest(context, "月份参数应为 1-12");
+        }
+
+        var yearValue = year.GetValueOrDefault();
+        var monthValue = month.GetValueOrDefault();
+        var result = await CreateReportService(context).GetStatisticsAsync(
+            yearValue, monthValue, ct);
+        if (result.IsFailure)
+        {
+            logger.Error(
+                $"高龄月报统计失败: {yearValue}-{monthValue} {result.ErrorCode} {result.Message}");
+            return ApiErrors.Write(
+                context,
+                StatusCodes.Status500InternalServerError,
+                result.ErrorCode ?? ApiErrorCodes.DbError,
+                result.Message);
+        }
+
+        return Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// POST /api/elderly/reports/jobs
+    /// 高龄月报批量打印任务：preview / print / save / open-folder，目标固定当前账号默认绑定打印机。
+    /// </summary>
+    private static async Task<IResult> CreateMonthlyReportJobsAsync(
+        ElderlyMonthlyReportJobRequest? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.PRINT_ELDERLYBENEFITS, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        if (request is null)
+        {
+            return InvalidRequest(context, "请求体不能为空");
+        }
+
+        var result = await CreateReportService(context).CreateBatchAsync(
+            user.Id, OperatorName(user), user.OrganizationId, request, ct);
+        if (result.IsFailure)
+        {
+            return MapElderlyResult(context, result);
+        }
+
+        var job = result.Value;
+        return Results.Json(new ElderlyMonthlyReportJobCreatedResponse(
+            job.Id, job.JobNo, job.Status, job.JobKind));
     }
 
     private static async Task<IResult> ListApplicationsAsync(
@@ -884,6 +973,18 @@ public static class ElderlyEndpoints
         return new ElderlyApplicationWriteService(
             services.GetRequiredService<IElderlyApplicationService>(),
             services.GetRequiredService<IRegionService>(),
+            services.GetRequiredService<ILoggerService>());
+    }
+
+    /// <summary>高龄月报表服务：统计与批量任务共用同一套 Core 口径。</summary>
+    private static ElderlyMonthlyReportService CreateReportService(HttpContext context)
+    {
+        var services = context.RequestServices;
+        return new ElderlyMonthlyReportService(
+            services.GetRequiredService<IElderlyApplicationService>(),
+            services.GetRequiredService<ArchivePrintQueueService>(),
+            services.GetRequiredService<PrinterBindingService>(),
+            services.GetRequiredService<IDatabaseService>(),
             services.GetRequiredService<ILoggerService>());
     }
 

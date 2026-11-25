@@ -214,6 +214,12 @@ const router = createRouter({
           meta: { title: '高龄津贴复核' },
         },
         {
+          path: 'elderly/reports',
+          name: 'elderly-reports',
+          component: () => import('@/views/elderly/ElderlyMonthlyReportView.vue'),
+          meta: { title: '高龄津贴月报表' },
+        },
+        {
           path: 'asset-verification',
           name: 'asset-verification-home',
           component: () => import('@/views/asset-verification/AssetVerificationHomeView.vue'),
