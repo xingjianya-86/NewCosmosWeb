@@ -7,6 +7,7 @@ using NewCosmos.Server.Configuration;
 using NewCosmos.Server.Endpoints;
 using NewCosmos.Server.Infrastructure;
 using NewCosmos.Server.Services;
+using NewCosmos.Server.Services.DataCenter;
 using NewCosmos.Services.Core;
 using NewCosmos.Services.Database;
 using NewCosmos.Services.Domain.AssetVerification;
@@ -21,6 +22,13 @@ using NewCosmos.Services.Domain.SocialAssistance;
 using NewCosmos.Services.Domain.SpecialApproval;
 using NewCosmos.Services.Domain.TempRelief;
 using NewCosmos.Services.Domain.UserManagement;
+using NewCosmos.Services.Import;
+using NewCosmos.Services.Import.Destitute;
+using NewCosmos.Services.Import.LowIncomeEdge;
+using NewCosmos.Services.Import.OtherDifficulty;
+using NewCosmos.Services.Import.RigidExpenditure;
+using NewCosmos.Services.Import.RuralSubsistence;
+using NewCosmos.Services.Import.UrbanSubsistence;
 using NewCosmos.Services.System;
 using NewCosmos.Services.UserManagement;
 using NewCosmos.Services.Utilities;
@@ -47,6 +55,8 @@ builder.Services.AddSingleton(serverOptions.Database);
 builder.Services.AddSingleton(serverOptions.Storage);
 builder.Services.AddSingleton(serverOptions.App);
 builder.Services.AddSingleton(serverOptions.Performance);
+builder.Services.AddSingleton(serverOptions.DataCenter);
+builder.Services.AddSingleton<IConfigService, ServerConfigService>();
 
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -105,6 +115,25 @@ builder.Services.AddSingleton<IDataScopeService, DataScopeService>();
 
 // 业务统计/查询服务：全部复用 Core，禁止在 Server 重抄口径。
 builder.Services.AddSingleton<ISeedMergeService, SeedMergeService>();
+// 数据中心：Schema 状态/修复、备份还原、日志与软删除维护、后台任务。
+builder.Services.AddSingleton<ISchemaService, SchemaService>();
+builder.Services.AddSingleton<IDatabaseBackupService, DatabaseBackupService>();
+builder.Services.AddSingleton<DataCenterService>();
+builder.Services.AddSingleton<DataImportService>();
+builder.Services.AddSingleton<DataCenterJobRegistry>();
+builder.Services.AddSingleton<MaintenanceState>();
+// 数据导入：6 个组合导入 + 4 个单文件导入，算法全部在 Core。
+builder.Services.AddSingleton<ICombinedImportService, RuralSubsistenceImportService>();
+builder.Services.AddSingleton<ICombinedImportService, UrbanSubsistenceImportService>();
+builder.Services.AddSingleton<ICombinedImportService, LowIncomeEdgeImportService>();
+builder.Services.AddSingleton<ICombinedImportService, RigidExpenditureImportService>();
+builder.Services.AddSingleton<ICombinedImportService, DestituteImportService>();
+builder.Services.AddSingleton<ICombinedImportService, OtherDifficultyImportService>();
+builder.Services.AddSingleton<IImportService, ElderlySubsidyImportService>();
+builder.Services.AddSingleton<IImportService, AnnualPlantingSubsidyImportService>();
+builder.Services.AddSingleton<IImportService, LandContractImportService>();
+builder.Services.AddSingleton<IImportService, BankFlowImportService>();
+builder.Services.AddSingleton<IImportServiceManager, ImportServiceManager>();
 builder.Services.AddSingleton<IStandardConfigService, StandardConfigService>();
 builder.Services.AddSingleton<ElderlyCategoryService>();
 builder.Services.AddSingleton<IHolidayService, HolidayService>();
@@ -197,6 +226,7 @@ app.Use(async (context, next) =>
 });
 app.UseResponseCompression();
 app.UseCors();
+app.UseMiddleware<MaintenanceModeMiddleware>();
 app.UseMiddleware<SessionAuthenticationMiddleware>();
 
 app.MapAuthEndpoints();
@@ -230,6 +260,11 @@ app.MapAssetVerificationEndpoints();
 app.MapAssetMonthlyAuditEndpoints();
 app.MapAssetMonthlyReportEndpoints();
 app.MapSystemEndpoints();
+app.MapDataCenterEndpoints();
+app.MapDataImportEndpoints();
+app.MapDictionaryEndpoints();
+app.MapStandardConfigEndpoints();
+app.MapBankFlowEndpoints();
 app.MapRegionEndpoints();
 
 if (serverOptions.AutoMigrate)

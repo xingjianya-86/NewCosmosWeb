@@ -304,6 +304,42 @@ const router = createRouter({
           meta: { title: '照片中心' },
         },
         {
+          path: 'system/data-center',
+          name: 'data-center',
+          component: () => import('@/views/system/data-center/DataCenterHomeView.vue'),
+          meta: { title: '数据中心' },
+        },
+        {
+          path: 'system/data-center/import',
+          name: 'data-center-import',
+          component: () => import('@/views/system/data-center/DataImportView.vue'),
+          meta: { title: '数据导入' },
+        },
+        {
+          path: 'system/data-center/dictionary',
+          name: 'data-center-dictionary',
+          component: () => import('@/views/system/data-center/DictionaryManageView.vue'),
+          meta: { title: '数据字典管理' },
+        },
+        {
+          path: 'system/data-center/standards',
+          name: 'data-center-standards',
+          component: () => import('@/views/system/data-center/StandardConfigView.vue'),
+          meta: { title: '标准配置管理' },
+        },
+        {
+          path: 'system/data-center/regions',
+          name: 'data-center-regions',
+          component: () => import('@/views/system/data-center/RegionManageView.vue'),
+          meta: { title: '行政区划管理' },
+        },
+        {
+          path: 'system/data-center/bank-flow',
+          name: 'data-center-bank-flow',
+          component: () => import('@/views/system/data-center/BankFlowView.vue'),
+          meta: { title: '银行流水核对' },
+        },
+        {
           path: 'archives/publicity',
           name: 'archive-publicity',
           component: () => import('@/views/archives/PublicityView.vue'),

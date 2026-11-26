@@ -36,7 +36,7 @@ ENV TZ=Asia/Shanghai \
 # curl 供 healthcheck / 运维排查；tzdata 保证 Asia/Shanghai 正确。
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends curl ca-certificates tzdata; \
+    apt-get install -y --no-install-recommends curl ca-certificates tzdata postgresql-client-16; \
     if [ "$INSTALL_CJK_FONTS" = "true" ]; then \
         apt-get install -y --no-install-recommends fonts-noto-cjk; \
     fi; \

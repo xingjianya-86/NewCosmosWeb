@@ -17,6 +17,11 @@
     <None Update="Migrations\001_printer_binding.sql"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
+    <!-- 数据中心 Schema 状态/修复的权威表定义（来自 PC Resources/Schema）。 -->
+    <Content Include="Resources\Schema\**\*.yaml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

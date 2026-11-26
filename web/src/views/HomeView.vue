@@ -281,7 +281,7 @@ const moduleGroups: ModuleGroup[] = [
         iconBg: '#F8FAFC',
         iconColor: '#6d6354',
         buttonText: '进入模块',
-        to: '/coming-soon/database',
+        to: '/system/data-center',
       },
       {
         title: '用户与权限管理',

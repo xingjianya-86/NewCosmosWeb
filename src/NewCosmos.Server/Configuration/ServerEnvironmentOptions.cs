@@ -15,6 +15,7 @@ public sealed class ServerEnvironmentOptions
     public required StorageOptions Storage { get; init; }
     public required AppOptions App { get; init; }
     public required PerformanceOptions Performance { get; init; }
+    public required DataCenterOptions DataCenter { get; init; }
 
     public required string[] CorsOrigins { get; init; }
     public required string AgentRegisterToken { get; init; }
@@ -112,6 +113,7 @@ public sealed class ServerEnvironmentOptions
             Storage = storage,
             App = app,
             Performance = performance,
+            DataCenter = DataCenterOptions.Load(),
             CorsOrigins = origins,
             AgentRegisterToken = GetString("NC_AGENT_REGISTER_TOKEN", string.Empty).Trim(),
             AutoMigrate = GetBool("NC_AUTO_MIGRATE", false),
