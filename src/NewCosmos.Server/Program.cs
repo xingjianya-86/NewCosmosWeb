@@ -203,6 +203,7 @@ builder.Services.AddScoped<NewCosmos.Services.Domain.ArchiveManagement.IArchiveP
 builder.Services.AddScoped<PhotoPrintService>();
 builder.Services.AddScoped<TemplateAdminService>();
 builder.Services.AddScoped<PublicityService>();
+builder.Services.AddReprintServices();
 builder.Services.AddScoped<ArchiveProductionDataService>();
 // 死亡情况说明：本村范围、身份八源、提醒、联动、申报台账。
 builder.Services.AddSingleton<DeathIdentityAggregator>();
@@ -245,6 +246,7 @@ app.MapNearRelativeEndpoints();
 app.MapQuickVerifyEndpoints();
 app.MapTempReliefEndpoints();
 app.MapDutyEndpoints();
+app.MapReprintEndpoints();
 app.MapIcd10Endpoints();
 app.MapRecoveryEndpoints();
 app.MapArchiveEndpoints();

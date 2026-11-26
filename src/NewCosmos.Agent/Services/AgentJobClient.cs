@@ -120,6 +120,35 @@ public sealed partial class HttpAgentClient
         await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// POST /api/agent/jobs/{id}/records：打印/保存成功后回传实际生成文件（Base64）。
+    /// 单条记录可能数 MB，使用独立的长超时 HttpClient，避免 20s 全局超时误伤；
+    /// 调用方负责把失败降级为 Warn（不影响任务完成）。
+    /// </summary>
+    public async Task UploadPrintRecordsAsync(
+        string serverBaseUrl,
+        string deviceKey,
+        long jobId,
+        IReadOnlyList<AgentPrintRecord> records,
+        CancellationToken ct = default)
+    {
+        EnsureDeviceKey(deviceKey);
+        if (records is not { Count: > 0 }) return;
+
+        var body = new AgentJobRecordsRequest { Records = records.ToList() };
+
+        using var message = new HttpRequestMessage(
+            HttpMethod.Post,
+            CombineUrl(serverBaseUrl, $"{JobsPath}/{jobId}/records"))
+        {
+            Content = CreateJsonContent(body)
+        };
+        message.Headers.Add("X-NC-Device-Key", deviceKey);
+
+        using var response = await _uploadHttp.SendAsync(message, ct).ConfigureAwait(false);
+        await EnsureSuccessAsync(response, ct).ConfigureAwait(false);
+    }
+
     private static void EnsureDeviceKey(string deviceKey)
     {
         if (string.IsNullOrWhiteSpace(deviceKey))

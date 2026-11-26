@@ -52,7 +52,8 @@ public static class WorkerRunner
         var printer = new JobPrinter(renderer, logger);
         var templates = new TemplateCache(logger);
         var executor = new JobTaskExecutor(
-            renderer, printer, files, templates, logger, settings.PreviewKeepCount, settings.OutputRoot);
+            renderer, printer, files, templates, logger, settings.PreviewKeepCount, settings.OutputRoot,
+            client, settings.ServerBaseUrl, deviceKey);
 
         var worker = new JobWorker(
             client,

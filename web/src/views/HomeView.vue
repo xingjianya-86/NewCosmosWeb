@@ -312,7 +312,7 @@ const moduleGroups: ModuleGroup[] = [
         iconBg: '#F0F9FF',
         iconColor: '#6d6354',
         buttonText: '进入模块',
-        to: '/coming-soon/reprint',
+        to: '/reprint',
       },
     ],
   },

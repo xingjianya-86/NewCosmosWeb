@@ -274,6 +274,12 @@ const router = createRouter({
           meta: { title: '核对月报表' },
         },
         {
+          path: 'reprint',
+          name: 'reprint',
+          component: () => import('@/views/reprint/ReprintView.vue'),
+          meta: { title: '历史补打中心' },
+        },
+        {
           path: 'printers',
           name: 'printers',
           component: () => import('@/views/PrintersView.vue'),
@@ -392,6 +398,10 @@ const router = createRouter({
           name: 'duty-holidays',
           component: () => import('@/views/duty/HolidayView.vue'),
           meta: { title: '节假日维护' },
+        },
+        {
+          path: 'coming-soon/reprint',
+          redirect: '/reprint',
         },
         {
           path: 'coming-soon/duty',

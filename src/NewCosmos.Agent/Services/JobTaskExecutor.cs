@@ -23,6 +23,9 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
     private readonly ILoggerService _logger;
     private readonly int _previewKeepCount;
     private readonly string _outputRoot;
+    private readonly IAgentJobClient? _jobClient;
+    private readonly string? _serverBaseUrl;
+    private readonly string? _deviceKey;
 
     public JobTaskExecutor(
         ITemplateJobRenderer renderer,
@@ -31,7 +34,10 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
         TemplateCache templates,
         ILoggerService logger,
         int previewKeepCount,
-        string? outputRoot = null)
+        string? outputRoot = null,
+        IAgentJobClient? jobClient = null,
+        string? serverBaseUrl = null,
+        string? deviceKey = null)
     {
         _renderer = renderer ?? throw new ArgumentNullException(nameof(renderer));
         _printer = printer ?? throw new ArgumentNullException(nameof(printer));
@@ -40,6 +46,9 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _previewKeepCount = previewKeepCount < 1 ? 1 : previewKeepCount;
         _outputRoot = OutputFolderService.ResolveRoot(outputRoot);
+        _jobClient = jobClient;
+        _serverBaseUrl = serverBaseUrl;
+        _deviceKey = deviceKey;
     }
 
     public async Task<string?> ExecuteAsync(AgentJob job, AgentJobPayload payload, CancellationToken ct)
@@ -137,7 +146,7 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
             {
                 var pageWarning = await PrintChunksAsync(
                     templatePath, fileType, fields, chunks, images, payload,
-                    jobNo, printerName, copies, isDuplex, ct)
+                    job.Id, job.TemplateName, jobNo, printerName, copies, isDuplex, ct)
                     .ConfigureAwait(false);
 
                 _logger.Info(
@@ -157,9 +166,22 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
                 .ExportPdfFromSourceAsync(sourcePath, fileType, pdfPath, ct)
                 .ConfigureAwait(false);
 
+            // 打印前读取字节：打印进程可能占用文件，且打印成功后会立即删除临时文件。
+            var record = await TryReadRecordAsync(
+                    job.TemplateName,
+                    BuildRecordFileName(job.TemplateName, jobNo, fileType),
+                    fileType,
+                    sourcePath,
+                    pdfPath,
+                    ct)
+                .ConfigureAwait(false);
+
             var warning = await _printer
                 .PrintAsync(pdfPath, sourcePath, fileType, printerName, copies, isDuplex, ct)
                 .ConfigureAwait(false);
+
+            // 打印成功才回传；失败/取消由 UploadRecordAsync 内部降级为 Warn。
+            await UploadRecordAsync(job.Id, record, ct).ConfigureAwait(false);
 
             // 打印成功：只清理渲染源/PDF（含个人敏感信息）；模板缓存保留复用。
             _files.TryDelete(sourcePath, pdfPath);
@@ -226,6 +248,8 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
         IReadOnlyList<List<Dictionary<string, string>>> chunks,
         IReadOnlyList<PrintImagePayload> images,
         AgentJobPayload payload,
+        long jobId,
+        string? templateName,
         string jobNo,
         string? printerName,
         int copies,
@@ -256,11 +280,22 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
                     .ExportPdfFromSourceAsync(partSource, fileType, partPdf, ct)
                     .ConfigureAwait(false);
 
+                // 打印前读取，打印成功后回传；本页失败则随 catch 清理且不上传本页。
+                var record = await TryReadRecordAsync(
+                        templateName,
+                        BuildRecordFileName(null, partNo, fileType),
+                        fileType,
+                        partSource,
+                        partPdf,
+                        ct)
+                    .ConfigureAwait(false);
+
                 var warning = await _printer
                     .PrintAsync(partPdf, partSource, fileType, printerName, copies, isDuplex, ct)
                     .ConfigureAwait(false);
 
                 combinedWarning = CombineWarnings(combinedWarning, warning);
+                await UploadRecordAsync(jobId, record, ct).ConfigureAwait(false);
                 _files.TryDelete(partSource, partPdf);
             }
 

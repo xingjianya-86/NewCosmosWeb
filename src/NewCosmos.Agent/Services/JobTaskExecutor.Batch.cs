@@ -62,8 +62,8 @@ public sealed partial class JobTaskExecutor
         {
             BatchModePreview => await PreviewBatchAsync(jobNo, parts, sources, ct).ConfigureAwait(false),
             BatchModePrint => await PrintBatchAsync(
-                jobNo, parts, sources, printerName, copies, isDuplex, ct).ConfigureAwait(false),
-            BatchModeSave => await SaveBatchAsync(jobNo, batch, parts, sources, ct).ConfigureAwait(false),
+                job.Id, jobNo, parts, sources, printerName, copies, isDuplex, ct).ConfigureAwait(false),
+            BatchModeSave => await SaveBatchAsync(job.Id, jobNo, batch, parts, sources, ct).ConfigureAwait(false),
             _ => throw new BusinessException("JOB_PAYLOAD_INVALID", $"不支持的批量任务模式: {batch.Mode}")
         };
     }
@@ -170,6 +170,7 @@ public sealed partial class JobTaskExecutor
 
     /// <summary>打印：逐 part 渲染源文档 + PDF，再交 Office COM 打印（份数/双面由任务参数决定）。</summary>
     private async Task<string?> PrintBatchAsync(
+        long jobId,
         string jobNo,
         IReadOnlyList<AgentBatchPart> parts,
         IReadOnlyDictionary<long, BatchTemplateSource> sources,
@@ -214,11 +215,27 @@ public sealed partial class JobTaskExecutor
                     .ExportPdfFromSourceAsync(partSource, source.FileType, partPdf, ct)
                     .ConfigureAwait(false);
 
+                // 打印前读取本 part 的字节（打印成功后会立即删除临时文件）。
+                var record = await TryReadRecordAsync(
+                        source.FileName,
+                        BuildRecordFileName(
+                            FirstNonEmpty(part.FileName, source.FileName),
+                            partNo,
+                            source.FileType),
+                        source.FileType,
+                        partSource,
+                        partPdf,
+                        ct)
+                    .ConfigureAwait(false);
+
                 var warning = await _printer
                     .PrintAsync(partPdf, partSource, source.FileType, printerName, copies, isDuplex, ct)
                     .ConfigureAwait(false);
 
                 combinedWarning = CombineWarnings(combinedWarning, warning);
+
+                // 仅本 part 打印成功才回传；失败任务走 catch，不上传本 part。
+                await UploadRecordAsync(jobId, record, ct).ConfigureAwait(false);
 
                 // 每页打印完立即清理，避免含个人信息的文书在 %TEMP% 堆积。
                 _files.TryDelete(partSource, partPdf);
@@ -241,6 +258,7 @@ public sealed partial class JobTaskExecutor
     /// 文件名优先 part.FileName，同名自动加 <c>_2</c>、<c>_3</c>；完成后打开目录。
     /// </summary>
     private async Task<string?> SaveBatchAsync(
+        long jobId,
         string jobNo,
         AgentBatchPayload batch,
         IReadOnlyList<AgentBatchPart> parts,
@@ -291,6 +309,18 @@ public sealed partial class JobTaskExecutor
                 _files.TryDelete(sourcePath, pdfPath);
                 throw;
             }
+
+            // 保存成功：从输出目录读取最终落盘文件回传（源 xlsx/docx + PDF），读完立即上传再处理下一页。
+            var record = await TryReadRecordAsync(
+                    source.FileName,
+                    BuildRecordFileName($"{baseName}.{source.FileType}", $"{jobNo}_p{index + 1}", source.FileType),
+                    source.FileType,
+                    sourcePath,
+                    pdfPath,
+                    ct)
+                .ConfigureAwait(false);
+
+            await UploadRecordAsync(jobId, record, ct).ConfigureAwait(false);
         }
 
         _logger.Info($"[JobTask] 批量保存完成: No={jobNo}, Parts={parts.Count}, Folder={folder}");

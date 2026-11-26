@@ -12,6 +12,12 @@ public class PrintJob
 
     public string JobNo { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 补打批次号（同一次「按月逐户补打」的多个任务共享；单条补打也生成批次号）。
+    /// Agent 完成回传时按此值写入 nc_biz_print_records.batch_no。
+    /// </summary>
+    public string? BatchNo { get; set; }
+
     public string BusinessType { get; set; } = string.Empty;
 
     public long? BusinessId { get; set; }
@@ -186,6 +192,9 @@ public static class PrintJobConstants
 public class PrintJobRequest
 {
     public string BusinessType { get; set; } = string.Empty;
+
+    /// <summary>补打批次号（补打中心生成；普通打印任务可为空）。</summary>
+    public string? BatchNo { get; set; }
 
     public long? BusinessId { get; set; }
 

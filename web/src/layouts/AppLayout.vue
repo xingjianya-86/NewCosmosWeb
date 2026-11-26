@@ -18,6 +18,7 @@ import {
   Search,
   Setting,
   SwitchButton,
+  Tickets,
   Trophy,
   User,
   UserFilled,
@@ -68,6 +69,7 @@ const navGroups: NavGroup[] = [
       { label: '用户与权限管理', icon: User, path: '/coming-soon/users' },
       { label: '经办机构管理', icon: OfficeBuilding, path: '/coming-soon/organizations' },
       { label: '文书模板管理', icon: Document, path: '/archives/templates' },
+      { label: '历史补打中心', icon: Tickets, path: '/reprint' },
       { label: '值班管理', icon: Calendar, path: '/duty' },
       // Web 端既有能力：打印机绑定（旧版由桌面端承担，Web 保留入口）
       { label: '打印机绑定', icon: Printer, path: '/printers' },

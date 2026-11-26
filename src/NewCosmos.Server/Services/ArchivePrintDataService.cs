@@ -407,12 +407,12 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
                  fields_json, table_rows_json, supporter_table_data_json, images_json,
                  job_kind, photo_data, photo_layout, photo_category,
                  status, requested_by, requested_by_name, created_at,
-                 target_user_id, target_device_id, target_printer, batch_json)
+                 target_user_id, target_device_id, target_printer, batch_json, batch_no)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
                         $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb,
                         $16, $17, $18, $19,
                         $22, $20, $21, NOW(),
-                        $23, $24, $25, $26::jsonb)
+                        $23, $24, $25, $26::jsonb, $27)
                 RETURNING id, job_no, status, created_at";
 
         var result = await database.QuerySingleAsync<PrintJob>(sql, ct,
@@ -425,7 +425,7 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
             request.RequestedBy, request.RequestedByName,
             batchJson is null ? PrintJobConstants.StatusPending : PrintJobConstants.StatusBatchPending,
             request.TargetUserId, request.TargetDeviceId, request.TargetPrinter,
-            batchJson);
+            batchJson, request.BatchNo);
 
         if (result.IsFailure)
         {
@@ -660,7 +660,7 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
 
     public async Task<Result<PrintJob>> GetByIdAsync(long id, CancellationToken ct = default)
     {
-        const string sql = @"SELECT id, job_no, business_type, business_id, classification, template_id, template_name,
+        const string sql = @"SELECT id, job_no, batch_no, business_type, business_id, classification, template_id, template_name,
                                     applicant_name, applicant_id_card, printer_name, copies, is_duplex,
                                     job_kind, photo_data, photo_layout, photo_category, retry_count,
                                     fields_json::text AS FieldsJson,

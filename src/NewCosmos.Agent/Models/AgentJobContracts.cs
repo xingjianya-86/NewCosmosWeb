@@ -207,3 +207,50 @@ public sealed class AgentJobCompleteRequest
     [JsonPropertyName("message")]
     public string? Message { get; set; }
 }
+
+/// <summary>
+/// POST /api/agent/jobs/{id}/records 请求体：打印/保存成功后回传实际生成的文件，
+/// 服务端写入 nc_biz_print_records，供历史「原样补打」。
+/// </summary>
+public sealed class AgentJobRecordsRequest
+{
+    [JsonPropertyName("records")]
+    public List<AgentPrintRecord> Records { get; set; } = new();
+}
+
+/// <summary>
+/// 一份实际生成的文书（源文件 + PDF）。批量任务每个 part 一条；
+/// 字段名与服务端契约一致（camelCase）。
+/// </summary>
+public sealed class AgentPrintRecord
+{
+    /// <summary>模板名称（不含扩展名），用于历史记录分组展示。</summary>
+    [JsonPropertyName("templateName")]
+    public string? TemplateName { get; set; }
+
+    /// <summary>最终落盘文件名（含扩展名；打印模式按模板/任务号构造）。</summary>
+    [JsonPropertyName("fileName")]
+    public string FileName { get; set; } = string.Empty;
+
+    /// <summary>源文件类型：xlsx / docx。</summary>
+    [JsonPropertyName("fileType")]
+    public string FileType { get; set; } = string.Empty;
+
+    /// <summary>PDF 字节 Base64。</summary>
+    [JsonPropertyName("pdfBase64")]
+    public string PdfBase64 { get; set; } = string.Empty;
+
+    /// <summary>渲染后源文件字节 Base64（docx/xlsx）。</summary>
+    [JsonPropertyName("sourceBase64")]
+    public string? SourceBase64 { get; set; }
+
+    /// <summary>源文件类型（与 fileType 一致，服务端按源/PDF 分列存储）。</summary>
+    [JsonPropertyName("sourceType")]
+    public string? SourceType { get; set; }
+
+    [JsonPropertyName("pdfSize")]
+    public long PdfSize { get; set; }
+
+    [JsonPropertyName("sourceSize")]
+    public long SourceSize { get; set; }
+}

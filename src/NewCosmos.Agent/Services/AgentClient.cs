@@ -41,6 +41,9 @@ public sealed partial class HttpAgentClient : IAgentClient, IAgentJobClient, IDi
 
     private readonly HttpClient _http;
 
+    /// <summary>打印记录回传专用：单次可能上传数 MB Base64，放宽到 3 分钟。</summary>
+    private readonly HttpClient _uploadHttp;
+
     public HttpAgentClient(string agentVersion)
     {
         _http = new HttpClient
@@ -49,6 +52,13 @@ public sealed partial class HttpAgentClient : IAgentClient, IAgentJobClient, IDi
         };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd($"NewCosmos.Agent/{agentVersion}");
         _http.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+
+        _uploadHttp = new HttpClient
+        {
+            Timeout = TimeSpan.FromMinutes(3)
+        };
+        _uploadHttp.DefaultRequestHeaders.UserAgent.ParseAdd($"NewCosmos.Agent/{agentVersion}");
+        _uploadHttp.DefaultRequestHeaders.Accept.ParseAdd("application/json");
     }
 
     public async Task<AgentRegisterResponse> RegisterAsync(
@@ -142,5 +152,9 @@ public sealed partial class HttpAgentClient : IAgentClient, IAgentJobClient, IDi
         return baseUrl.TrimEnd('/') + path;
     }
 
-    public void Dispose() => _http.Dispose();
+    public void Dispose()
+    {
+        _http.Dispose();
+        _uploadHttp.Dispose();
+    }
 }

@@ -38,6 +38,17 @@ public interface IAgentJobClient
         long jobId,
         string errorMessage,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// 打印/保存成功后回传实际生成文件（写入服务端 print_records，供原样补打）。
+    /// 失败由调用方降级为 Warn，不影响任务完成。
+    /// </summary>
+    Task UploadPrintRecordsAsync(
+        string serverBaseUrl,
+        string deviceKey,
+        long jobId,
+        IReadOnlyList<AgentPrintRecord> records,
+        CancellationToken ct = default);
 }
 
 /// <summary>单个任务的执行器：下载负载之后的渲染/预览/打印。</summary>
