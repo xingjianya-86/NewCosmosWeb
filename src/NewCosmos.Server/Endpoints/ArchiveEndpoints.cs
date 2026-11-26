@@ -38,8 +38,8 @@ public static class ArchiveEndpoints
         app.MapGet($"{Prefix}/imported", GetImportedDetailAsync);
 
         app.MapGet($"{Prefix}/proof/templates", GetProofTemplatesAsync);
-        app.MapPost($"{Prefix}/proof/units", CreateProofUnitAsync);
-        app.MapPut($"{Prefix}/proof/units/{{id:long}}", UpdateProofUnitAsync);
+        app.MapPost($"{Prefix}/proof/units", CreateProofUnitAsync).DisableAntiforgery();
+        app.MapPut($"{Prefix}/proof/units/{{id:long}}", UpdateProofUnitAsync).DisableAntiforgery();
         app.MapDelete($"{Prefix}/proof/units/{{id:long}}", DeleteProofUnitAsync);
 
         app.MapPost($"{Prefix}/proof/jobs", CreateProofJobAsync);

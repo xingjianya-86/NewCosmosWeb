@@ -679,11 +679,11 @@ function goWorkbench(): void {
 }
 
 function goPhotoQuery(): void {
-  void router.push('/coming-soon/archive-photos')
+  void router.push('/archives/photos')
 }
 
 function goPublicityOutput(): void {
-  void router.push('/coming-soon/archive-publicity')
+  void router.push('/archives/publicity')
 }
 
 function goProofTemplates(): void {

@@ -69,7 +69,7 @@ const navGroups: NavGroup[] = [
       { label: '数据中心', icon: DataBoard, path: '/coming-soon/database' },
       { label: '用户与权限管理', icon: User, path: '/coming-soon/users' },
       { label: '经办机构管理', icon: OfficeBuilding, path: '/coming-soon/organizations' },
-      { label: '文书模板管理', icon: Document, path: '/coming-soon/templates' },
+      { label: '文书模板管理', icon: Document, path: '/archives/templates' },
       { label: '值班管理', icon: Calendar, path: '/coming-soon/duty' },
       // Web 端既有能力：打印机绑定（旧版由桌面端承担，Web 保留入口）
       { label: '打印机绑定', icon: Printer, path: '/printers' },
@@ -133,6 +133,9 @@ const activePath = computed(() => {
   }
   if (route.path === '/archives/production' || route.path.startsWith('/archives/production/')) {
     return '/archives/production'
+  }
+  if (route.path === '/archives/templates' || route.path.startsWith('/archives/templates/')) {
+    return '/archives/templates'
   }
   if (route.path.startsWith('/archives/')) return '/archives/query'
   return route.path

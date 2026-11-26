@@ -162,6 +162,9 @@ builder.Services.AddScoped<ArchivePrintQueueService>();
 // 档案查询/证明打印：字段装配 + 证明单位模板映射（证明打印任务复用上面的打印队列网关）。
 builder.Services.AddScoped<ArchiveProofDataService>();
 builder.Services.AddScoped<ProofUnitTemplateService>();
+builder.Services.AddScoped<ArchivePhotoService>();
+builder.Services.AddScoped<TemplateAdminService>();
+builder.Services.AddScoped<PublicityService>();
 // 资产核查推送打印：按 nc_biz_asset_checks.id 装配授权书/核查报告字段。
 builder.Services.AddScoped<AssetCheckPrintDataService>();
 builder.Services.AddScoped<ApplicationQueryService>();
@@ -200,6 +203,9 @@ app.MapQuickVerifyEndpoints();
 app.MapTempReliefEndpoints();
 app.MapRecoveryEndpoints();
 app.MapArchiveEndpoints();
+app.MapArchivePhotoEndpoints();
+app.MapTemplateAdminEndpoints();
+app.MapPublicityEndpoints();
 app.MapChangeManagementEndpoints();
 app.MapMonthlyReportEndpoints();
 app.MapApplicationWorkflowEndpoints();

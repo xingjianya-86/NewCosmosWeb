@@ -292,6 +292,24 @@ const router = createRouter({
           meta: { title: '单位模板维护' },
         },
         {
+          path: 'archives/photos',
+          name: 'archive-photos',
+          component: () => import('@/views/archives/ArchivePhotoView.vue'),
+          meta: { title: '档案照片查询' },
+        },
+        {
+          path: 'archives/publicity',
+          name: 'archive-publicity',
+          component: () => import('@/views/archives/PublicityView.vue'),
+          meta: { title: '每月公示文档输出' },
+        },
+        {
+          path: 'archives/templates',
+          name: 'archive-templates',
+          component: () => import('@/views/archives/TemplateAdminView.vue'),
+          meta: { title: '文书模板管理' },
+        },
+        {
           path: 'archives/production',
           name: 'archive-production',
           component: () => import('@/views/archives/ArchiveProductionView.vue'),

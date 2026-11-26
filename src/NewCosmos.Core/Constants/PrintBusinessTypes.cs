@@ -42,6 +42,9 @@ public static class PrintBusinessTypes
     /// <summary>档案照片（照片打印/补传留痕）</summary>
     public const string ArchivePhoto = "ArchivePhoto";
 
+    /// <summary>每月公示名单（批量保存公示文件留痕）</summary>
+    public const string Publicity = "Publicity";
+
     /// <summary>经济复核（档案制作中心的复核装配上下文）</summary>
     public const string EconomicReview = "EconomicReview";
 }
