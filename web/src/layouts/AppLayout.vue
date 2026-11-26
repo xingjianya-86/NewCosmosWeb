@@ -7,7 +7,6 @@ import {
   Coin,
   DataBoard,
   Document,
-  Files,
   FolderOpened,
   House,
   Link,
@@ -59,7 +58,6 @@ const navGroups: NavGroup[] = [
       { label: '高龄津贴发放', icon: UserFilled, path: '/elderly' },
       { label: '家庭经济状况核对', icon: Search, path: '/asset-verification' },
       { label: '救助档案管理', icon: FolderOpened, path: '/archives/query' },
-      { label: '档案制作', icon: Files, path: '/archives/production' },
       { label: '后补追缴', icon: Money, path: '/recovery' },
     ],
   },
@@ -131,12 +129,10 @@ const activePath = computed(() => {
   ) {
     return '/archives/query'
   }
-  if (route.path === '/archives/production' || route.path.startsWith('/archives/production/')) {
-    return '/archives/production'
-  }
   if (route.path === '/archives/templates' || route.path.startsWith('/archives/templates/')) {
     return '/archives/templates'
   }
+  // 档案制作/输出是带业务参数的中间页，不设独立菜单，统一高亮「救助档案管理」。
   if (route.path.startsWith('/archives/')) return '/archives/query'
   return route.path
 })
