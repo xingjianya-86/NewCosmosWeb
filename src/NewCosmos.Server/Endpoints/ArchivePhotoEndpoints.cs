@@ -18,6 +18,15 @@ public static class ArchivePhotoEndpoints
 {
     private const string Prefix = "/api/archives/photos";
 
+    /// <summary>照片跨业务共享：低收入/高龄/临时救助/档案任一查看权即可读。</summary>
+    private static readonly string[] PhotoReadPermissions =
+    [
+        PermissionCodes.ARCHIVE_VIEW,
+        PermissionCodes.ELDERLY_VIEW,
+        PermissionCodes.TEMP_VIEW,
+        PermissionCodes.INCOME_VIEW
+    ];
+
     public static IEndpointRouteBuilder MapArchivePhotoEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapGet(Prefix, ListAsync);
@@ -44,8 +53,8 @@ public static class ArchivePhotoEndpoints
         int? page,
         int? pageSize)
     {
-        var denied = await EndpointSecurity.RequirePermissionAsync(
-            context, permissions, PermissionCodes.ARCHIVE_VIEW, ct);
+        var denied = await EndpointSecurity.RequireAnyPermissionAsync(
+            context, permissions, PhotoReadPermissions, ct);
         if (denied is not null)
         {
             return denied;
@@ -77,8 +86,8 @@ public static class ArchivePhotoEndpoints
         ArchivePhotoService photos,
         CancellationToken ct)
     {
-        var denied = await EndpointSecurity.RequirePermissionAsync(
-            context, permissions, PermissionCodes.ARCHIVE_VIEW, ct);
+        var denied = await EndpointSecurity.RequireAnyPermissionAsync(
+            context, permissions, PhotoReadPermissions, ct);
         if (denied is not null)
         {
             return denied;
@@ -96,8 +105,8 @@ public static class ArchivePhotoEndpoints
         INewPermissionService permissions,
         CancellationToken ct)
     {
-        var denied = await EndpointSecurity.RequirePermissionAsync(
-            context, permissions, PermissionCodes.ARCHIVE_VIEW, ct);
+        var denied = await EndpointSecurity.RequireAnyPermissionAsync(
+            context, permissions, PhotoReadPermissions, ct);
         if (denied is not null)
         {
             return denied;
@@ -190,8 +199,8 @@ public static class ArchivePhotoEndpoints
         string? category,
         string? ids)
     {
-        var denied = await EndpointSecurity.RequirePermissionAsync(
-            context, permissions, PermissionCodes.ARCHIVE_VIEW, ct);
+        var denied = await EndpointSecurity.RequireAnyPermissionAsync(
+            context, permissions, PhotoReadPermissions, ct);
         if (denied is not null)
         {
             return denied;

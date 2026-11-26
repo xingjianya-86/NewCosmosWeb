@@ -54,6 +54,12 @@ public sealed class VillageScope
 /// <summary>死亡情况说明列表行（申报台账 / 档案死亡登记双源合并）</summary>
 public sealed class DeathSearchItem
 {
+    /// <summary>
+    /// Web 列表行主键（申报台账ID / 死亡登记ID / 导入台账人员ID）。
+    /// 旧版 MAUI 直接绑定 DeclarationId/DeathRecordId，无此字段；Web 前端需要稳定行键，故补齐。
+    /// </summary>
+    public long? Id { get; set; }
+
     /// <summary>申报台账ID（来自档案登记的候选行为 null）</summary>
     public long? DeclarationId { get; set; }
 
@@ -406,6 +412,14 @@ public sealed class DeathDeclareRequest
 
     /// <summary>死亡证明出具机构（条目一，选填）</summary>
     public string CertIssueOrg { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 遗体处置方式（火化 / 安葬 / 其他；条目二必选）。
+    /// 仅用于提交前置校验，不落库：旧版由 ViewModel 采集分支后只落对应结构化列，
+    /// Web 端无 VM 层，故随请求透传供服务端 DeathDeclareValidator 把关。
+    /// 未传时服务端按 Cremation*/Burial*/RemainsArrangement 字段推断。
+    /// </summary>
+    public string DispositionBranch { get; set; } = string.Empty;
 
     /// <summary>火化日期（火化分支必填由校验把关）</summary>
     public DateTime? CremationDate { get; set; }

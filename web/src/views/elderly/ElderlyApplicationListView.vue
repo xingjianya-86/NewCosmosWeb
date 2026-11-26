@@ -200,12 +200,23 @@ function handleStop(row: ElderlyApplicationListItem): void {
   void router.push(`/elderly/stops/${row.id}`)
 }
 
-/**
- * TODO(照片模块): 下一阶段替换为统一档案照片对话框，按身份证检索
- * （对应旧版 ArchivePhotoQueryPage 的预填身份证行为）。
- */
-function handlePhotos(_row: ElderlyApplicationListItem): void {
-  ElMessage.info('照片查询随档案照片模块接入')
+async function handlePhotos(row: ElderlyApplicationListItem): Promise<void> {
+  let idCard = ''
+  try {
+    const detail = await getElderlyApplication(row.id)
+    idCard = detail.idCard?.trim() ?? ''
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '读取身份证号失败'))
+    return
+  }
+  if (!idCard) {
+    ElMessage.warning('该记录缺少身份证号，无法查看照片')
+    return
+  }
+  void router.push({
+    path: '/archives/photos',
+    query: { idCard, auto: '1', returnTo: route.fullPath },
+  })
 }
 
 async function handleConfirm(row: ElderlyApplicationListItem): Promise<void> {

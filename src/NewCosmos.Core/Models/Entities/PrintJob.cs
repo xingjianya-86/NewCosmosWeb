@@ -140,6 +140,7 @@ public class PrintJob
 public static class PrintJobConstants
 {
     public const string StatusPending = "Pending";
+    public const string StatusBatchPending = "BatchPending";
     public const string StatusProcessing = "Processing";
     public const string StatusCompleted = "Completed";
     public const string StatusFailed = "Failed";
@@ -165,6 +166,7 @@ public static class PrintJobConstants
     public static string GetStatusName(string? status) => status switch
     {
         StatusPending => "待打印",
+        StatusBatchPending => "批量待打印",
         StatusProcessing => "打印中",
         StatusCompleted => "已完成",
         StatusFailed => "失败",

@@ -245,7 +245,7 @@ const moduleGroups: ModuleGroup[] = [
         iconBg: '#F1F0FB',
         iconColor: '#6D28D9',
         buttonText: '进入模块',
-        to: '/coming-soon/death-statement',
+        to: '/archives/death-statements',
       },
       {
         title: '后补追缴',

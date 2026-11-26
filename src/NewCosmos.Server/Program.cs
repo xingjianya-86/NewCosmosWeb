@@ -10,6 +10,7 @@ using NewCosmos.Server.Services;
 using NewCosmos.Services.Core;
 using NewCosmos.Services.Database;
 using NewCosmos.Services.Domain.AssetVerification;
+using NewCosmos.Services.Domain.ArchiveManagement;
 using NewCosmos.Services.Domain.BankFlow;
 using NewCosmos.Services.Domain.ChangeManagement;
 using NewCosmos.Services.Domain.ElderlyBenefits;
@@ -166,6 +167,9 @@ builder.Services.AddScoped<ArchivePhotoService>();
 builder.Services.AddScoped<TemplateAdminService>();
 builder.Services.AddScoped<PublicityService>();
 builder.Services.AddScoped<ArchiveProductionDataService>();
+// 死亡情况说明：本村范围、身份八源、提醒、联动、申报台账。
+builder.Services.AddSingleton<DeathIdentityAggregator>();
+builder.Services.AddSingleton<IDeathStatementService, DeathStatementService>();
 // 资产核查推送打印：按 nc_biz_asset_checks.id 装配授权书/核查报告字段。
 builder.Services.AddScoped<AssetCheckPrintDataService>();
 builder.Services.AddScoped<ApplicationQueryService>();
@@ -208,6 +212,7 @@ app.MapArchivePhotoEndpoints();
 app.MapTemplateAdminEndpoints();
 app.MapPublicityEndpoints();
 app.MapArchiveOutputEndpoints();
+app.MapDeathStatementEndpoints();
 app.MapChangeManagementEndpoints();
 app.MapMonthlyReportEndpoints();
 app.MapApplicationWorkflowEndpoints();

@@ -4,7 +4,9 @@ using NewCosmos.Helpers;
 using NewCosmos.Models.Entities;
 using NewCosmos.Models.Results;
 using NewCosmos.Server.Contracts;
+using NewCosmos.Services.Core;
 using NewCosmos.Services.Database;
+using NewCosmos.Services.Domain.ChangeManagement;
 using NewCosmos.Services.Domain.ElderlyBenefits;
 using NewCosmos.Services.Domain.Recovery;
 using NewCosmos.Services.Domain.SocialAssistance;
@@ -28,7 +30,7 @@ namespace NewCosmos.Server.Services;
 /// 与 ChangeDocumentApplicabilityService 补入，当前返回分类命中集合。
 /// </para>
 /// </summary>
-public sealed class ArchiveProductionDataService(
+public sealed partial class ArchiveProductionDataService(
     ApplicationFormService forms,
     IApplicationService applications,
     ArchivePrintDataService archivePrintData,
@@ -38,6 +40,9 @@ public sealed class ArchiveProductionDataService(
     RecoveryPrintDataService recoveryPrintData,
     IElderlyApplicationService elderly,
     IBusinessTimelineService timeline,
+    IHouseholdSurveyService householdSurveys,
+    IChangeService changes,
+    ILoggerService logger,
     ArchivePrintQueueService queue,
     PrinterBindingService printers,
     IDatabaseService database)
@@ -544,6 +549,23 @@ public sealed class ArchiveProductionDataService(
         var period = DateTime.Now.ToString("yyyyMM", CultureInfo.InvariantCulture);
         var orderedTemplates = SortTemplates(templatesResult.Value);
 
+        // 目录行需要本次勾选的模板清单（名称/排序/日期字段/份数），
+        // 与旧版 BuildDirectoryRows 的 Templates 集合同口径。
+        var directoryTemplates = orderedTemplates
+            .Select(template =>
+            {
+                var (dateField, copies) = ReadDirectoryTemplateConfig(
+                    template.ConfigJson, context.Classification);
+                return new ArchiveDirectoryTemplate(
+                    template.Id,
+                    template.Name,
+                    template.DocType ?? string.Empty,
+                    template.SortOrder,
+                    dateField,
+                    copies);
+            })
+            .ToList();
+
         var batch = new PrintBatchDefinition
         {
             Mode = mode,
@@ -554,15 +576,42 @@ public sealed class ArchiveProductionDataService(
         foreach (var template in orderedTemplates)
         {
             var (_, extension) = ResolveFileType(template.FileType);
+
+            // 封面/目录按 docType 装配专属字段；其余模板保持业务主字段与行数据不变。
+            var baseFields = new Dictionary<string, string>(context.Fields, StringComparer.Ordinal);
+            if (string.Equals(template.DocType, TemplateDocTypes.Directory, StringComparison.Ordinal))
+            {
+                // 目录「组卷单位」在旧版取当前用户机构名；业务主字段无此键时在此补入。
+                var operatorUnit = FirstNonEmpty(user.OrganizationName, user.Username);
+                if (!string.IsNullOrWhiteSpace(operatorUnit)
+                    && !baseFields.ContainsKey(FieldKeys.OPERATOR_UNIT))
+                {
+                    baseFields[FieldKeys.OPERATOR_UNIT] = operatorUnit;
+                }
+            }
+
+            var (fields, tableRows) = await BuildForTemplateAsync(
+                normalized,
+                request.BusinessId.Value,
+                context.Classification,
+                template.DocType,
+                baseFields,
+                ct,
+                directoryTemplates);
+
+            var isDirectory = string.Equals(
+                template.DocType, TemplateDocTypes.Directory, StringComparison.Ordinal);
             batch.Parts.Add(new PrintBatchPart
             {
                 TemplateId = template.Id,
                 TemplateName = template.Name,
                 FileName = BuildFileName(template.Name, extension),
-                Fields = new Dictionary<string, string>(context.Fields, StringComparer.Ordinal),
-                TableRows = context.TableRows
-                    .Select(row => new Dictionary<string, string>(row, StringComparer.Ordinal))
-                    .ToList()
+                Fields = fields,
+                TableRows = (isDirectory || TemplateDocTypes.IsCover(template.DocType))
+                    ? tableRows
+                    : context.TableRows
+                        .Select(row => new Dictionary<string, string>(row, StringComparer.Ordinal))
+                        .ToList()
             });
         }
 
@@ -614,7 +663,7 @@ public sealed class ArchiveProductionDataService(
     {
         var ids = templateIds.Distinct().ToArray();
         var result = await database.QueryAsync<PrintTemplateMetaRow>(
-            @"SELECT id, name, doc_type, file_type, sort_order
+            @"SELECT id, name, doc_type, file_type, sort_order, config_json
               FROM nc_biz_templates
               WHERE id = ANY($1::bigint[])",
             ct,

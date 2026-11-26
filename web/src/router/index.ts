@@ -322,6 +322,12 @@ const router = createRouter({
           meta: { title: '档案输出' },
         },
         {
+          path: 'archives/death-statements',
+          name: 'archive-death-statements',
+          component: () => import('@/views/archives/DeathStatementView.vue'),
+          meta: { title: '死亡情况说明' },
+        },
+        {
           path: 'coming-soon/:module',
           name: 'coming-soon',
           component: () => import('@/views/ComingSoonView.vue'),

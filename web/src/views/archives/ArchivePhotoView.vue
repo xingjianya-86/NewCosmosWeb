@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   ArrowLeft,
@@ -51,10 +51,17 @@ const FALLBACK_CATEGORIES: ArchivePhotoCategory[] = [
 ]
 
 const router = useRouter()
+const route = useRoute()
 const isNarrow = useMediaQuery('(max-width: 1280px)')
 
 const categories = ref<ArchivePhotoCategory[]>([])
-const keyword = ref('')
+const initialKeyword =
+  typeof route.query.idCard === 'string'
+    ? route.query.idCard
+    : typeof route.query.keyword === 'string'
+      ? route.query.keyword
+      : ''
+const keyword = ref(initialKeyword.trim())
 const category = ref('')
 const page = ref(1)
 const total = ref(0)
@@ -475,6 +482,11 @@ function handleMoreCommand(command: string): void {
 }
 
 function goBack(): void {
+  const returnTo = typeof route.query.returnTo === 'string' ? route.query.returnTo : ''
+  if (returnTo.startsWith('/') && !returnTo.startsWith('//')) {
+    void router.push(returnTo)
+    return
+  }
   void router.push('/archives/query')
 }
 

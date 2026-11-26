@@ -189,9 +189,16 @@ function openStop(row: StopRow): void {
   void router.push(`/elderly/stops/${row.id}`)
 }
 
-function openPhotos(): void {
-  // TODO(照片模块): 统一档案照片对话框接入后替换。
-  ElMessage.info('照片查询随档案照片模块接入')
+function openPhotos(row: StopRow): void {
+  const idCard = row.idCard?.trim()
+  if (!idCard) {
+    ElMessage.warning('该记录缺少身份证号，无法查看照片')
+    return
+  }
+  void router.push({
+    path: '/archives/photos',
+    query: { idCard, auto: '1', returnTo: '/elderly/stops' },
+  })
 }
 
 onMounted(() => {
@@ -285,7 +292,7 @@ onMounted(() => {
             </el-table-column>
             <el-table-column label="操作" width="150" align="right">
               <template #default="{ row }">
-                <el-button size="small" @click="openPhotos()">照片</el-button>
+                <el-button size="small" @click="openPhotos(row as StopRow)">照片</el-button>
                 <el-button size="small" type="warning" @click="openStop(row as StopRow)">
                   {{ row.kind === 'current' ? '停发' : '建档并停发' }}
                 </el-button>
@@ -316,7 +323,7 @@ onMounted(() => {
                 </div>
               </dl>
               <div class="card-actions">
-                <el-button size="small" @click="openPhotos()">照片</el-button>
+                <el-button size="small" @click="openPhotos(row)">照片</el-button>
                 <el-button size="small" type="warning" @click="openStop(row)">
                   {{ row.kind === 'current' ? '停发' : '建档并停发' }}
                 </el-button>

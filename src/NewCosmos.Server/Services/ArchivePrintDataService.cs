@@ -423,7 +423,7 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
             fieldsJson, tableRowsJson, supporterJson, imagesJson,
             jobKind, request.PhotoData, request.PhotoLayout, request.PhotoCategory,
             request.RequestedBy, request.RequestedByName,
-            PrintJobConstants.StatusPending,
+            batchJson is null ? PrintJobConstants.StatusPending : PrintJobConstants.StatusBatchPending,
             request.TargetUserId, request.TargetDeviceId, request.TargetPrinter,
             batchJson);
 
@@ -474,7 +474,8 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
 
         // 2) 超时回收：Processing 未达上限 → Pending，清 agent_machine，retry_count + 1。
         const string recycleSql = @"UPDATE nc_biz_print_jobs
-                SET status = $1, agent_machine = NULL, claimed_at = NULL, completed_at = NULL,
+                SET status = CASE WHEN batch_json IS NOT NULL THEN $6 ELSE $1 END,
+                    agent_machine = NULL, claimed_at = NULL, completed_at = NULL,
                     retry_count = retry_count + 1, error_message = $2
                 WHERE status = $3 AND deleted_at IS NULL
                   AND claimed_at < NOW() - ($5 * interval '1 minute')
@@ -483,7 +484,8 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
         var recycled = await database.ExecuteNonQueryAsync(
             recycleSql, ct,
             PrintJobConstants.StatusPending, "任务执行超时（10 分钟无回报），已自动重新排队",
-            PrintJobConstants.StatusProcessing, MaxRetryCount, ProcessingTimeoutMinutes);
+            PrintJobConstants.StatusProcessing, MaxRetryCount, ProcessingTimeoutMinutes,
+            PrintJobConstants.StatusBatchPending);
 
         if (failExpired.IsFailure)
         {
@@ -506,7 +508,7 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
                 SET status = $4, agent_machine = $1, claimed_at = NOW()
                 WHERE id IN (
                     SELECT id FROM nc_biz_print_jobs
-                    WHERE status = $3 AND deleted_at IS NULL
+                    WHERE status = ANY($3::text[]) AND deleted_at IS NULL
                       AND target_device_id = $5
                     ORDER BY created_at
                     LIMIT $2
@@ -523,7 +525,9 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
                           created_at, claimed_at, completed_at";
 
         var result = await database.QueryAsync<PrintJob>(sql, ct,
-            agentMachine, max, PrintJobConstants.StatusPending, PrintJobConstants.StatusProcessing, deviceId);
+            agentMachine, max,
+            new[] { PrintJobConstants.StatusPending, PrintJobConstants.StatusBatchPending },
+            PrintJobConstants.StatusProcessing, deviceId);
         if (result.IsFailure)
         {
             await tx.RollbackAsync(ct);
@@ -577,10 +581,12 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
     public async Task<Result> RetryAsync(long id, CancellationToken ct = default)
     {
         const string sql = @"UPDATE nc_biz_print_jobs
-                SET status = $2, agent_machine = NULL, claimed_at = NULL, completed_at = NULL, error_message = NULL
+                SET status = CASE WHEN batch_json IS NOT NULL THEN $5 ELSE $2 END,
+                    agent_machine = NULL, claimed_at = NULL, completed_at = NULL, error_message = NULL
                 WHERE id = $1 AND status = $3 AND deleted_at IS NULL AND retry_count < $4";
         var result = await database.ExecuteNonQueryAsync(
-            sql, ct, id, PrintJobConstants.StatusPending, PrintJobConstants.StatusFailed, MaxRetryCount);
+            sql, ct, id, PrintJobConstants.StatusPending, PrintJobConstants.StatusFailed, MaxRetryCount,
+            PrintJobConstants.StatusBatchPending);
         if (result.IsFailure)
         {
             return Result.Failure(result.ErrorCode!, result.Message!);
@@ -789,6 +795,9 @@ public sealed class PrintTemplateMetaRow
     public string DocType { get; set; } = string.Empty;
     public string FileType { get; set; } = string.Empty;
     public int SortOrder { get; set; }
+
+    /// <summary>模板配置 JSON（仅按 ID 装配输出任务时读取；列表接口不查此列）。</summary>
+    public string? ConfigJson { get; set; }
 }
 
 /// <summary>模板文件行（payload 下发字节与映射配置）。</summary>

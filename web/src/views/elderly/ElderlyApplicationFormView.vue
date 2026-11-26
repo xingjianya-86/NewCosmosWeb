@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { ArrowLeft, Camera, Refresh } from '@element-plus/icons-vue'
+import { ArrowLeft, Camera, Picture, Refresh } from '@element-plus/icons-vue'
 import AddressCascader from '@/components/AddressCascader.vue'
 import NcCard from '@/components/NcCard.vue'
 import NcPageHeader from '@/components/NcPageHeader.vue'
@@ -368,6 +368,19 @@ function triggerOcr(): void {
   ocrInputRef.value?.click()
 }
 
+/** 档案照片：与低收入/临时救助同口径，进入统一照片页并按身份证自动检索。 */
+function openArchivePhotos(): void {
+  const idCard = form.idCard?.trim()
+  if (!idCard) {
+    ElMessage.warning('请先填写身份证号码，再查看或采集照片')
+    return
+  }
+  void router.push({
+    path: '/archives/photos',
+    query: { idCard, auto: '1', returnTo: route.fullPath },
+  })
+}
+
 async function handleOcrFile(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
@@ -669,13 +682,14 @@ onMounted(() => {
                   maxlength="18"
                   @blur="handleIdCardBlur"
                 />
+                <el-button :icon="Picture" @click="openArchivePhotos">档案照片</el-button>
                 <el-button
                   v-if="!isView"
                   :icon="Camera"
                   :loading="ocrRunning"
                   @click="triggerOcr"
                 >
-                  照片
+                  识别
                 </el-button>
               </div>
               <input
