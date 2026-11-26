@@ -164,6 +164,10 @@ builder.Services.AddScoped<ArchivePrintQueueService>();
 builder.Services.AddScoped<ArchiveProofDataService>();
 builder.Services.AddScoped<ProofUnitTemplateService>();
 builder.Services.AddScoped<ArchivePhotoService>();
+// 照片中心：跨四业务域的照片补全/查询/导出/打印（Core 版照片服务，与上面 Server 旧照片服务并存）。
+builder.Services.AddScoped<NewCosmos.Services.Domain.ArchiveManagement.IArchivePhotoService,
+    NewCosmos.Services.Domain.ArchiveManagement.ArchivePhotoService>();
+builder.Services.AddScoped<PhotoPrintService>();
 builder.Services.AddScoped<TemplateAdminService>();
 builder.Services.AddScoped<PublicityService>();
 builder.Services.AddScoped<ArchiveProductionDataService>();
@@ -209,6 +213,7 @@ app.MapTempReliefEndpoints();
 app.MapRecoveryEndpoints();
 app.MapArchiveEndpoints();
 app.MapArchivePhotoEndpoints();
+app.MapPhotoEndpoints();
 app.MapTemplateAdminEndpoints();
 app.MapPublicityEndpoints();
 app.MapArchiveOutputEndpoints();

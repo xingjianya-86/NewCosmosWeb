@@ -41,6 +41,8 @@ declare module 'vue' {
     ElSwitch: typeof import('element-plus/es/components/switch/index')['ElSwitch']
     ElTable: typeof import('element-plus/es/components/table/index')['ElTable']
     ElTableColumn: typeof import('element-plus/es/components/table/index')['ElTableColumn']
+    ElTabPane: typeof import('element-plus/es/components/tabs/index')['ElTabPane']
+    ElTabs: typeof import('element-plus/es/components/tabs/index')['ElTabs']
     ElTag: typeof import('element-plus/es/components/tag/index')['ElTag']
     ElTimePicker: typeof import('element-plus/es/components/time-picker/index')['ElTimePicker']
     ElTree: typeof import('element-plus/es/components/tree/index')['ElTree']

@@ -27,7 +27,6 @@ import type {
   TempReliefStatus,
   TempReliefSummary,
 } from '@/types/tempRelief'
-import TempReliefListPhotoDialog from './TempReliefListPhotoDialog.vue'
 import TempReliefPrintDialog from './TempReliefPrintDialog.vue'
 
 type PopulationFilter = '' | TempReliefPopulationStatus
@@ -130,8 +129,6 @@ const counts = ref<{ draft: number | null; confirmed: number | null; stopped: nu
 })
 const summary = ref<TempReliefSummary | null>(null)
 
-const photoVisible = ref(false)
-const photoTarget = ref<TempReliefListItem | null>(null)
 const printVisible = ref(false)
 const printTarget = ref<TempReliefListItem | null>(null)
 
@@ -379,8 +376,16 @@ function openEdit(row: TempReliefListItem): void {
 }
 
 function openPhotos(row: TempReliefListItem): void {
-  photoTarget.value = row
-  photoVisible.value = true
+  // PC 列表「照片」跳档案照片查询；Web 统一走照片中心，按身份证聚合、可拍照/上传/打印。
+  void router.push({
+    name: 'photo-backfill',
+    query: {
+      idCard: row.applicantIdCard,
+      name: row.applicantName,
+      domain: 'TempRelief',
+      businessId: String(row.id),
+    },
+  })
 }
 
 function openReprint(row: TempReliefListItem): void {
@@ -819,13 +824,6 @@ onMounted(() => {
         </div>
       </template>
     </NcCard>
-
-    <TempReliefListPhotoDialog
-      v-model="photoVisible"
-      :application-id="photoTarget?.id ?? null"
-      :applicant-name="photoTarget?.applicantName ?? ''"
-      editable
-    />
 
     <TempReliefPrintDialog
       v-model="printVisible"

@@ -266,7 +266,7 @@ const moduleGroups: ModuleGroup[] = [
         iconBg: '#ECFDF5',
         iconColor: '#2e4738',
         buttonText: '进入模块',
-        to: '/coming-soon/photo-backfill',
+        to: '/photo-backfill',
       },
     ],
   },

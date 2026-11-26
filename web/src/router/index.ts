@@ -298,6 +298,12 @@ const router = createRouter({
           meta: { title: '档案照片查询' },
         },
         {
+          path: 'photo-backfill',
+          name: 'photo-backfill',
+          component: () => import('@/views/photos/PhotoCenterView.vue'),
+          meta: { title: '照片中心' },
+        },
+        {
           path: 'archives/publicity',
           name: 'archive-publicity',
           component: () => import('@/views/archives/PublicityView.vue'),
