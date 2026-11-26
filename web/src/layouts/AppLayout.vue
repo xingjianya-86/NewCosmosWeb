@@ -211,7 +211,7 @@ function navigate(path: string): void {
 }
 
 function goSettings(): void {
-  void router.push('/coming-soon/settings')
+  void router.push('/settings')
 }
 
 async function handleLogout(): Promise<void> {

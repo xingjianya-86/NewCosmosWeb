@@ -28,7 +28,7 @@ public sealed class PrinterBindingService(
                                                   d.last_seen_at
                                            FROM nc_sys_printer_bindings b
                                            INNER JOIN nc_sys_print_devices d ON d.id = b.device_id
-                                           WHERE b.user_id = $1";
+                                           WHERE b.user_id = $1 AND d.is_active";
 
     public async Task<Result<List<PrinterBindingDto>>> ListAsync(int userId, CancellationToken ct = default)
     {
@@ -190,7 +190,7 @@ public sealed class PrinterBindingService(
         var deviceResult = await database.QuerySingleAsync<PrinterDeviceRow>(
             @"SELECT id, device_key, machine_name, printers_json::text AS printers_json, last_seen_at
               FROM nc_sys_print_devices
-              WHERE device_key = $1",
+              WHERE device_key = $1 AND is_active",
             ct,
             deviceKey);
         if (deviceResult.IsFailure)

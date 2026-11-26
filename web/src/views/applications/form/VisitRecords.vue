@@ -170,6 +170,7 @@ async function submitVisit(): Promise<void> {
         <el-button
           size="small"
           :icon="showForm ? undefined : Plus"
+          :disabled="busy"
           @click="showForm = !showForm"
         >
           {{ showForm ? '收起' : '补录回访' }}

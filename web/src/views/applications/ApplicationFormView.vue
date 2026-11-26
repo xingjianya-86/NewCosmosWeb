@@ -86,7 +86,9 @@ const formReady = computed(
 const isViewMode = computed(
   () => !isNew.value && !!form.value.status && form.value.status !== 'Draft',
 )
-const modeLabel = computed(() => (isViewMode.value ? '查看' : '编辑'))
+/** 查看/复核模式整表只读：非草稿或带 mode=review 入口时，步骤内输入与补录动作全部禁用。 */
+const isReadonly = computed(() => isViewMode.value || isReviewRequest.value)
+const modeLabel = computed(() => (isReadonly.value ? '查看' : '编辑'))
 const statusLabel = computed(() => {
   if (form.value.statusText) return form.value.statusText
   if (!form.value.status || form.value.status === 'Draft') return '草稿'
@@ -96,7 +98,7 @@ const canDelete = computed(
   () =>
     !isNew.value &&
     form.value.id > 0 &&
-    !isViewMode.value &&
+    !isReadonly.value &&
     (form.value.status === 'Draft' || !form.value.status),
 )
 
@@ -233,7 +235,7 @@ function nextStep(): void {
 
 /** 先保存再分类认定，兼容接口返回完整表单或仅 classification。 */
 async function handleClassify(): Promise<void> {
-  if (isViewMode.value || classifying.value || submitting.value) return
+  if (isReadonly.value || classifying.value || submitting.value) return
   classifying.value = true
   actionError.value = ''
   try {
@@ -258,7 +260,7 @@ async function handleClassify(): Promise<void> {
 
 /** 提交（旧版语义）：仅保存草稿，随后进入档案制作，由档案制作页完成归档。 */
 async function handleGoArchive(): Promise<void> {
-  if (isViewMode.value || submitting.value || classifying.value) return
+  if (isReadonly.value || submitting.value || classifying.value) return
 
   if (!hasClassification.value) {
     ElMessage.warning('请先完成分类判定')
@@ -317,6 +319,11 @@ function backToWorkflow(): void {
 
 /** 旧版 Head 返回键与底部“放弃申请”同义：确认后离开，未保存内容丢弃。 */
 async function handleAbandon(): Promise<void> {
+  // 查看/复核模式没有可丢弃的录入内容，直接返回，避免出现“放弃办理”误导确认。
+  if (isReadonly.value) {
+    backToWorkflow()
+    return
+  }
   try {
     await ElMessageBox.confirm(
       '确定要放弃本次办理吗？已录入但未保存的信息将会丢失。',
@@ -442,7 +449,10 @@ onMounted(() => {
 
     <!-- 回访记录独立区：旧版位于五步卡之后、内容区之前，所有步骤可见；新申请不显示 -->
     <section v-if="form.id > 0" class="form-visit" aria-label="回访记录">
-      <VisitRecords :form="form" :busy="saving || classifying || submitting" />
+      <VisitRecords
+        :form="form"
+        :busy="saving || classifying || submitting || isReadonly"
+      />
     </section>
 
     <!-- 内容区：左侧当前步骤 + 右侧 320px 来源数据栏 -->
@@ -484,22 +494,23 @@ onMounted(() => {
         </div>
 
         <template v-else>
-          <Step1Basic v-if="currentStep === 1" :form="form" @reload="reload" />
-          <Step2Members v-else-if="currentStep === 2" :form="form" />
+          <Step1Basic v-if="currentStep === 1" :form="form" :readonly="isReadonly" @reload="reload" />
+          <Step2Members v-else-if="currentStep === 2" :form="form" :readonly="isReadonly" />
           <Step3Economy
             v-else-if="currentStep === 3"
             :form="form"
-            :busy="saving || classifying || submitting"
+            :busy="saving || classifying || submitting || isReadonly"
           />
           <Step4Survey
             v-else-if="currentStep === 4"
             :form="form"
-            :busy="saving || classifying || submitting"
+            :busy="saving || classifying || submitting || isReadonly"
           />
           <Step5Classification
             v-else
             :form="form"
             :busy="saving || classifying || submitting"
+            :readonly="isReadonly"
             @classify="handleClassify"
           />
         </template>
@@ -537,13 +548,13 @@ onMounted(() => {
     <!-- 底部按钮栏：放弃申请 / 保存草稿 / 上一步 / 下一步 / 提交 -->
     <footer class="form-actions">
       <div class="form-actions__cell">
-        <el-button v-if="!isViewMode" class="action-abandon" plain @click="handleAbandon">
+        <el-button v-if="!isReadonly" class="action-abandon" plain @click="handleAbandon">
           放弃申请
         </el-button>
       </div>
       <div class="form-actions__cell">
         <el-button
-          v-if="!isViewMode"
+          v-if="!isReadonly"
           :loading="saving"
           :disabled="classifying || submitting || !formReady"
           @click="saveDraft"
@@ -572,13 +583,13 @@ onMounted(() => {
       </div>
       <div class="form-actions__cell form-actions__cell--submit">
         <span
-          v-if="currentStep >= 5 && !isViewMode && !hasClassification"
+          v-if="currentStep >= 5 && !isReadonly && !hasClassification"
           class="submit-hint"
         >
           请先完成分类判定
         </span>
         <el-button
-          v-if="currentStep >= 5 && !isViewMode"
+          v-if="currentStep >= 5 && !isReadonly"
           class="action-submit"
           :loading="submitting"
           :disabled="saving || classifying || !formReady || !hasClassification"

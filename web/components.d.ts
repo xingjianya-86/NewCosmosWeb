@@ -30,6 +30,7 @@ declare module 'vue' {
     ElImage: typeof import('element-plus/es/components/image/index')['ElImage']
     ElInput: typeof import('element-plus/es/components/input/index')['ElInput']
     ElInputNumber: typeof import('element-plus/es/components/input-number/index')['ElInputNumber']
+    ElLink: typeof import('element-plus/es/components/link/index')['ElLink']
     ElOption: typeof import('element-plus/es/components/select/index')['ElOption']
     ElOptionGroup: typeof import('element-plus/es/components/select/index')['ElOptionGroup']
     ElPagination: typeof import('element-plus/es/components/pagination/index')['ElPagination']

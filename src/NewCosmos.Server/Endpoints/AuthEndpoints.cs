@@ -20,7 +20,80 @@ public static class AuthEndpoints
         group.MapPost("/heartbeat", HeartbeatAsync);
         group.MapPost("/logout", LogoutAsync);
         group.MapGet("/me", MeAsync);
+        group.MapPost("/change-password", ChangePasswordAsync);
+        group.MapGet("/policy", GetSessionPolicyAsync);
         return app;
+    }
+
+    private static async Task<IResult> ChangePasswordAsync(
+        ChangePasswordRequest? request,
+        HttpContext context,
+        IUserService users,
+        CancellationToken ct)
+    {
+        if (context.GetUserId() is not { } userId)
+        {
+            return ApiErrors.Write(context, StatusCodes.Status401Unauthorized,
+                ApiErrorCodes.AuthRequired, "请先登录");
+        }
+
+        if (request is null)
+        {
+            return ApiErrors.Write(context, StatusCodes.Status400BadRequest,
+                ApiErrorCodes.ValidationError, "请求体不能为空");
+        }
+
+        var oldPassword = request.OldPassword ?? string.Empty;
+        var newPassword = request.NewPassword ?? string.Empty;
+        if (oldPassword.Length == 0 || newPassword.Length == 0)
+        {
+            return ApiErrors.Write(context, StatusCodes.Status400BadRequest,
+                ApiErrorCodes.ValidationError, "原密码和新密码不能为空");
+        }
+
+        if (newPassword.Length is < 6 or > 20)
+        {
+            return ApiErrors.Write(context, StatusCodes.Status400BadRequest,
+                ApiErrorCodes.ValidationError, "新密码长度必须为 6–20 位");
+        }
+
+        if (string.Equals(oldPassword, newPassword, StringComparison.Ordinal))
+        {
+            return ApiErrors.Write(context, StatusCodes.Status400BadRequest,
+                ApiErrorCodes.ValidationError, "新密码不能与原密码相同");
+        }
+
+        var result = await users.ChangePasswordAsync(userId, oldPassword, newPassword, ct);
+        if (result.IsFailure)
+        {
+            var mapped = ApiErrors.Map(result.ErrorCode, result.Message);
+            return ApiErrors.Write(context, mapped.Status, mapped.Code, mapped.Message);
+        }
+
+        return Results.Json(new { message = "密码已修改" });
+    }
+
+    private static async Task<IResult> GetSessionPolicyAsync(
+        HttpContext context,
+        IUserSessionService sessions,
+        CancellationToken ct)
+    {
+        if (context.GetUserId() is null)
+        {
+            return ApiErrors.Write(context, StatusCodes.Status401Unauthorized,
+                ApiErrorCodes.AuthRequired, "请先登录");
+        }
+
+        var policy = await sessions.GetPolicyAsync(ct);
+        return Results.Json(new SessionPolicyDto(
+            policy.Mode,
+            policy.MaxDesktop,
+            policy.MaxMobile,
+            policy.HeartbeatDesktopSeconds,
+            policy.HeartbeatMobileSeconds,
+            policy.OnlineWindowSeconds,
+            policy.AbsoluteDays,
+            policy.GraceSeconds));
     }
 
     private static async Task<IResult> LoginAsync(
@@ -28,6 +101,7 @@ public static class AuthEndpoints
         HttpContext context,
         IUserService users,
         IUserSessionService sessions,
+        LoginThrottle throttle,
         CancellationToken ct)
     {
         if (request is null)
@@ -60,9 +134,19 @@ public static class AuthEndpoints
         var deviceName = Limit(request.DeviceName?.Trim(), 200, "Web");
         var appVersion = Limit(request.AppVersion?.Trim(), 50, "web");
 
+        var clientIp = GetClientIp(context) ?? "unknown";
+        if (throttle.IsBlocked(clientIp, username, out var retryAfter))
+        {
+            context.Response.Headers.RetryAfter =
+                Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds)).ToString();
+            return ApiErrors.Write(context, StatusCodes.Status429TooManyRequests,
+                "LOGIN_RATE_LIMITED", "登录失败次数过多，请稍后再试");
+        }
+
         var authentication = await users.AuthenticateAsync(username, request.Password, ct);
         if (authentication.IsFailure)
         {
+            throttle.RecordFailure(clientIp, username);
             if (ApiErrors.IsDatabaseErrorCode(authentication.ErrorCode))
             {
                 return ApiErrors.Write(context, StatusCodes.Status500InternalServerError,
@@ -102,6 +186,8 @@ public static class AuthEndpoints
             return ApiErrors.Write(context, StatusCodes.Status500InternalServerError,
                 ApiErrorCodes.InternalError, "创建登录会话失败");
         }
+
+        throttle.RecordSuccess(clientIp, username);
 
         return Results.Json(new LoginResponse(
             session.SessionId.ToString(),

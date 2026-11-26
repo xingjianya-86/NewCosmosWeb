@@ -12,13 +12,21 @@ import type {
   ApplicationFormModel,
 } from './types'
 
-const props = defineProps<{ form: ApplicationFormModel; busy?: boolean }>()
+const props = defineProps<{
+  form: ApplicationFormModel
+  busy?: boolean
+  /** 查看/复核模式：禁用判定与供养方式编辑。 */
+  readonly?: boolean
+}>()
 
 const emit = defineEmits<{ (e: 'classify'): void }>()
 
 const router = useRouter()
 
 const classification = computed(() => props.form.classification)
+
+/** 忙碌或查看/复核模式都不允许修改判定输入。 */
+const locked = computed(() => Boolean(props.busy) || Boolean(props.readonly))
 
 function goSpecialApproval(): void {
   if (props.form.id <= 0) {
@@ -324,7 +332,7 @@ onMounted(() => {
 
 /** 保存供养方式 → 服务端重新判定 → 用最新 classification 覆盖当前块。 */
 async function saveSupportMode(): Promise<void> {
-  if (savingSupportMode.value || props.busy) return
+  if (savingSupportMode.value || locked.value) return
   if (props.form.id <= 0) {
     ElMessage.warning('请先保存申请，再设置供养方式')
     return
@@ -363,7 +371,7 @@ async function saveSupportMode(): Promise<void> {
         <el-button
           v-if="hasResult"
           :loading="busy"
-          :disabled="busy"
+          :disabled="locked"
           @click="emit('classify')"
         >
           重新判定
@@ -372,7 +380,7 @@ async function saveSupportMode(): Promise<void> {
           v-else
           type="primary"
           :loading="busy"
-          :disabled="busy"
+          :disabled="locked"
           @click="emit('classify')"
         >
           执行判定
@@ -388,7 +396,7 @@ async function saveSupportMode(): Promise<void> {
           <el-select
             v-model="supportType"
             placeholder="请选择供养方式"
-            :disabled="busy || savingSupportMode"
+            :disabled="locked || savingSupportMode"
           >
             <el-option
               v-for="item in SUPPORT_MODE_OPTIONS"
@@ -406,7 +414,7 @@ async function saveSupportMode(): Promise<void> {
             placeholder="请选择供养机构"
             clearable
             :disabled="
-              busy || savingSupportMode || !isCentralizedSupport || supportInstitutions.length === 0
+              locked || savingSupportMode || !isCentralizedSupport || supportInstitutions.length === 0
             "
           >
             <el-option
@@ -423,7 +431,7 @@ async function saveSupportMode(): Promise<void> {
           <el-button
             type="primary"
             :loading="savingSupportMode"
-            :disabled="busy || savingSupportMode"
+            :disabled="locked || savingSupportMode"
             @click="saveSupportMode"
           >
             保存并重新判定
@@ -454,7 +462,7 @@ async function saveSupportMode(): Promise<void> {
 
       <div class="section-divider" />
 
-      <CaregiverList :form="form" :busy="busy" />
+      <CaregiverList :form="form" :busy="locked" />
     </NcCard>
 
     <!-- 卡3：判定结果（仅已判定显示） -->

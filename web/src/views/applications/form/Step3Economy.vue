@@ -754,14 +754,14 @@ async function importLandConfirmation(): Promise<void> {
 
       <div class="summary-grid">
         <NcStat
-          label="年收入合计"
+          label="家庭年收入"
           :value="formatMoney(economy.totalAnnualIncome)"
           hint="元 / 年"
           tone="ink"
           compact
         />
         <NcStat
-          label="月均收入"
+          label="家庭月收入"
           :value="formatMoney(economy.totalFamilyIncome)"
           hint="元 / 月"
           tone="ink"

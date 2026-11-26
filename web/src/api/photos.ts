@@ -418,6 +418,21 @@ export function assignPendingPhoto(
     })
 }
 
+/** 上传照片到待归属池（ARCHIVE_MANAGE）。 */
+export function uploadPendingPhoto(
+  file: File,
+  category: string,
+  photoName?: string,
+): Promise<{ id: number; message: string }> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('category', category)
+  if (photoName?.trim()) form.append('photoName', photoName.trim())
+  return apiHttp
+    .post<{ id: number; message: string }>('/photos/pending', form, { timeout: 120_000 })
+    .then((response) => response.data)
+}
+
 /** 删除待归属照片（ARCHIVE_MANAGE）。 */
 export function deletePendingPhoto(id: number): Promise<void> {
   return apiHttp

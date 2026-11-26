@@ -107,6 +107,7 @@ public static class PhotoEndpoints
         app.MapPost($"{Prefix}/print", PrintAsync);
         app.MapGet($"{Prefix}/export", ExportAsync);
         app.MapGet($"{Prefix}/pending", GetPendingAsync);
+        app.MapPost($"{Prefix}/pending", UploadPendingAsync).DisableAntiforgery();
         app.MapGet($"{Prefix}/pending/{{id:long}}/content", GetPendingContentAsync);
         app.MapPost($"{Prefix}/pending/{{id:long}}/assign", AssignPendingAsync).DisableAntiforgery();
         app.MapDelete($"{Prefix}/pending/{{id:long}}", DeletePendingAsync);
@@ -1067,6 +1068,69 @@ WHERE ($1::text = '' OR applicant_id_card ILIKE '%' || $1::text || '%'
             pageResult.TotalPages,
             true,
             message));
+    }
+
+    /// <summary>POST /api/photos/pending（multipart: file/category/photoName?/recognizedName?/recognizedIdCard?）</summary>
+    private static async Task<IResult> UploadPendingAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        IArchivePhotoPendingService pending,
+        CancellationToken ct,
+        IFormFile? file,
+        [FromForm] string? category,
+        [FromForm] string? photoName,
+        [FromForm] string? recognizedName,
+        [FromForm] string? recognizedIdCard)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.ARCHIVE_MANAGE, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (file is null || file.Length <= 0)
+        {
+            return InvalidRequest(context, "请选择照片文件");
+        }
+
+        if (file.Length > MaxPhotoBytes)
+        {
+            return InvalidRequest(context, "照片不能超过 10MB");
+        }
+
+        if (!IsAllowedImageFile(file, out var fileError))
+        {
+            return InvalidRequest(context, fileError!);
+        }
+
+        var normalizedCategory = string.IsNullOrWhiteSpace(category)
+            ? PhotoCategoryConstants.OTHER_CERT
+            : category.Trim();
+        if (!IsKnownCategory(normalizedCategory))
+        {
+            return InvalidRequest(context, "照片类别不存在");
+        }
+
+        await using var stream = file.OpenReadStream();
+        using var buffer = new MemoryStream((int)file.Length);
+        await stream.CopyToAsync(buffer, ct);
+
+        var save = await pending.SavePendingAsync(
+            buffer.ToArray(),
+            normalizedCategory,
+            string.IsNullOrWhiteSpace(photoName) ? Path.GetFileName(file.FileName) : photoName.Trim(),
+            recognizedName?.Trim(),
+            recognizedIdCard?.Trim(),
+            "web",
+            ct);
+
+        if (save.IsFailure)
+        {
+            return MapPhotoResult(context, save);
+        }
+
+        return Results.Json(new { id = save.Value, message = "已加入待归属照片池" });
     }
 
     /// <summary>GET /api/photos/pending/{id}/content → 待归属照片二进制（私有缓存 5 分钟）。</summary>

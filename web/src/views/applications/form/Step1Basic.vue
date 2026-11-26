@@ -20,6 +20,8 @@ import { getIdCardError, isBasicValid, parseIdCard } from './validation'
 
 const props = defineProps<{
   form: ApplicationFormModel
+  /** 查看/复核模式：即使状态仍为草稿（mode=review）也整步禁用。 */
+  readonly?: boolean
 }>()
 
 const emit = defineEmits<{ reload: [] }>()
@@ -36,8 +38,8 @@ type BasicWithDiseaseFields = ApplicationFormBasic & {
 
 const diseaseFields = computed(() => props.form.basic as BasicWithDiseaseFields)
 
-/** 非草稿状态（旧版 IsStep1Editable 同口径）全部输入只读。 */
-const isLocked = computed(() => props.form.status !== 'Draft')
+/** 非草稿状态（旧版 IsStep1Editable 同口径）或查看/复核模式全部输入只读。 */
+const isLocked = computed(() => props.form.status !== 'Draft' || Boolean(props.readonly))
 
 const isSevereDisease = computed<boolean>({
   get: () => Boolean(diseaseFields.value.isSevereDisease),
@@ -119,6 +121,7 @@ function isFutureDate(date: Date): boolean {
 }
 
 function openChangeDate(): void {
+  if (isLocked.value) return
   if (props.form.id <= 0) {
     void ElMessageBox.alert('请先保存草稿生成申请编号，再修改申请日期', '提示', {
       confirmButtonText: '确定',
@@ -245,7 +248,9 @@ defineExpose({ validate })
       <div class="application-date">
         <span class="application-date__label">申请日期</span>
         <strong class="application-date__value">{{ applicationDateText }}</strong>
-        <el-button size="small" :loading="changingDate" @click="openChangeDate">修改</el-button>
+        <el-button size="small" :loading="changingDate" :disabled="isLocked" @click="openChangeDate">
+          修改
+        </el-button>
       </div>
     </NcCard>
 

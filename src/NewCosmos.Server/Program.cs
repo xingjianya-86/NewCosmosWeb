@@ -102,6 +102,7 @@ builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadReq
 
 // Core 服务：数据库、日志、会话、用户。
 builder.Services.AddSingleton<ILoggerService, LoggerService>();
+builder.Services.AddSingleton<LoginThrottle>();
 builder.Services.AddSingleton<ISessionGuard, RequestSessionGuard>();
 builder.Services.AddSingleton<ISchemaSyncService, ServerSchemaSyncService>();
 builder.Services.AddSingleton<PostgreSqlDatabaseService>();
@@ -159,6 +160,7 @@ builder.Services.AddSingleton<IBankFlowQueryService, BankFlowQueryService>();
 builder.Services.AddSingleton<INearRelativeService, NearRelativeService>();
 builder.Services.AddSingleton<ITempReliefService, TempReliefService>();
 builder.Services.AddSingleton<IChangeService, ChangeService>();
+builder.Services.AddSingleton<IDynamicManagementRecordService, DynamicManagementRecordService>();
 builder.Services.AddSingleton<IQuickVerifyService, QuickVerifyService>();
 builder.Services.AddSingleton<IQuickVerifySimulationService, QuickVerifySimulationService>();
 // 月报服务依赖 Scoped 的 IUserService，必须 Scoped（Singleton 无法消费 Scoped）。

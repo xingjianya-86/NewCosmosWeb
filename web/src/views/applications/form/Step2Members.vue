@@ -32,6 +32,8 @@ import { ageFromBirthDate, getIdCardError, normalizeIdCard, parseIdCard } from '
 
 const props = defineProps<{
   form: ApplicationFormModel
+  /** 查看/复核模式：即使状态仍为草稿（mode=review）也整步禁用。 */
+  readonly?: boolean
 }>()
 
 /**
@@ -254,8 +256,8 @@ const visibleMembers = computed<MemberRow[]>(() =>
   members.value.filter((item) => !item.isHouseholdHead && !item.isApplicant) as MemberRow[],
 )
 
-/** 非草稿（已提交/审批中/已通过等）只读，禁用全部输入。 */
-const isReadonly = computed(() => props.form.status !== 'Draft')
+/** 非草稿（已提交/审批中/已通过等）或查看/复核模式只读，禁用全部输入。 */
+const isReadonly = computed(() => props.form.status !== 'Draft' || Boolean(props.readonly))
 
 /** 只读展示值：空值统一显示“—”。 */
 function displayText(value: string | null | undefined): string {
@@ -354,10 +356,12 @@ function memberIdIssue(member: ApplicationFormMember): string {
 }
 
 function addMember(): void {
+  if (isReadonly.value) return
   members.value.push(createMember({ relation: '其他' }))
 }
 
 async function removeMember(member: ApplicationFormMember): Promise<void> {
+  if (isReadonly.value) return
   if (member.isHouseholdHead || member.isApplicant) {
     ElMessage.warning('户主信息请在第 1 步修改，不能在此删除')
     return
@@ -420,6 +424,7 @@ function ensureHouseholdHead(): void {
 }
 
 function addSupporter(): void {
+  if (isReadonly.value) return
   supporters.value.push(
     createSupporterRow({
       // 赡养人独立户籍：默认带出申请人户籍，用户可改。
@@ -432,6 +437,7 @@ function addSupporter(): void {
 }
 
 async function removeSupporter(supporter: SupporterRow): Promise<void> {
+  if (isReadonly.value) return
   try {
     await ElMessageBox.confirm(
       `确定删除赡养人「${supporter.name || '未命名'}」吗？`,
@@ -475,11 +481,11 @@ onMounted(() => {
   <div class="step-members">
     <NcCard title="共同生活成员">
       <template #actions>
-        <el-button type="primary" :icon="Plus" @click="addMember">新增人员</el-button>
+        <el-button type="primary" :icon="Plus" :disabled="isReadonly" @click="addMember">新增人员</el-button>
       </template>
 
       <el-empty v-if="visibleMembers.length === 0" description="暂无共同生活成员，点击右上角“新增人员”添加">
-        <el-button type="primary" :icon="Plus" @click="addMember">新增人员</el-button>
+        <el-button type="primary" :icon="Plus" :disabled="isReadonly" @click="addMember">新增人员</el-button>
       </el-empty>
 
       <div v-else class="member-list">
@@ -502,6 +508,7 @@ onMounted(() => {
                 text
                 type="danger"
                 :icon="Delete"
+                :disabled="isReadonly"
                 @click="removeMember(member)"
               >
                 删除
@@ -530,7 +537,7 @@ onMounted(() => {
               </label>
 
               <label class="field">
-                <span class="field__label">与户主关系</span>
+                <span class="field__label">家庭关系</span>
                 <el-select v-model="member.relation" filterable allow-create default-first-option :disabled="isReadonly">
                   <el-option
                     v-for="item in RELATION_OPTIONS"
@@ -890,6 +897,17 @@ onMounted(() => {
                   v-model="member.workUnit"
                   maxlength="60"
                   placeholder="无工作单位可留空"
+                  clearable
+                  :disabled="isReadonly"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field__label">主要收入来源</span>
+                <el-input
+                  v-model="member.mainIncomeSource"
+                  maxlength="60"
+                  placeholder="如：务农、务工、养老金"
                   clearable
                   :disabled="isReadonly"
                 />

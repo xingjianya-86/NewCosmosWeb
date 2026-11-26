@@ -17,8 +17,8 @@ public sealed class AgentDeviceService(IDatabaseService database)
     {
         var result = await database.ExecuteScalarAsync<long?>(
             @"INSERT INTO nc_sys_print_devices
-                  (device_key, machine_name, agent_version, printers_json, last_seen_at, created_at, updated_at)
-              VALUES ($1, $2, $3, $4::jsonb, now(), now(), now())
+                  (device_key, machine_name, agent_version, printers_json, last_seen_at, is_active, created_at, updated_at)
+              VALUES ($1, $2, $3, $4::jsonb, now(), true, now(), now())
               RETURNING id",
             ct,
             deviceKey,
@@ -48,7 +48,7 @@ public sealed class AgentDeviceService(IDatabaseService database)
                   printers_json = $2::jsonb,
                   last_seen_at = now(),
                   updated_at = now()
-              WHERE device_key = $3",
+              WHERE device_key = $3 AND is_active",
             ct,
             agentVersion,
             AgentPrinterNormalizer.Serialize(printers),
@@ -60,7 +60,7 @@ public sealed class AgentDeviceService(IDatabaseService database)
         return await database.QuerySingleAsync<PrinterDeviceRow>(
             @"SELECT id, device_key, machine_name, printers_json::text AS printers_json, last_seen_at
               FROM nc_sys_print_devices
-              WHERE id = $1",
+              WHERE id = $1 AND is_active",
             ct,
             deviceId);
     }
@@ -74,6 +74,7 @@ public sealed class AgentDeviceService(IDatabaseService database)
                      (last_seen_at IS NOT NULL
                       AND last_seen_at >= now() - make_interval(secs => $1)) AS online
               FROM nc_sys_print_devices
+              WHERE is_active
               ORDER BY last_seen_at DESC NULLS LAST, id DESC
               LIMIT 200",
             ct,

@@ -682,7 +682,7 @@ public sealed class ArchivePrintQueueService(IDatabaseService database, ILoggerS
         var result = await database.QuerySingleAsync<PrintAgentDeviceRow?>(
             @"SELECT id, machine_name, device_key
               FROM nc_sys_print_devices
-              WHERE device_key = $1",
+              WHERE device_key = $1 AND is_active",
             ct, deviceKey);
 
         if (result.IsFailure)

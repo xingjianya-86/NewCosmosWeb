@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Check, Delete, Refresh, View } from '@element-plus/icons-vue'
+import { Check, Delete, Refresh, Upload, View } from '@element-plus/icons-vue'
 import {
   assignPendingPhoto,
   deletePendingPhoto,
   listPhotoBackfill,
   listPendingPhotos,
+  uploadPendingPhoto,
 } from '@/api/photos'
 import type { PhotoPendingItem, PhotoRecord } from '@/types/photos'
 import NcCard from '@/components/NcCard.vue'
@@ -31,6 +32,9 @@ const loading = ref(false)
 const loadError = ref('')
 const scopeNote = ref('')
 const deletingId = ref<number | null>(null)
+const uploading = ref(false)
+const uploadCategory = ref('ID_CARD')
+const uploadInput = ref<HTMLInputElement | null>(null)
 
 const previewVisible = ref(false)
 const previewPhoto = ref<PhotoRecord | null>(null)
@@ -112,6 +116,30 @@ function goPage(next: number): void {
 function openPreview(item: PhotoPendingItem): void {
   previewPhoto.value = toPreviewRecord(item)
   previewVisible.value = true
+}
+
+function pickUpload(): void {
+  uploadInput.value?.click()
+}
+
+async function handleUploadPicked(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (files.length === 0) return
+
+  uploading.value = true
+  try {
+    for (const file of files) {
+      await uploadPendingPhoto(file, uploadCategory.value)
+    }
+    ElMessage.success(`已上传 ${files.length} 张到待归属池`)
+    await loadList()
+  } catch (error) {
+    ElMessage.error(photoActionError(error, '上传待归属照片失败', '上传照片'))
+  } finally {
+    uploading.value = false
+  }
 }
 
 async function removeItem(item: PhotoPendingItem): Promise<void> {
@@ -234,6 +262,25 @@ defineExpose({ reload: loadList })
       <template #actions>
         <div class="head-actions">
           <NcStatusDot status="idle" :label="`待归属 ${total} 张`" />
+          <el-select v-model="uploadCategory" size="small" class="upload-category">
+            <el-option
+              v-for="item in FALLBACK_PHOTO_CATEGORIES"
+              :key="item.code"
+              :label="item.label"
+              :value="item.code"
+            />
+          </el-select>
+          <el-button :icon="Upload" :loading="uploading" size="small" @click="pickUpload">
+            上传
+          </el-button>
+          <input
+            ref="uploadInput"
+            type="file"
+            accept="image/*"
+            multiple
+            class="hidden-input"
+            @change="handleUploadPicked"
+          />
           <el-button :icon="Refresh" :loading="loading" text @click="loadList">刷新</el-button>
         </div>
       </template>
@@ -428,6 +475,14 @@ defineExpose({ reload: loadList })
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.upload-category {
+  width: 120px;
+}
+
+.hidden-input {
+  display: none;
 }
 
 .scope-note {

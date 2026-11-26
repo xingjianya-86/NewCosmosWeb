@@ -448,6 +448,12 @@ const router = createRouter({
           meta: { title: '中奖结果' },
         },
         {
+          path: 'settings',
+          name: 'settings',
+          component: () => import('@/views/SettingsView.vue'),
+          meta: { title: '系统设置' },
+        },
+        {
           path: 'coming-soon/reprint',
           redirect: '/reprint',
         },
