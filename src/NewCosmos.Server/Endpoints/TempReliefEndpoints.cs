@@ -91,13 +91,15 @@ public static class TempReliefEndpoints
         app.MapPost($"{prefix}/{{id:long}}/change-date", ChangeApplyDateAsync);
         app.MapPost($"{prefix}/{{id:long}}/stop", StopAsync);
         app.MapPost($"{prefix}/{{id:long}}/complete", CompleteAsync);
-        app.MapPost($"{prefix}/{{id:long}}/photos", UploadPhotoAsync);
+        app.MapPost($"{prefix}/{{id:long}}/photos", UploadPhotoAsync).DisableAntiforgery();
         app.MapDelete($"{prefix}/{{id:long}}/photos/{{photoId:long}}", DeletePhotoAsync);
 
         // 身份证 OCR（multipart file）：{id}/ocr 校验记录存在且类别仅 ID_CARD；/ocr/idcard 供新建表单使用。
         app.MapPost($"{prefix}/{{id:long}}/ocr", RecognizeIdCardAsync)
+            .DisableAntiforgery()
             .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxOcrRequestBodyBytes));
         app.MapPost($"{prefix}/ocr/idcard", RecognizeIdCardAsync)
+            .DisableAntiforgery()
             .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxOcrRequestBodyBytes));
 
         return app;

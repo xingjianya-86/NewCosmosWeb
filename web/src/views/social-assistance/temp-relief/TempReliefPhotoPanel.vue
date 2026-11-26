@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Camera, Delete, Refresh } from '@element-plus/icons-vue'
+import { Camera, Delete, Refresh, UploadFilled } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
 import {
   deleteTempReliefPhoto,
@@ -50,6 +50,7 @@ const photos = ref<TempReliefPhoto[]>([])
 const loading = ref(false)
 const loadError = ref('')
 const uploading = ref(false)
+const dragActive = ref(false)
 const recognizingId = ref<number | null>(null)
 const activeCategory = ref<CategoryFilter>('ALL')
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -75,6 +76,11 @@ const uploadDisabledReason = computed(() => {
   if (!props.editable) return '当前状态不可上传照片'
   return ''
 })
+
+/** 拖拽上传分类：在具体 Tab 下用该分类；在「全部」下沿用最后一次按钮选择的分类。 */
+const dropCategory = computed<PhotoCategoryKey>(() =>
+  activeCategory.value === 'ALL' ? pendingCategory.value : activeCategory.value,
+)
 
 function categoryText(photo: TempReliefPhoto): string {
   return photo.photoCategoryName || categoryLabelMap.get(photo.photoCategory as PhotoCategoryKey) || photo.photoCategory
@@ -126,38 +132,81 @@ function triggerUpload(category: PhotoCategoryKey): void {
   fileInput.value?.click()
 }
 
-async function handleFilePicked(event: Event): Promise<void> {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0] ?? null
-  input.value = ''
-  if (!file) return
-
+async function uploadFiles(files: File[], category: PhotoCategoryKey): Promise<void> {
   const id = props.applicationId
-  if (id === null) return
-
-  if (!file.type.startsWith('image/')) {
-    ElMessage.warning('仅支持图片文件')
+  if (id === null || uploadDisabled.value) {
+    if (uploadDisabledReason.value) ElMessage.warning(uploadDisabledReason.value)
     return
   }
-  if (file.size > MAX_PHOTO_BYTES) {
-    ElMessage.warning('照片不能超过 10MB')
+
+  const images = files.filter((file) => file.type.startsWith('image/'))
+  if (images.length === 0) {
+    ElMessage.warning('仅支持图片文件')
     return
   }
 
   uploading.value = true
+  let success = 0
   try {
-    await uploadTempReliefPhoto(id, file, {
-      category: pendingCategory.value,
-      photoName: file.name,
-    })
-    ElMessage.success('照片已上传')
-    await load()
-    emit('changed')
-  } catch (error) {
-    ElMessage.error(getErrorMessage(error, '照片上传失败'))
+    for (const file of images) {
+      if (file.size > MAX_PHOTO_BYTES) {
+        ElMessage.warning(`${file.name} 超过 10MB，已跳过`)
+        continue
+      }
+      try {
+        await uploadTempReliefPhoto(id, file, {
+          category,
+          photoName: file.name,
+        })
+        success += 1
+      } catch (error) {
+        ElMessage.error(`${file.name} 上传失败：${getErrorMessage(error, '照片上传失败')}`)
+      }
+    }
   } finally {
     uploading.value = false
   }
+
+  if (success > 0) {
+    ElMessage.success(success === 1 ? '照片已上传' : `已上传 ${success} 张照片`)
+    await load()
+    emit('changed')
+  }
+}
+
+async function handleFilePicked(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (files.length === 0) return
+  await uploadFiles(files, pendingCategory.value)
+}
+
+function handleDragOver(event: DragEvent): void {
+  event.preventDefault()
+  if (!uploadDisabled.value) dragActive.value = true
+}
+
+function handleDragLeave(event: DragEvent): void {
+  event.preventDefault()
+  const related = event.relatedTarget as Node | null
+  if (related && (event.currentTarget as HTMLElement).contains(related)) return
+  dragActive.value = false
+}
+
+function handleDrop(event: DragEvent): void {
+  event.preventDefault()
+  dragActive.value = false
+  if (uploadDisabled.value) {
+    if (uploadDisabledReason.value) ElMessage.warning(uploadDisabledReason.value)
+    return
+  }
+  const files = Array.from(event.dataTransfer?.files ?? [])
+  if (files.length === 0) {
+    ElMessage.warning('未检测到拖入的文件')
+    return
+  }
+  void uploadFiles(files, dropCategory.value)
 }
 
 async function removePhoto(photo: TempReliefPhoto): Promise<void> {
@@ -309,6 +358,22 @@ watch(
       </el-radio-group>
     </div>
 
+    <div
+      class="photos-drop"
+      :class="{ 'is-active': dragActive, 'is-disabled': uploadDisabled }"
+      @dragover.prevent="handleDragOver"
+      @dragenter.prevent="handleDragOver"
+      @dragleave.prevent="handleDragLeave"
+      @drop.prevent="handleDrop"
+      @click="triggerUpload(dropCategory)"
+    >
+      <el-icon class="photos-drop__icon" :size="26"><UploadFilled /></el-icon>
+      <p class="photos-drop__title">拖拽图片到此处上传</p>
+      <p class="photos-drop__hint">
+        当前分类：{{ categoryLabelMap.get(dropCategory) }}；支持多张，单张不超过 10MB
+      </p>
+    </div>
+
     <div v-loading="loading" class="photos-grid">
       <figure v-for="(photo, index) in filteredPhotos" :key="photo.id" class="photo-card">
         <el-image
@@ -368,6 +433,48 @@ watch(
 </template>
 
 <style scoped>
+.photos-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 16px;
+  border: 1px dashed var(--nc-line, #d8d2c4);
+  border-radius: 10px;
+  background: var(--nc-paper-soft, #fbf8f1);
+  color: var(--nc-muted, #8a8375);
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.photos-drop.is-active {
+  border-color: var(--nc-seal, #8f2f2b);
+  background: var(--nc-seal-soft, #f7ece9);
+  color: var(--nc-seal, #8f2f2b);
+}
+
+.photos-drop.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.photos-drop__icon {
+  color: inherit;
+}
+
+.photos-drop__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.photos-drop__hint {
+  margin: 0;
+  font-size: 12px;
+}
+
 .photos-head {
   display: flex;
   flex-wrap: wrap;
