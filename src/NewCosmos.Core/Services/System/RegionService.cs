@@ -1370,12 +1370,13 @@ SELECT
             cityIdArg = nextId.Value;
         }
 
-        var sql = @"INSERT INTO nc_regions_cities (id, city_name, city_code, sort_order, is_active)
-                    VALUES ($1, $2, $3, $4, $5)
+        var sql = @"INSERT INTO nc_regions_cities (id, city_name, city_code, province_id, sort_order, is_active)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     RETURNING id";
         var result = await _dbService.QuerySingleAsync<RegionCity>(sql, ct,
             cityIdArg,
-            request.CityName, request.CityCode, request.SortOrder, request.IsActive);
+            request.CityName, request.CityCode, request.ProvinceId,
+            request.SortOrder, request.IsActive);
 
         if (result.IsFailure)
             return Result.Failure<RegionCity>(result.ErrorCode!, result.Message!);
@@ -1398,10 +1399,11 @@ SELECT
         LogInfo($"更新地级市: Id={request.Id}");
 
         var sql = @"UPDATE nc_regions_cities SET city_name = $1, city_code = $2,
-                    sort_order = $3, is_active = $4 WHERE id = $5
+                    province_id = $3, sort_order = $4, is_active = $5 WHERE id = $6
                     RETURNING id";
         var result = await _dbService.QuerySingleAsync<RegionCity>(sql, ct,
-            request.CityName, request.CityCode, request.SortOrder, request.IsActive, request.Id);
+            request.CityName, request.CityCode, request.ProvinceId,
+            request.SortOrder, request.IsActive, request.Id);
 
         if (result.IsFailure)
             return Result.Failure<RegionCity>(result.ErrorCode!, result.Message!);

@@ -478,6 +478,7 @@ async function submitEditor(): Promise<void> {
       const payload: RegionCitySave = {
         cityName: name,
         cityCode: code,
+        provinceId: selectedProvinceId.value,
         sortOrder,
         isActive: editor.isActive,
       }
@@ -706,7 +707,7 @@ onMounted(async () => {
             <div class="column-head__text">
               <strong>{{ column.label }}（{{ column.items.length }}）</strong>
               <small v-if="!column.parentReady">{{ column.parentHint }}</small>
-              <small v-else>点击行查看下一级</small>
+              <small v-else>{{ column.key === 'village' ? '点击行选中' : '点击行查看下一级' }}</small>
             </div>
             <el-button
               size="small"
@@ -1053,4 +1054,20 @@ onMounted(async () => {
 
 @media (max-width: 767px) {
   .region-toolbar__select {
-    
+    width: 100%;
+  }
+
+  .region-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .column-body {
+    max-height: 380px;
+  }
+
+  .editor-row {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+}
+</style>

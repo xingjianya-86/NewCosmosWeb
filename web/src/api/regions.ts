@@ -56,6 +56,7 @@ export interface RegionCitySave {
   id?: number
   cityName: string
   cityCode: string
+  provinceId?: number | null
   sortOrder: number
   isActive: boolean
 }
