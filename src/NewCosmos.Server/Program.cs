@@ -165,6 +165,7 @@ builder.Services.AddScoped<ProofUnitTemplateService>();
 builder.Services.AddScoped<ArchivePhotoService>();
 builder.Services.AddScoped<TemplateAdminService>();
 builder.Services.AddScoped<PublicityService>();
+builder.Services.AddScoped<ArchiveProductionDataService>();
 // 资产核查推送打印：按 nc_biz_asset_checks.id 装配授权书/核查报告字段。
 builder.Services.AddScoped<AssetCheckPrintDataService>();
 builder.Services.AddScoped<ApplicationQueryService>();
@@ -206,6 +207,7 @@ app.MapArchiveEndpoints();
 app.MapArchivePhotoEndpoints();
 app.MapTemplateAdminEndpoints();
 app.MapPublicityEndpoints();
+app.MapArchiveOutputEndpoints();
 app.MapChangeManagementEndpoints();
 app.MapMonthlyReportEndpoints();
 app.MapApplicationWorkflowEndpoints();

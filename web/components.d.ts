@@ -42,7 +42,6 @@ declare module 'vue' {
     ElTableColumn: typeof import('element-plus/es/components/table/index')['ElTableColumn']
     ElTag: typeof import('element-plus/es/components/tag/index')['ElTag']
     ElTimePicker: typeof import('element-plus/es/components/time-picker/index')['ElTimePicker']
-    ElTooltip: typeof import('element-plus/es/components/tooltip/index')['ElTooltip']
     ElTree: typeof import('element-plus/es/components/tree/index')['ElTree']
     LoginSequenceOverlay: typeof import('./src/components/LoginSequenceOverlay.vue')['default']
     NcCard: typeof import('./src/components/NcCard.vue')['default']

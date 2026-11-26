@@ -1,816 +1,387 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import {
-  CircleCheck,
-  Document,
-  InfoFilled,
-  Monitor,
-  Printer,
+  ArrowLeft,
+  CopyDocument,
+  FolderOpened,
   Refresh,
-  View,
+  Right,
 } from '@element-plus/icons-vue'
-import {
-  ARCHIVE_PRINT_BUSINESS_TYPE,
-  createPrintJob,
-  deletePrintJob,
-  listDocumentTemplates,
-  listPrintJobs,
-  retryPrintJob,
-} from '@/api/archivePrint'
-import type {
-  DocumentTemplate,
-  PrintJobListItem,
-  PrintJobMode,
-} from '@/api/archivePrint'
-import { completeApplication } from '@/api/applicationForm'
-import { getApplication } from '@/api/applications'
+import { getArchiveProduction } from '@/api/archiveOutput'
 import { getErrorMessage } from '@/api/http'
-import { listPrinters } from '@/api/printers'
+import type { ArchiveProductionInfo } from '@/types/archiveOutput'
 import NcCard from '@/components/NcCard.vue'
 import NcPageHeader from '@/components/NcPageHeader.vue'
 import NcStat from '@/components/NcStat.vue'
-import NcStatusDot from '@/components/NcStatusDot.vue'
-import ArchiveApplicationPanel from './ArchiveApplicationPanel.vue'
-import PrintJobPanel from './PrintJobPanel.vue'
-import { maskIdCard } from '@/views/applications/format'
-import { resolveApplicationStatus } from '@/views/applications/status'
-import type {
-  ApplicationDetail,
-  ApplicationListItem,
-  ApplicationStatus,
-} from '@/types/application'
-import type { PrinterBinding } from '@/types/api'
 
 const route = useRoute()
 const router = useRouter()
 
-const POLL_INTERVAL = 4_000
-const JOB_PAGE_SIZE = 10
+/* ───────────────────────── 入口参数 ───────────────────────── */
 
-const applicationPanelRef = ref<InstanceType<typeof ArchiveApplicationPanel> | null>(null)
-
-/* ── 申请 ─────────────────────────────────────────────────────── */
-const selectedApplication = ref<ApplicationListItem | null>(null)
-
-/* ── 文书模板 ─────────────────────────────────────────────────── */
-const templates = ref<DocumentTemplate[]>([])
-const selectedTemplateIds = ref<number[]>([])
-const templatesLoading = ref(false)
-const templatesError = ref('')
-let templatesInitialized = false
-
-/* ── 打印机 ───────────────────────────────────────────────────── */
-const printers = ref<PrinterBinding[]>([])
-const selectedPrinterId = ref<number | null>(null)
-const printersLoading = ref(false)
-const printersError = ref('')
-
-/* ── 推送参数 ─────────────────────────────────────────────────── */
-const copies = ref<number | undefined>(1)
-const isDuplex = ref(false)
-const pushing = ref(false)
-const pushMode = ref<PrintJobMode | null>(null)
-
-/* ── 任务列表 ─────────────────────────────────────────────────── */
-const jobs = ref<PrintJobListItem[]>([])
-const jobsLoading = ref(false)
-const jobsError = ref('')
-const jobStatusFilter = ref('')
-const jobPage = ref(1)
-const jobPageSize = ref(JOB_PAGE_SIZE)
-const jobTotalCount = ref(0)
-const jobTotalPages = ref(1)
-const actionJobId = ref<number | null>(null)
-let jobsTicket = 0
-let pollTimer: number | undefined
-
-const selectedTemplates = computed(() =>
-  templates.value.filter((template) => selectedTemplateIds.value.includes(template.id)),
-)
-const selectedPrinter = computed(
-  () => printers.value.find((printer) => printer.id === selectedPrinterId.value) ?? null,
-)
-const onlinePrinterCount = computed(
-  () => printers.value.filter((printer) => printer.online).length,
-)
-const copiesCount = computed(() => {
-  const value = Math.round(copies.value ?? 1)
-  return Math.min(99, Math.max(1, value))
-})
-const allTemplatesSelected = computed(
-  () =>
-    templates.value.length > 0 && selectedTemplateIds.value.length === templates.value.length,
-)
-const canPreview = computed(
-  () =>
-    !pushing.value &&
-    Boolean(selectedApplication.value) &&
-    selectedTemplates.value.length > 0,
-)
-const canPrint = computed(() => canPreview.value && Boolean(selectedPrinter.value))
-
-const jobStatusOptions = [
-  { label: '全部状态', value: '' },
-  { label: '待处理', value: 'Pending' },
-  { label: '处理中', value: 'Processing' },
-  { label: '已完成', value: 'Completed' },
-  { label: '失败', value: 'Failed' },
-]
-
-/* ── 加载 ─────────────────────────────────────────────────────── */
-
-async function loadTemplates(): Promise<void> {
-  templatesLoading.value = true
-  templatesError.value = ''
-  try {
-    const list = await listDocumentTemplates(ARCHIVE_PRINT_BUSINESS_TYPE)
-    templates.value = list
-    const available = new Set(list.map((template) => template.id))
-
-    if (!templatesInitialized) {
-      selectedTemplateIds.value = list.map((template) => template.id)
-      templatesInitialized = true
-    } else {
-      // 刷新后保留用户已选项，移除后端已下架的模板。
-      selectedTemplateIds.value = selectedTemplateIds.value.filter((id) => available.has(id))
-    }
-  } catch (error) {
-    templates.value = []
-    selectedTemplateIds.value = []
-    templatesError.value = getErrorMessage(error, '文书模板加载失败')
-  } finally {
-    templatesLoading.value = false
-  }
+function firstQuery(key: string): string {
+  const raw = route.query[key]
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return typeof value === 'string' ? value.trim() : ''
 }
 
-async function loadPrinters(): Promise<void> {
-  printersLoading.value = true
-  printersError.value = ''
-  try {
-    const list = await listPrinters()
-    printers.value = list
-
-    const current = list.find((printer) => printer.id === selectedPrinterId.value)
-    if (current) return
-
-    const preferred = list.find((printer) => printer.isDefault && printer.online)
-      ?? list.find((printer) => printer.isDefault)
-      ?? list.find((printer) => printer.online)
-      ?? list[0]
-    selectedPrinterId.value = preferred?.id ?? null
-  } catch (error) {
-    printers.value = []
-    selectedPrinterId.value = null
-    printersError.value = getErrorMessage(error, '打印机列表加载失败')
-  } finally {
-    printersLoading.value = false
-  }
+interface ProductionContext {
+  businessType: string
+  businessId: number
 }
 
-async function loadJobs(options: { silent?: boolean } = {}): Promise<void> {
-  const ticket = ++jobsTicket
-  if (!options.silent) {
-    jobsLoading.value = true
-    jobsError.value = ''
+/**
+ * 兼容两类入口：
+ * - applicationId → FamilyApplication + applicationId
+ * - businessType + businessId（工作流/资产核查/月报等通用入口）
+ * 显式 businessType + businessId 优先，applicationId 作为回退。
+ */
+const context = computed<ProductionContext | null>(() => {
+  const businessType = firstQuery('businessType')
+  const businessIdText = firstQuery('businessId')
+  const businessId = Number(businessIdText)
+  if (businessType && businessIdText && Number.isFinite(businessId) && businessId > 0) {
+    return { businessType, businessId }
   }
 
-  try {
-    const response = await listPrintJobs({
-      status: jobStatusFilter.value || undefined,
-      pageIndex: jobPage.value,
-      pageSize: jobPageSize.value,
-    })
-    if (ticket !== jobsTicket) return
-
-    jobs.value = response.items
-    jobPage.value = response.pageIndex || jobPage.value
-    jobPageSize.value = response.pageSize || jobPageSize.value
-    jobTotalCount.value = response.totalCount
-    jobTotalPages.value = Math.max(response.totalPages, 1)
-    jobsError.value = ''
-  } catch (error) {
-    if (ticket !== jobsTicket) return
-    if (!options.silent) {
-      jobsError.value = getErrorMessage(error, '打印任务加载失败')
-    }
-  } finally {
-    if (ticket === jobsTicket) jobsLoading.value = false
-  }
-}
-
-function refreshAll(): void {
-  void applicationPanelRef.value?.reload()
-  void loadTemplates()
-  void loadPrinters()
-  void loadJobs()
-}
-
-/* ── 申请选择 ─────────────────────────────────────────────────── */
-
-function handleSelectApplication(item: ApplicationListItem): void {
-  selectedApplication.value = item
-}
-
-function detailToListItem(detail: ApplicationDetail): ApplicationListItem {
-  return {
-    id: detail.id,
-    applicationNo: detail.applicationNo,
-    applicantName: detail.applicantName,
-    applicantIdCardMasked: maskIdCard(detail.applicantIdCard),
-    applicantPhone: detail.applicantPhone,
-    status: detail.status,
-    statusText: detail.statusText,
-    currentStep: detail.currentStep,
-    familySize: detail.familySize,
-    classificationResult: detail.classificationResult,
-    totalAnnualIncome: detail.totalAnnualIncome,
-    perCapitaAnnualIncome: detail.perCapitaAnnualIncome,
-    town: detail.town,
-    village: detail.village,
-    address: detail.address,
-    createdAt: detail.createdAt,
-    updatedAt: detail.updatedAt,
-  }
-}
-
-async function loadPreselectedApplication(): Promise<void> {
-  const raw = Number(route.query.applicationId)
-  if (!Number.isFinite(raw) || raw <= 0) return
-
-  try {
-    const detail = await getApplication(raw)
-    selectedApplication.value = detailToListItem(detail)
-  } catch (error) {
-    ElMessage.error(getErrorMessage(error, '指定申请加载失败'))
-  }
-}
-
-/* ── 完成归档 ─────────────────────────────────────────────────── */
-
-const ARCHIVED_STEP = 6
-const completing = ref(false)
-const completeError = ref('')
-
-/** 归档前置说明：未选申请、已归档或状态不在 Draft/Submitted 时禁用按钮。 */
-const completionBlockedReason = computed(() => {
-  const application = selectedApplication.value
-  if (!application) return '请先在左侧选择一条申请'
-  if (application.currentStep >= ARCHIVED_STEP) return '该申请已完成归档，不能重复归档'
-  if (application.status === 'Approved') return '该申请已审批归档，不能重复归档'
-  if (application.status === 'Completed') return '该申请已完成，不能重复归档'
-  if (application.status === 'Stopped') return '该申请已终止，不能完成归档'
-  if (application.status !== 'Draft' && application.status !== 'Submitted') {
-    const label = resolveApplicationStatus(application.status, application.statusText).label
-    return `当前状态「${label}」不支持完成归档`
-  }
-  return ''
-})
-const canCompleteArchive = computed(
-  () => Boolean(selectedApplication.value) && !completionBlockedReason.value,
-)
-
-async function handleCompleteArchive(): Promise<void> {
-  if (completing.value) return
-
-  const application = selectedApplication.value
-  if (!application) {
-    ElMessage.warning('请先在左侧选择一条申请')
-    return
-  }
-  if (completionBlockedReason.value) {
-    ElMessage.warning(completionBlockedReason.value)
-    return
+  const applicationId = Number(firstQuery('applicationId'))
+  if (Number.isFinite(applicationId) && applicationId > 0) {
+    return { businessType: 'FamilyApplication', businessId: applicationId }
   }
 
-  try {
-    await ElMessageBox.confirm(
-      '完成归档后本次办理结束，状态将变为已审批并归档。',
-      '完成归档',
-      { type: 'warning', confirmButtonText: '完成归档', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
-
-  completing.value = true
-  completeError.value = ''
-  try {
-    const result = await completeApplication(application.id)
-    const fallbackStatus = (result.status || 'Approved') as ApplicationStatus
-    ElMessage.success('已完成归档，本次办理结束')
-
-    // 优先重新拉取详情，确保列表与状态文案同源；失败时用接口返回值兜底。
-    try {
-      const detail = await getApplication(application.id)
-      selectedApplication.value = detailToListItem(detail)
-    } catch {
-      selectedApplication.value = {
-        ...application,
-        status: fallbackStatus,
-        statusText: resolveApplicationStatus(fallbackStatus).label,
-        currentStep: result.currentStep || ARCHIVED_STEP,
-      }
-    }
-
-    void applicationPanelRef.value?.reload()
-  } catch (error) {
-    completeError.value = getErrorMessage(error, '完成归档失败')
-    ElMessage.error(completeError.value)
-  } finally {
-    completing.value = false
-  }
-}
-
-/* ── 模板选择 ─────────────────────────────────────────────────── */
-
-function selectAllTemplates(): void {
-  selectedTemplateIds.value = templates.value.map((template) => template.id)
-}
-
-function clearTemplates(): void {
-  selectedTemplateIds.value = []
-}
-
-function goTemplateManagement(): void {
-  void router.push('/coming-soon/templates')
-}
-
-function goPrinters(): void {
-  void router.push('/printers')
-}
-
-/* ── 推送 ─────────────────────────────────────────────────────── */
-
-function validationMessage(mode: PrintJobMode): string | null {
-  if (!selectedApplication.value) return '请先在左侧选择一条申请'
-  if (selectedTemplates.value.length === 0) return '请至少选择一份文书'
-  if (mode === 'print') {
-    if (printers.value.length === 0) return '当前账号未绑定打印机，请先在本机 Agent 绑定'
-    if (!selectedPrinter.value) return '请先选择打印机'
-  }
   return null
-}
+})
 
-async function pushJobs(mode: PrintJobMode): Promise<void> {
-  if (pushing.value) return
+/* ───────────────────────── 数据 ───────────────────────── */
 
-  const invalid = validationMessage(mode)
-  if (invalid) {
-    ElMessage.warning(invalid)
+const info = ref<ArchiveProductionInfo | null>(null)
+const loading = ref(false)
+const error = ref('')
+
+const summaryItems = computed(() => info.value?.summary ?? [])
+const sidebarGroups = computed(() => info.value?.sidebarGroups ?? [])
+
+const totalFields = computed(() =>
+  sidebarGroups.value.reduce((total, group) => total + group.fields.length, 0),
+)
+const autoFilledCount = computed(() =>
+  sidebarGroups.value.reduce(
+    (total, group) => total + group.fields.filter((field) => field.autoFilled).length,
+    0,
+  ),
+)
+const autoFillRate = computed(() => {
+  if (totalFields.value === 0) return 0
+  return Math.round((autoFilledCount.value / totalFields.value) * 100)
+})
+
+const dataSourceType = computed(
+  () => info.value?.title || info.value?.businessType || context.value?.businessType || '—',
+)
+
+const subtitle = computed(() => {
+  if (!context.value) return '请从工作流页面选择记录进入'
+  if (loading.value && !info.value) return '正在加载业务数据…'
+  if (error.value) return '业务数据加载失败'
+  return info.value?.statusText || info.value?.title || '已加载业务数据'
+})
+
+const startDisabled = computed(() => loading.value || !info.value)
+
+async function load(): Promise<void> {
+  const current = context.value
+  if (!current) {
+    info.value = null
+    error.value = ''
     return
   }
 
-  const application = selectedApplication.value
-  if (!application) return
-
-  const count = selectedTemplates.value.length
-  const printerName = selectedPrinter.value?.printerName
-  const bindingId = selectedPrinter.value?.id ?? null
-
-  if (mode === 'print') {
-    const printer = selectedPrinter.value
-    if (!printer) return
-    const target = `${printer.deviceName} / ${printer.printerName}`
-    try {
-      await ElMessageBox.confirm(
-        `将向「${target}」推送 ${count} 个打印任务，每份 ${copiesCount.value} 份、${
-          isDuplex.value ? '双面' : '单面'
-        }打印。确认开始打印？`,
-        '确认打印',
-        { confirmButtonText: '开始打印', cancelButtonText: '取消', type: 'warning' },
-      )
-    } catch {
-      return
-    }
-  }
-
-  pushing.value = true
-  pushMode.value = mode
-  let succeeded = 0
-  let firstError = ''
-
+  loading.value = true
+  error.value = ''
   try {
-    for (const template of selectedTemplates.value) {
-      try {
-        await createPrintJob({
-          businessType: ARCHIVE_PRINT_BUSINESS_TYPE,
-          businessId: application.id,
-          templateId: template.id,
-          templateName: template.name,
-          bindingId: mode === 'print' ? bindingId : undefined,
-          printerName,
-          copies: copiesCount.value,
-          isDuplex: isDuplex.value,
-          mode,
-        })
-        succeeded += 1
-      } catch (error) {
-        if (!firstError) firstError = getErrorMessage(error, '打印任务推送失败')
-      }
-    }
+    info.value = await getArchiveProduction(current)
+  } catch (loadError) {
+    info.value = null
+    error.value = getErrorMessage(loadError, '档案制作信息加载失败')
   } finally {
-    pushing.value = false
-    pushMode.value = null
-  }
-
-  if (succeeded > 0) {
-    if (mode === 'preview') {
-      ElMessage.success('已推送到 PC 端预览')
-    } else {
-      ElMessage.success(`已推送 ${succeeded} 个打印任务，请在 PC 端查看打印机`)
-    }
-    jobPage.value = 1
-    void loadJobs({ silent: true })
-  }
-
-  if (firstError) {
-    ElMessage.error(
-      succeeded > 0
-        ? `${succeeded} 个任务已推送，其余失败：${firstError}`
-        : firstError,
-    )
+    loading.value = false
   }
 }
 
-/* ── 任务操作 ─────────────────────────────────────────────────── */
+/* ───────────────────────── 导航 ───────────────────────── */
 
-function handleStatusFilterChange(): void {
-  jobPage.value = 1
-  void loadJobs()
+function goBack(): void {
+  if (window.history.length > 1) {
+    router.back()
+    return
+  }
+  goWorkflow()
 }
 
-function handleJobPageChange(value: number): void {
-  jobPage.value = value
-  void loadJobs()
+function goWorkflow(): void {
+  void router.push('/applications')
 }
 
-async function handleRetryJob(job: PrintJobListItem): Promise<void> {
-  if (actionJobId.value !== null) return
-  actionJobId.value = job.id
+function goArchiveQuery(): void {
+  void router.push('/archives/query')
+}
+
+function goOutput(): void {
+  const current = context.value
+  if (!current || !info.value) {
+    ElMessage.warning('业务数据尚未加载完成')
+    return
+  }
+
+  const query: Record<string, string> = {
+    businessType: info.value.businessType || current.businessType,
+    businessId: String(info.value.businessId || current.businessId),
+  }
+
+  // 优先使用后端返回的分类/操作覆盖；缺失时回退入口参数。
+  const classification = info.value.classification || firstQuery('classification')
+  if (classification) query.classification = classification
+
+  const operationOverride = info.value.operationOverride || firstQuery('operationOverride')
+  if (operationOverride) query.operationOverride = operationOverride
+
+  void router.push({ name: 'archive-output', query })
+}
+
+/* ───────────────────────── 复制 ───────────────────────── */
+
+function fallbackCopy(text: string): boolean {
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.style.position = 'fixed'
+  area.style.top = '0'
+  area.style.left = '0'
+  area.style.opacity = '0'
+  document.body.appendChild(area)
   try {
-    await retryPrintJob(job.id)
-    ElMessage.success('已重新加入打印队列')
-    await loadJobs({ silent: true })
-  } catch (error) {
-    ElMessage.error(getErrorMessage(error, '重试失败'))
+    area.select()
+    return document.execCommand('copy')
   } finally {
-    actionJobId.value = null
+    document.body.removeChild(area)
   }
 }
 
-async function handleDeleteJob(job: PrintJobListItem): Promise<void> {
-  if (actionJobId.value !== null) return
+async function copyField(label: string, value: string): Promise<void> {
+  if (!value) {
+    ElMessage.warning('该字段没有可复制的内容')
+    return
+  }
 
   try {
-    await ElMessageBox.confirm(
-      `确定删除任务「${job.templateName}」（${job.jobNo}）吗？删除后不可恢复。`,
-      '删除打印任务',
-      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
-    )
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value)
+    } else if (!fallbackCopy(value)) {
+      throw new Error('copy failed')
+    }
+    ElMessage.success(`已复制：${label}`)
   } catch {
-    return
-  }
-
-  actionJobId.value = job.id
-  try {
-    await deletePrintJob(job.id)
-    ElMessage.success('打印任务已删除')
-    if (jobs.value.length === 1 && jobPage.value > 1) {
-      jobPage.value -= 1
-    }
-    await loadJobs({ silent: true })
-  } catch (error) {
-    ElMessage.error(getErrorMessage(error, '删除失败'))
-  } finally {
-    actionJobId.value = null
+    ElMessage.error('复制失败，请手动选择内容复制')
   }
 }
 
-/* ── 生命周期 ─────────────────────────────────────────────────── */
-
-onMounted(async () => {
-  void loadTemplates()
-  void loadPrinters()
-  void loadJobs()
-  void loadPreselectedApplication()
-
-  pollTimer = window.setInterval(() => {
-    if (document.visibilityState !== 'visible') return
-    if (pushing.value || actionJobId.value !== null || jobsLoading.value) return
-    void loadJobs({ silent: true })
-  }, POLL_INTERVAL)
+onMounted(() => {
+  void load()
 })
 
-onBeforeUnmount(() => {
-  if (pollTimer !== undefined) window.clearInterval(pollTimer)
-})
+watch(
+  () => route.fullPath,
+  () => {
+    void load()
+  },
+)
 </script>
 
 <template>
   <div class="nc-page archive-production">
     <NcPageHeader
-      title="档案制作"
-      description="选择申请与文书，推送到 PC 端预览或打印"
-      kicker="救助档案管理 / 档案制作"
+      title="档案制作中心"
+      :description="subtitle"
+      kicker="救助档案管理 / 档案制作中心"
     >
       <template #actions>
-        <el-button :icon="Refresh" :loading="jobsLoading" @click="refreshAll">刷新</el-button>
-        <el-button :icon="Printer" @click="goPrinters">打印机绑定</el-button>
-        <el-button
-          class="archive-complete"
-          type="primary"
-          :icon="CircleCheck"
-          :loading="completing"
-          :disabled="!canCompleteArchive"
-          :title="canCompleteArchive ? '完成本次办理并归档' : completionBlockedReason"
-          @click="handleCompleteArchive"
-        >
-          完成归档
-        </el-button>
+        <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+        <el-button :icon="ArrowLeft" @click="goBack">返回</el-button>
       </template>
     </NcPageHeader>
 
-    <div class="hint-bar">
-      <el-icon><InfoFilled /></el-icon>
-      <span>Web 端不生成 PDF，预览/打印由已绑定的 PC 打印代理执行。</span>
-    </div>
+    <!-- 无入口参数：保持简单提示，不再呈现旧版三栏检索 -->
+    <NcCard v-if="!context" padding="lg">
+      <div class="empty-state">
+        <el-icon class="empty-state__icon" :size="46"><FolderOpened /></el-icon>
+        <p class="empty-state__title">请从工作流页面选择记录进入</p>
+        <p class="empty-state__hint">
+          入口需携带 applicationId，或 businessType + businessId 参数。
+        </p>
+        <div class="empty-state__actions">
+          <el-button type="primary" @click="goWorkflow">返回工作流</el-button>
+          <el-button @click="goArchiveQuery">档案查询</el-button>
+        </div>
+      </div>
+    </NcCard>
 
-    <div v-if="selectedApplication && completionBlockedReason" class="complete-note">
-      <el-icon><InfoFilled /></el-icon>
-      <span>{{ completionBlockedReason }}</span>
-    </div>
+    <NcCard v-else-if="loading && !info" padding="lg">
+      <el-skeleton :rows="6" animated />
+    </NcCard>
 
-    <el-alert
-      v-if="completeError"
-      class="panel-error"
-      type="error"
-      :title="completeError"
-      show-icon
-      @close="completeError = ''"
-    />
+    <template v-else>
+      <el-alert
+        v-if="error"
+        class="panel-error"
+        type="error"
+        :title="error"
+        :closable="false"
+        show-icon
+      >
+        <el-button link type="primary" @click="load">重新加载</el-button>
+      </el-alert>
 
-    <div class="summary">
-      <NcStat
-        label="已选文书"
-        :value="`${selectedTemplateIds.length} / ${templates.length}`"
-        tone="seal"
-        compact
-      />
-      <NcStat
-        label="在线打印机"
-        :value="`${onlinePrinterCount} / ${printers.length}`"
-        tone="pine"
-        compact
-      />
-      <NcStat label="打印任务" :value="jobTotalCount" tone="ink" compact />
-    </div>
-
-    <div class="production-grid">
-      <!-- ── 左：申请选择 ── -->
-      <NcCard title="1 · 选择申请" subtitle="按申请编号、姓名或身份证检索">
-        <ArchiveApplicationPanel
-          ref="applicationPanelRef"
-          :selected="selectedApplication"
-          @select="handleSelectApplication"
-        />
-      </NcCard>
-
-      <!-- ── 中：文书模板 ── -->
-      <NcCard title="2 · 选择文书" subtitle="默认全选，可取消本次不需要的文书">
-        <div class="template-toolbar">
-          <span class="template-total">
-            共 {{ templates.length }} 份 · 已选 {{ selectedTemplateIds.length }} 份
-          </span>
-          <div class="template-toolbar__actions">
-            <el-button
-              link
-              type="primary"
-              size="small"
-              :disabled="templates.length === 0 || allTemplatesSelected"
-              @click="selectAllTemplates"
-            >
-              全选
-            </el-button>
-            <el-button
-              link
-              size="small"
-              :disabled="selectedTemplateIds.length === 0"
-              @click="clearTemplates"
-            >
-              清空
-            </el-button>
+      <NcCard v-if="!info && !loading" padding="lg">
+        <div class="empty-state">
+          <el-icon class="empty-state__icon" :size="46"><FolderOpened /></el-icon>
+          <p class="empty-state__title">请从工作流页面选择记录进入</p>
+          <p class="empty-state__hint">
+            当前业务数据未加载成功，请返回工作流重新选择记录。
+          </p>
+          <div class="empty-state__actions">
+            <el-button type="primary" @click="goWorkflow">返回工作流</el-button>
+            <el-button @click="goArchiveQuery">档案查询</el-button>
           </div>
         </div>
-
-        <el-alert
-          v-if="templatesError"
-          class="panel-error"
-          type="error"
-          :title="templatesError"
-          :closable="false"
-          show-icon
-        >
-          <el-button link type="primary" @click="loadTemplates">重新加载</el-button>
-        </el-alert>
-
-        <el-skeleton
-          v-else-if="templatesLoading && templates.length === 0"
-          :rows="5"
-          animated
-        />
-
-        <el-checkbox-group
-          v-else-if="templates.length > 0"
-          v-model="selectedTemplateIds"
-          class="template-list"
-        >
-          <el-checkbox
-            v-for="template in templates"
-            :key="template.id"
-            :value="template.id"
-            class="template-item"
-          >
-            <span class="template-content">
-              <span class="template-name">{{ template.name }}</span>
-              <span class="template-tags">
-                <span v-if="template.docType" class="template-tag">
-                  {{ template.docType }}
-                </span>
-                <span v-if="template.fileType" class="template-tag template-tag--file">
-                  {{ template.fileType }}
-                </span>
-              </span>
-            </span>
-          </el-checkbox>
-        </el-checkbox-group>
-
-        <el-empty
-          v-else-if="!templatesLoading && !templatesError"
-          :image-size="70"
-          description="暂无可用文书模板"
-        >
-          <el-button size="small" :icon="Document" @click="goTemplateManagement">
-            前往模板管理
-          </el-button>
-          <p class="empty-tip">
-            请先在文书模板管理中上传并标注 FamilyApplication 业务类型的模板。
-          </p>
-        </el-empty>
       </NcCard>
 
-      <!-- ── 右：打印设置 ── -->
-      <NcCard class="printer-panel" title="3 · 推送打印" subtitle="推送到已绑定的 PC 打印代理">
-        <div class="printer-block">
-          <el-skeleton v-if="printersLoading" :rows="2" animated />
-
-          <el-alert
-            v-else-if="printersError"
-            type="error"
-            :title="printersError"
-            :closable="false"
-            show-icon
-          >
-            <el-button link type="primary" @click="loadPrinters">重新加载</el-button>
-          </el-alert>
-
-          <template v-else-if="printers.length > 0">
-            <el-select
-              v-model="selectedPrinterId"
-              placeholder="选择打印机"
-              filterable
-              style="width: 100%"
-            >
-              <el-option
-                v-for="printer in printers"
-                :key="printer.id"
-                :value="printer.id"
-                :label="`${printer.deviceName} · ${printer.printerName} · ${printer.online ? '在线' : '离线'}`"
+      <div v-if="info" class="production-layout">
+        <!-- ── 左：业务信息 / 统计 / 快捷操作 ── -->
+        <div class="production-main">
+          <NcCard title="业务信息" :subtitle="info.title">
+            <div v-if="summaryItems.length > 0" class="summary-list">
+              <div
+                v-for="(item, index) in summaryItems"
+                :key="`${item.label}-${index}`"
+                class="summary-row"
+                :class="{ 'is-odd': index % 2 === 1 }"
               >
-                <div class="printer-option">
-                  <span class="printer-option__name">{{ printer.printerName }}</span>
-                  <span class="printer-option__device">{{ printer.deviceName }}</span>
-                  <span class="printer-option__state" :class="{ 'is-online': printer.online }">
-                    {{ printer.online ? '在线' : '离线' }}
-                  </span>
-                </div>
-              </el-option>
-            </el-select>
+                <span class="summary-row__label">{{ item.label }}</span>
+                <span class="summary-row__value">{{ item.value || '—' }}</span>
+              </div>
+            </div>
+            <el-empty
+              v-else
+              :image-size="64"
+              description="暂无业务摘要"
+            />
+          </NcCard>
 
-            <div v-if="selectedPrinter" class="printer-detail">
-              <span class="printer-detail__device">
-                <el-icon><Monitor /></el-icon>
-                {{ selectedPrinter.deviceName }}
-              </span>
-              <NcStatusDot
-                :status="selectedPrinter.online ? 'online' : 'offline'"
-                :label="selectedPrinter.online ? '在线' : '离线'"
-              />
+          <NcCard title="自动填充统计" subtitle="来源数据字段的自动填充情况">
+            <div class="stat-grid">
+              <NcStat label="字段总数" :value="totalFields" tone="ink" compact />
+              <NcStat label="已自动填充" :value="autoFilledCount" tone="pine" compact />
+              <NcStat label="填充比例" :value="`${autoFillRate}%`" tone="seal" compact />
+            </div>
+            <p class="stat-note">
+              自动填充字段可直接复制到模板或业务表单；未填充字段以右侧来源数据为准。
+            </p>
+          </NcCard>
+
+          <NcCard title="快捷操作">
+            <div class="quick-actions">
+              <el-button
+                type="primary"
+                :icon="Right"
+                :disabled="startDisabled"
+                @click="goOutput"
+              >
+                开始制作
+              </el-button>
+              <el-button @click="goArchiveQuery">档案查询</el-button>
+              <el-button @click="goWorkflow">返回工作流</el-button>
+            </div>
+          </NcCard>
+        </div>
+
+        <!-- ── 右：来源数据边栏 ── -->
+        <aside class="production-sidebar">
+          <NcCard
+            class="sidebar-card"
+            title="来源数据"
+            :subtitle="dataSourceType"
+            padding="none"
+          >
+            <div v-if="sidebarGroups.length > 0" class="sidebar-groups">
+              <section
+                v-for="(group, groupIndex) in sidebarGroups"
+                :key="`${group.title}-${groupIndex}`"
+                class="sidebar-group"
+              >
+                <h3 class="sidebar-group__title">{{ group.title }}</h3>
+
+                <div class="sidebar-fields">
+                  <div
+                    v-for="(field, fieldIndex) in group.fields"
+                    :key="`${group.title}-${fieldIndex}-${field.label}`"
+                    class="sidebar-field"
+                    :class="{
+                      'is-odd': fieldIndex % 2 === 1,
+                      'is-auto': field.autoFilled,
+                    }"
+                  >
+                    <span
+                      class="field-flag"
+                      :class="{ 'is-auto': field.autoFilled }"
+                      :title="field.autoFilled ? '业务数据自动填充' : '非自动填充字段'"
+                    >
+                      {{ field.autoFilled ? '自动' : '—' }}
+                    </span>
+
+                    <div class="sidebar-field__body">
+                      <span class="sidebar-field__label">{{ field.label }}</span>
+                      <span class="sidebar-field__value">{{ field.value || '—' }}</span>
+                    </div>
+
+                    <el-button
+                      class="sidebar-field__copy"
+                      link
+                      :icon="CopyDocument"
+                      :disabled="!field.value"
+                      title="复制该字段值"
+                      @click="copyField(field.label, field.value)"
+                    />
+                  </div>
+                </div>
+              </section>
             </div>
 
-            <p v-if="selectedPrinter && !selectedPrinter.online" class="printer-warn">
-              打印机离线：任务会进入队列，等待该电脑的 Agent 上线后执行。
-            </p>
-          </template>
+            <el-empty
+              v-else
+              class="sidebar-empty"
+              :image-size="60"
+              description="暂无来源数据"
+            />
+          </NcCard>
+        </aside>
+      </div>
 
-          <el-empty
-            v-else-if="!printersLoading"
-            :image-size="70"
-            description="当前账号未绑定打印机"
-          >
-            <el-button size="small" :icon="Printer" @click="goPrinters">去绑定打印机</el-button>
-            <p class="empty-tip">
-              预览可不选打印机；实际打印需先在本机 Agent 绑定打印机。
-            </p>
-          </el-empty>
-        </div>
-
-        <div class="print-options">
-          <div class="option-row">
-            <span class="option-label">份数</span>
-            <el-input-number v-model="copies" :min="1" :max="99" size="small" />
-          </div>
-          <div class="option-row">
-            <span class="option-label">单双面</span>
-            <el-radio-group v-model="isDuplex" size="small">
-              <el-radio-button :value="false">单面</el-radio-button>
-              <el-radio-button :value="true">双面</el-radio-button>
-            </el-radio-group>
-          </div>
-        </div>
-
-        <div class="print-actions">
-          <el-button
-            class="print-actions__button"
-            :icon="View"
-            :loading="pushing && pushMode === 'preview'"
-            :disabled="!canPreview"
-            @click="pushJobs('preview')"
-          >
-            预览
-          </el-button>
-          <el-button
-            class="print-actions__button"
-            type="primary"
-            :icon="Printer"
-            :loading="pushing && pushMode === 'print'"
-            :disabled="!canPrint"
-            :title="printers.length === 0 ? '当前账号未绑定打印机，请先在本机 Agent 绑定' : ''"
-            @click="pushJobs('print')"
-          >
-            打印
-          </el-button>
-        </div>
-
-        <p class="proxy-hint">
-          <el-icon><InfoFilled /></el-icon>
-          <span>Web 端不生成 PDF，预览/打印由已绑定的 PC 打印代理执行。</span>
-        </p>
-      </NcCard>
-    </div>
-
-    <!-- ── 下：打印任务 ── -->
-    <NcCard
-      title="打印任务"
-      subtitle="每 4 秒自动刷新；预览任务同样会出现在任务列表中"
-      class="jobs-card"
-    >
-      <template #actions>
-        <el-select
-          v-model="jobStatusFilter"
-          size="small"
-          placeholder="全部状态"
-          style="width: 118px"
-          @change="handleStatusFilterChange"
+      <!-- ── 底部操作栏 ── -->
+      <div v-if="info" class="action-bar">
+        <el-button :icon="ArrowLeft" @click="goBack">返回</el-button>
+        <div class="action-bar__spacer" />
+        <el-button
+          type="primary"
+          :icon="Right"
+          :disabled="startDisabled"
+          @click="goOutput"
         >
-          <el-option
-            v-for="option in jobStatusOptions"
-            :key="option.value"
-            :label="option.label"
-            :value="option.value"
-          />
-        </el-select>
-        <el-button size="small" :icon="Refresh" :loading="jobsLoading" @click="loadJobs()">
-          刷新
+          开始制作
         </el-button>
-      </template>
-
-      <PrintJobPanel
-        :jobs="jobs"
-        :loading="jobsLoading"
-        :error="jobsError"
-        :page="jobPage"
-        :page-size="jobPageSize"
-        :total-count="jobTotalCount"
-        :total-pages="jobTotalPages"
-        :busy-id="actionJobId"
-        @refresh="loadJobs()"
-        @retry="handleRetryJob"
-        @remove="handleDeleteJob"
-        @page-change="handleJobPageChange"
-      />
-    </NcCard>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -818,352 +389,266 @@ onBeforeUnmount(() => {
 .archive-production {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-}
-
-/* ── 提示条 ───────────────────────────────────────────────────── */
-.hint-bar {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 10px 14px;
-  border: 1px solid rgba(150, 104, 28, 0.28);
-  border-left: 3px solid var(--nc-amber);
-  border-radius: var(--nc-radius-sm);
-  background-color: var(--nc-amber-soft);
-  color: var(--nc-amber-dark);
-  font-size: var(--nc-text-sm);
-  line-height: 1.65;
-}
-
-.hint-bar .el-icon {
-  flex: none;
-  margin-top: 2px;
-  color: var(--nc-amber);
-}
-
-/* ── 完成归档前置说明 ─────────────────────────────────────────── */
-.complete-note {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  padding: 9px 14px;
-  border: 1px solid var(--nc-line);
-  border-left: 3px solid var(--nc-muted);
-  border-radius: var(--nc-radius-sm);
-  background-color: var(--nc-paper-2);
-  color: var(--nc-muted-2);
-  font-size: var(--nc-text-sm);
-  line-height: 1.65;
-}
-
-.complete-note .el-icon {
-  flex: none;
-  margin-top: 2px;
-  color: var(--nc-muted);
-}
-
-/* ── 概要 ─────────────────────────────────────────────────────── */
-.summary {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-/* ── 三栏工作区 ───────────────────────────────────────────────── */
-.production-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.02fr) minmax(0, 1.08fr) minmax(290px, 0.82fr);
-  gap: 12px;
-  align-items: start;
-}
-
-.production-grid > :deep(.nc-card) {
-  min-width: 0;
-}
-
-/* ── 文书模板 ─────────────────────────────────────────────────── */
-.template-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 9px;
-}
-
-.template-total {
-  color: var(--nc-muted);
-  font-size: var(--nc-text-sm);
-}
-
-.template-toolbar__actions {
-  display: flex;
-  flex: none;
-  gap: 4px;
-}
-
-.template-toolbar__actions :deep(.el-button + .el-button) {
-  margin-left: 0;
-}
-
-.template-list {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  max-height: 372px;
-  padding-right: 2px;
-  overflow-y: auto;
-}
-
-.template-item {
-  display: flex;
-  align-items: flex-start;
-  width: 100%;
-  height: auto;
-  margin: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--nc-line-faint);
-  border-left: 2px solid transparent;
-  border-radius: var(--nc-radius-xs);
-  background-color: var(--nc-paper-2);
-  transition:
-    border-color var(--nc-transition),
-    background-color var(--nc-transition);
-}
-
-.template-item:hover {
-  border-color: var(--nc-line);
-  background-color: var(--nc-paper-3);
-}
-
-.template-item.is-checked {
-  border-color: var(--nc-seal);
-  border-left-color: var(--nc-seal);
-  background-color: var(--nc-seal-soft);
-}
-
-.template-item :deep(.el-checkbox__input) {
-  margin-top: 1px;
-}
-
-.template-item :deep(.el-checkbox__label) {
-  width: 100%;
-  min-width: 0;
-  padding-left: 8px;
-  overflow: hidden;
-}
-
-.template-content {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-}
-
-.template-name {
-  overflow: hidden;
-  color: var(--nc-ink);
-  font-size: var(--nc-text-sm);
-  font-weight: 600;
-  line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.template-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.template-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 0 6px;
-  border: 1px solid var(--nc-line-faint);
-  border-radius: var(--nc-radius-xs);
-  background-color: var(--nc-paper-3);
-  color: var(--nc-muted-2);
-  font-size: 10px;
-  line-height: 1.7;
-  white-space: nowrap;
-}
-
-.template-tag--file {
-  color: #31576e;
-  border-color: rgba(49, 87, 110, 0.2);
-  background-color: #e8f0f7;
+  gap: 14px;
 }
 
 .panel-error {
   margin: 0;
 }
 
-.empty-tip {
-  margin-top: 6px;
-  color: var(--nc-muted);
-  font-size: 11px;
-  line-height: 1.6;
-}
-
-/* ── 打印机 / 推送 ────────────────────────────────────────────── */
-.printer-block {
+/* ── 空态 ─────────────────────────────────────────────────────── */
+.empty-state {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-
-.printer-option {
-  display: flex;
   align-items: center;
   gap: 8px;
+  padding: 36px 20px;
+  text-align: center;
 }
 
-.printer-option__name {
-  overflow: hidden;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.printer-option__device {
-  overflow: hidden;
+.empty-state__icon {
   color: var(--nc-muted);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.printer-option__state {
-  margin-left: auto;
+.empty-state__title {
+  margin: 6px 0 0;
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-lg);
+  font-weight: 700;
+}
+
+.empty-state__hint {
+  margin: 0;
   color: var(--nc-muted);
-  font-size: 11px;
+  font-size: var(--nc-text-sm);
+  line-height: 1.7;
 }
 
-.printer-option__state.is-online {
-  color: var(--nc-pine);
-}
-
-.printer-detail {
+.empty-state__actions {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 7px 9px;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+/* ── 两栏工作区 ───────────────────────────────────────────────── */
+.production-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 14px;
+  align-items: start;
+}
+
+.production-main {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.production-sidebar {
+  min-width: 0;
+}
+
+.sidebar-card {
+  overflow: hidden;
+}
+
+/* ── 业务摘要 ─────────────────────────────────────────────────── */
+.summary-list {
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--nc-line-faint);
   border-radius: var(--nc-radius-xs);
+  overflow: hidden;
+}
+
+.summary-row {
+  display: grid;
+  grid-template-columns: minmax(92px, 128px) minmax(0, 1fr);
+  gap: 14px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--nc-line-faint);
+  background-color: var(--nc-paper-soft);
+}
+
+.summary-row:last-child {
+  border-bottom: 0;
+}
+
+.summary-row.is-odd {
   background-color: var(--nc-paper-3);
 }
 
-.printer-detail__device {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  overflow: hidden;
-  color: var(--nc-ink-2);
-  font-size: var(--nc-text-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.printer-detail__device .el-icon {
-  flex: none;
-  color: var(--nc-seal);
-}
-
-.printer-warn {
-  padding: 6px 9px;
-  border-left: 2px solid var(--nc-amber);
-  background-color: var(--nc-amber-soft);
-  color: var(--nc-amber-dark);
-  font-size: 11px;
-  line-height: 1.6;
-}
-
-.print-options {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 12px;
-  padding-top: 11px;
-  border-top: 1px solid var(--nc-line-faint);
-}
-
-.option-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.option-label {
+.summary-row__label {
   color: var(--nc-muted);
   font-size: var(--nc-text-sm);
-  white-space: nowrap;
-}
-
-.print-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.print-actions__button {
-  width: 100%;
-  margin-left: 0;
-}
-
-.print-actions :deep(.el-button + .el-button) {
-  margin-left: 0;
-}
-
-.proxy-hint {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  margin-top: 10px;
-  color: var(--nc-muted);
-  font-size: 11px;
   line-height: 1.65;
 }
 
-.proxy-hint .el-icon {
-  flex: none;
-  margin-top: 2px;
-  color: var(--nc-amber);
+.summary-row__value {
+  overflow-wrap: anywhere;
+  color: var(--nc-ink);
+  font-size: var(--nc-text-base);
+  font-weight: 600;
+  line-height: 1.65;
 }
 
-/* ── 任务 ─────────────────────────────────────────────────────── */
-.jobs-card {
+/* ── 统计 ─────────────────────────────────────────────────────── */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.stat-note {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--nc-line-faint);
+  color: var(--nc-muted);
+  font-size: var(--nc-text-sm);
+  line-height: 1.65;
+}
+
+/* ── 快捷操作 ─────────────────────────────────────────────────── */
+.quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* ── 来源数据边栏 ─────────────────────────────────────────────── */
+.sidebar-groups {
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-group {
+  border-bottom: 1px solid var(--nc-line-faint);
+}
+
+.sidebar-group:last-child {
+  border-bottom: 0;
+}
+
+.sidebar-group__title {
+  margin: 0;
+  padding: 9px 14px;
+  background-color: var(--nc-paper-3);
+  color: var(--nc-seal-dark);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-base);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.sidebar-fields {
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-field {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding: 8px 12px 8px 10px;
+  border-left: 2px solid transparent;
+  background-color: var(--nc-paper-soft);
+}
+
+.sidebar-field.is-odd {
+  background-color: var(--nc-paper-3);
+}
+
+.sidebar-field.is-auto {
+  border-left-color: var(--nc-pine);
+}
+
+.field-flag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 19px;
   margin-top: 2px;
+  border: 1px solid var(--nc-line-faint);
+  border-radius: var(--nc-radius-xs);
+  background-color: var(--nc-paper-2);
+  color: var(--nc-muted);
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.field-flag.is-auto {
+  border-color: rgba(46, 71, 56, 0.24);
+  background-color: var(--nc-pine-soft);
+  color: var(--nc-pine);
+  font-weight: 600;
+}
+
+.sidebar-field__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sidebar-field__label {
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
+  line-height: 1.5;
+}
+
+.sidebar-field__value {
+  overflow-wrap: anywhere;
+  color: var(--nc-ink);
+  font-size: var(--nc-text-sm);
+  line-height: 1.6;
+}
+
+.sidebar-field__copy {
+  margin-top: -2px;
+  color: var(--nc-muted);
+}
+
+.sidebar-field__copy:hover {
+  color: var(--nc-seal);
+}
+
+.sidebar-empty {
+  padding: 28px 12px;
+}
+
+/* ── 底部操作栏 ───────────────────────────────────────────────── */
+.action-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--nc-line);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-2);
+  box-shadow: var(--nc-shadow-sm);
+}
+
+.action-bar__spacer {
+  flex: 1;
 }
 
 /* ── 响应式 ───────────────────────────────────────────────────── */
-@media (max-width: 1180px) {
-  .production-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .printer-panel {
-    grid-column: 1 / -1;
-  }
-
-  .template-list {
-    max-height: 330px;
-  }
-}
-
 @media (max-width: 1023px) {
-  .production-grid {
+  .production-layout {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .printer-panel {
-    grid-column: auto;
-  }
-
-  .template-list {
+  .sidebar-card {
     max-height: none;
   }
 }
@@ -1173,31 +658,35 @@ onBeforeUnmount(() => {
     gap: 10px;
   }
 
-  .summary {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 7px;
-  }
-
-  .print-actions {
+  .stat-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  /* 三个头部动作按两列排布，「完成归档」独占一行，避免窄屏挤压。 */
-  .archive-production :deep(.nc-page-header__actions) {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
+  .summary-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
   }
 
-  .archive-production :deep(.nc-page-header__actions .el-button) {
+  .quick-actions {
+    flex-direction: column;
+  }
+
+  .quick-actions :deep(.el-button) {
     width: 100%;
-    min-width: 0;
     margin-left: 0;
-    flex: none;
   }
 
-  .archive-complete {
-    grid-column: 1 / -1;
+  .action-bar {
+    flex-wrap: wrap;
+  }
+
+  .action-bar :deep(.el-button) {
+    flex: 1;
+    margin-left: 0;
+  }
+
+  .action-bar__spacer {
+    display: none;
   }
 }
 </style>

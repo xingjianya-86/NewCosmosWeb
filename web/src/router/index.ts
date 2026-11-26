@@ -316,6 +316,12 @@ const router = createRouter({
           meta: { title: '档案制作' },
         },
         {
+          path: 'archives/output',
+          name: 'archive-output',
+          component: () => import('@/views/archives/ArchiveOutputView.vue'),
+          meta: { title: '档案输出' },
+        },
+        {
           path: 'coming-soon/:module',
           name: 'coming-soon',
           component: () => import('@/views/ComingSoonView.vue'),
