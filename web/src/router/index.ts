@@ -370,6 +370,34 @@ const router = createRouter({
           meta: { title: '死亡情况说明' },
         },
         {
+          path: 'duty',
+          name: 'duty',
+          component: () => import('@/views/duty/DutyScheduleView.vue'),
+          meta: { title: '值班管理' },
+        },
+        {
+          path: 'duty/members',
+          name: 'duty-members',
+          component: () => import('@/views/duty/DutyMemberView.vue'),
+          meta: { title: '值班成员管理' },
+        },
+        {
+          path: 'duty/adjustments',
+          name: 'duty-adjustments',
+          component: () => import('@/views/duty/DutyAdjustView.vue'),
+          meta: { title: '班务调整管理' },
+        },
+        {
+          path: 'duty/holidays',
+          name: 'duty-holidays',
+          component: () => import('@/views/duty/HolidayView.vue'),
+          meta: { title: '节假日维护' },
+        },
+        {
+          path: 'coming-soon/duty',
+          redirect: '/duty',
+        },
+        {
           path: 'coming-soon/:module',
           name: 'coming-soon',
           component: () => import('@/views/ComingSoonView.vue'),

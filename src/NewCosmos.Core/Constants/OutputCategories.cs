@@ -34,4 +34,7 @@ public static class OutputCategories
 
     /// <summary>彩票预测结果导出（平铺）</summary>
     public const string LotteryPrediction = "彩票预测";
+
+    /// <summary>政务值班表（F7 值班管理导出，期间 = 起始月-结束月）</summary>
+    public const string DutySchedule = "值班表";
 }

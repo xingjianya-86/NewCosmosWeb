@@ -47,4 +47,7 @@ public static class PrintBusinessTypes
 
     /// <summary>经济复核（档案制作中心的复核装配上下文）</summary>
     public const string EconomicReview = "EconomicReview";
+
+    /// <summary>政务值班表（值班管理导出/打印留痕）</summary>
+    public const string Duty = "Duty";
 }

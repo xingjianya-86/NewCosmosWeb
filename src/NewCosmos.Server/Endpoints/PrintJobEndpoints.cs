@@ -33,7 +33,8 @@ public static class PrintJobEndpoints
         PermissionCodes.PRINT_RECOVERY,
         PermissionCodes.PRINT_LOWINCOMEPROOF,
         PermissionCodes.TEMP_VIEW,
-        PermissionCodes.ELDERLY_VIEW
+        PermissionCodes.ELDERLY_VIEW,
+        PermissionCodes.DUTY_VIEW
     ];
 
     public static IEndpointRouteBuilder MapPrintJobEndpoints(this IEndpointRouteBuilder app)
@@ -1359,6 +1360,8 @@ public static class PrintJobEndpoints
             return PermissionCodes.ELDERLY_VIEW;
         if (string.Equals(type, PrintBusinessTypes.NearRelative, StringComparison.OrdinalIgnoreCase))
             return NearRelativeConstants.PermissionManage;
+        if (string.Equals(type, PrintBusinessTypes.Duty, StringComparison.OrdinalIgnoreCase))
+            return PermissionCodes.DUTY_MANAGE;
         return null;
     }
 

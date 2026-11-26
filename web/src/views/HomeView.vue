@@ -301,7 +301,7 @@ const moduleGroups: ModuleGroup[] = [
         iconBg: '#ECFDF5',
         iconColor: '#2e4738',
         buttonText: '进入模块',
-        to: '/coming-soon/duty',
+        to: '/duty',
       },
       {
         title: '历史补打中心',

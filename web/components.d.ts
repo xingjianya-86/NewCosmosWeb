@@ -34,6 +34,7 @@ declare module 'vue' {
     ElOptionGroup: typeof import('element-plus/es/components/select/index')['ElOptionGroup']
     ElPagination: typeof import('element-plus/es/components/pagination/index')['ElPagination']
     ElProgress: typeof import('element-plus/es/components/progress/index')['ElProgress']
+    ElRadio: typeof import('element-plus/es/components/radio/index')['ElRadio']
     ElRadioButton: typeof import('element-plus/es/components/radio/index')['ElRadioButton']
     ElRadioGroup: typeof import('element-plus/es/components/radio/index')['ElRadioGroup']
     ElSelect: typeof import('element-plus/es/components/select/index')['ElSelect']
