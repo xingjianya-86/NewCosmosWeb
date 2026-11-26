@@ -520,6 +520,9 @@ const candidateSummary = ref('')
 const selectedCandidateKey = ref('')
 const manualEntry = ref(false)
 
+/** 保障人群卡片仅作判定展示；业务确认暂时隐藏，判定逻辑仍保留。 */
+const showPopulationCard = false
+
 const identity = ref<TempReliefInsuredIdentityResponse | null>(null)
 const identityLoading = ref(false)
 const identityError = ref('')
@@ -2281,7 +2284,7 @@ onBeforeUnmount(() => {
 
       <!-- ════════════ 第 1 页：类型与申请人 ════════════ -->
       <div v-show="activeSection === 0" class="form-section">
-        <NcCard title="保障人群 *">
+        <NcCard v-if="showPopulationCard" title="保障人群 *">
           <template #actions>
             <span class="card-hint">系统自动判定</span>
           </template>
@@ -2504,24 +2507,24 @@ onBeforeUnmount(() => {
           <div class="sub-card">
             <div class="sub-card__head">
               <span class="sub-card__title">户籍所在地</span>
-              <span class="sub-card__hint">（从当前登录用户组织机构获取）</span>
+              <span class="sub-card__hint">（默认取当前登录用户组织机构，可修改）</span>
             </div>
             <div class="form-grid">
               <label class="field">
                 <span class="field-label">省</span>
-                <el-input v-model="applicant.hukouProvince" :disabled="!isEditable || !manualEntry" />
+                <el-input v-model="applicant.hukouProvince" :disabled="!isEditable" />
               </label>
               <label class="field">
                 <span class="field-label">市</span>
-                <el-input v-model="applicant.hukouCity" :disabled="!isEditable || !manualEntry" />
+                <el-input v-model="applicant.hukouCity" :disabled="!isEditable" />
               </label>
               <label class="field">
                 <span class="field-label">县区</span>
-                <el-input v-model="applicant.hukouDistrict" :disabled="!isEditable || !manualEntry" />
+                <el-input v-model="applicant.hukouDistrict" :disabled="!isEditable" />
               </label>
               <label class="field">
                 <span class="field-label">镇社区</span>
-                <el-input v-model="applicant.hukouTown" :disabled="!isEditable || !manualEntry" />
+                <el-input v-model="applicant.hukouTown" :disabled="!isEditable" />
               </label>
             </div>
           </div>
@@ -2529,30 +2532,30 @@ onBeforeUnmount(() => {
           <div class="sub-card">
             <div class="sub-card__head">
               <span class="sub-card__title">家庭住址</span>
-              <span class="sub-card__hint">（省市区县镇社区/村取自申请人来源数据，详细地址可编辑）</span>
+              <span class="sub-card__hint">（默认取申请人来源数据，省市区县镇社区/村与详细地址均可修改）</span>
             </div>
             <div class="form-grid">
               <label class="field">
                 <span class="field-label">省</span>
-                <el-input v-model="applicant.familyProvince" :disabled="!isEditable || !manualEntry" />
+                <el-input v-model="applicant.familyProvince" :disabled="!isEditable" />
               </label>
               <label class="field">
                 <span class="field-label">市</span>
-                <el-input v-model="applicant.familyCity" :disabled="!isEditable || !manualEntry" />
+                <el-input v-model="applicant.familyCity" :disabled="!isEditable" />
               </label>
               <label class="field">
                 <span class="field-label">县区</span>
-                <el-input v-model="applicant.familyDistrict" :disabled="!isEditable || !manualEntry" />
+                <el-input v-model="applicant.familyDistrict" :disabled="!isEditable" />
               </label>
               <label class="field">
                 <span class="field-label">镇社区</span>
-                <el-input v-model="applicant.familyTown" :disabled="!isEditable || !manualEntry" />
+                <el-input v-model="applicant.familyTown" :disabled="!isEditable" />
               </label>
             </div>
             <div class="address-extra">
               <label class="field">
                 <span class="field-label">村</span>
-                <el-input v-model="applicant.village" :disabled="!isEditable || !manualEntry" />
+                <el-input v-model="applicant.village" :disabled="!isEditable" />
               </label>
               <label class="field">
                 <span class="field-label">详细地址</span>
