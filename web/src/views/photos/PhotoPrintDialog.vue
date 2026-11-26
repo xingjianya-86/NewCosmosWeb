@@ -214,8 +214,17 @@ watch(
 
       <div v-if="result" class="print-result" :class="{ 'print-result--error': result.failures.length > 0 }">
         <div class="print-result__head">
-          <el-tag :type="result.failures.length === 0 ? 'success' : 'warning'" effect="dark">
-            {{ result.failures.length === 0 ? '任务已推送' : '部分失败' }}
+          <el-tag
+            :type="result.successCount > 0 ? (result.failures.length === 0 ? 'success' : 'warning') : 'danger'"
+            effect="dark"
+          >
+            {{
+              result.successCount > 0
+                ? result.failures.length === 0
+                  ? '任务已推送'
+                  : '部分失败'
+                : '打印失败'
+            }}
           </el-tag>
           <span class="mono">{{ result.jobNo || (result.id ? `#${result.id}` : '—') }}</span>
         </div>

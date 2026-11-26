@@ -173,10 +173,11 @@ async function exportSelected(): Promise<void> {
     return
   }
 
+  const ids = [...selectedIds.value]
   exporting.value = true
   try {
-    const blob = await exportPhotoZip([...selectedIds.value])
-    saveBlob(blob, `照片_选中${selectedIds.value.length}张_${timestampText()}.zip`)
+    const blob = await exportPhotoZip(ids)
+    saveBlob(blob, `照片_选中${ids.length}张_${timestampText()}.zip`)
     ElMessage.success('导出文件已开始下载')
   } catch (error) {
     ElMessage.error(photoActionError(error, '导出照片失败', '导出照片', 'ARCHIVE_VIEW'))
@@ -218,6 +219,8 @@ onMounted(() => {
   void loadCategories()
   void loadList()
 })
+
+defineExpose({ reload: loadList })
 </script>
 
 <template>

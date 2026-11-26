@@ -17,6 +17,10 @@ interface BackfillPanelExpose {
   reload: () => void
 }
 
+interface QueryPanelExpose {
+  reload: () => void
+}
+
 const route = useRoute()
 
 function queryText(value: unknown): string {
@@ -45,6 +49,7 @@ const activeTab = ref<'backfill' | 'query'>(
 )
 
 const backfillRef = ref<BackfillPanelExpose | null>(null)
+const queryRef = ref<QueryPanelExpose | null>(null)
 const captureVisible = ref(false)
 const capturePeople = ref<PhotoCapturePerson[]>([])
 const captureStart = ref(0)
@@ -65,6 +70,11 @@ function handleCaptureChanged(): void {
 
 function handleCaptureFinished(_summary: PhotoCaptureSummary): void {
   backfillRef.value?.reload()
+}
+
+function handleTabChange(name: string | number): void {
+  if (name === 'query') queryRef.value?.reload()
+  else if (name === 'backfill') backfillRef.value?.reload()
 }
 
 watch(captureVisible, (open) => {
@@ -99,7 +109,7 @@ onMounted(() => {
       kicker="全局 · 照片"
     />
 
-    <el-tabs v-model="activeTab" class="photo-tabs">
+    <el-tabs v-model="activeTab" class="photo-tabs" @tab-change="handleTabChange">
       <el-tab-pane label="人员补全" name="backfill">
         <PhotoBackfillPanel
           ref="backfillRef"
@@ -112,6 +122,7 @@ onMounted(() => {
 
       <el-tab-pane label="照片查询" name="query" lazy>
         <PhotoQueryPanel
+          ref="queryRef"
           :initial-keyword="initialQueryKeyword"
           :initial-category="initialCategory"
         />

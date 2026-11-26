@@ -246,12 +246,13 @@ function removePendingByKey(key: string): void {
 }
 
 async function loadCategories(): Promise<void> {
-  if (categories.value.length > 0) return
-  try {
-    const list = await listPhotoCategories()
-    categories.value = list.length > 0 ? list : FALLBACK_PHOTO_CATEGORIES
-  } catch {
-    categories.value = FALLBACK_PHOTO_CATEGORIES
+  if (categories.value.length === 0) {
+    try {
+      const list = await listPhotoCategories()
+      categories.value = list.length > 0 ? list : FALLBACK_PHOTO_CATEGORIES
+    } catch {
+      categories.value = FALLBACK_PHOTO_CATEGORIES
+    }
   }
   if (!categories.value.some((item) => item.code === selectedCategory.value)) {
     selectedCategory.value = categories.value[0]?.code ?? 'ID_CARD'
@@ -550,6 +551,14 @@ function handleClosed(): void {
   previewPhoto.value = null
 }
 
+function handleBeforeClose(done: () => void): void {
+  if (busy.value) {
+    ElMessage.warning('照片正在处理中，请稍候再关闭')
+    return
+  }
+  done()
+}
+
 watch(
   () => props.modelValue,
   (open) => {
@@ -577,6 +586,7 @@ onBeforeUnmount(() => {
     width="min(1120px, 96vw)"
     append-to-body
     :close-on-click-modal="false"
+    :before-close="handleBeforeClose"
     class="photo-capture-dialog"
     @closed="handleClosed"
   >
@@ -843,7 +853,7 @@ onBeforeUnmount(() => {
         <div class="footer-note">
           当前类别：{{ selectedCategoryLabel }} · 待上传 {{ pendingCount }} 张
         </div>
-        <el-button @click="visible = false">退出</el-button>
+        <el-button :disabled="busy" @click="visible = false">退出</el-button>
         <el-button :disabled="busy" @click="advance(true)">跳过</el-button>
         <el-button
           v-if="pendingCount > 0"
