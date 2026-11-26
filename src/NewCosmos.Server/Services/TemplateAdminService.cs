@@ -42,6 +42,7 @@ public sealed class TemplateAdminService(IDatabaseService database, ILoggerServi
     private const int MaxCategoryLabelLength = 120;
     private const int MaxCategoryPathLength = 400;
     private const int MaxCategoryParentPathLength = 300;
+    private const string LegacyCategoryRootPath = "__legacy_categories__";
 
     private static readonly Regex PlaceholderPattern = new(
         @"^\{[^{}]+\}$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -623,8 +624,23 @@ FROM nc_biz_template_category_nodes";
                 result.Message ?? "分类树查询失败");
         }
 
+        // 历史分类兜底：模板 categories 里已有、但不在内置/自定义树里的值（如「值班管理」
+        // 「公示」「追缴」「变更档案」「Ineligible」）。不补进树，编辑模板分类时会被静默丢掉。
+        var usedResult = await database.QueryAsync<string>(
+            @"SELECT DISTINCT unnest(categories)
+              FROM nc_biz_templates
+              WHERE categories IS NOT NULL AND cardinality(categories) > 0",
+            ct);
+        if (usedResult.IsFailure)
+        {
+            logger.Warn($"[TemplateAdmin] 查询历史使用分类失败（分类树将只含内置/自定义节点）: "
+                        + $"{usedResult.ErrorCode} {usedResult.Message}");
+        }
+
         return Result.Success<IReadOnlyList<TemplateCategoryNodeDto>>(
-            BuildMergedCategoryTree(result.Value ?? new List<TemplateCategoryRow>()));
+            BuildMergedCategoryTree(
+                result.Value ?? new List<TemplateCategoryRow>(),
+                usedResult.Value ?? new List<string>()));
     }
 
     /// <summary>固定分类树（<see cref="TemplateCategoryProvider.BuildCategoryTree"/> 的纯数据投影）。</summary>
@@ -1030,7 +1046,8 @@ WHERE categories IS NOT NULL
     }
 
     private IReadOnlyList<TemplateCategoryNodeDto> BuildMergedCategoryTree(
-        IReadOnlyList<TemplateCategoryRow> rows)
+        IReadOnlyList<TemplateCategoryRow> rows,
+        IReadOnlyList<string> usedCategories)
     {
         var map = new Dictionary<string, MutableCategoryNode>(StringComparer.Ordinal);
         var roots = new List<MutableCategoryNode>();
@@ -1093,6 +1110,40 @@ WHERE categories IS NOT NULL
                     $"[TemplateAdmin] 自定义分类「{node.Path}」的父路径「{node.ParentPath}」不存在，已挂到根节点");
                 roots.Add(node);
             }
+        }
+
+        // 历史分类（未归类）：模板已经在用、但树里没有的路径。
+        // 只读展示，避免编辑模板分类时把「值班管理」「公示」「追缴」等静默清空。
+        var legacyPaths = usedCategories
+            .Select(path => path?.Trim() ?? string.Empty)
+            .Where(path => path.Length > 0)
+            .Distinct(StringComparer.Ordinal)
+            .Where(path => !map.ContainsKey(path))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToList();
+        if (legacyPaths.Count > 0)
+        {
+            var legacyRoot = new MutableCategoryNode
+            {
+                Id = null,
+                Label = "历史分类（未归类）",
+                Path = LegacyCategoryRootPath,
+                ParentPath = string.Empty,
+                IsBuiltIn = true
+            };
+            foreach (var path in legacyPaths)
+            {
+                legacyRoot.Children.Add(new MutableCategoryNode
+                {
+                    Id = null,
+                    Label = ClassificationConstants.ConvertFromCode(path),
+                    Path = path,
+                    ParentPath = LegacyCategoryRootPath,
+                    IsBuiltIn = true
+                });
+            }
+
+            roots.Add(legacyRoot);
         }
 
         return roots.Select(ToCategoryDto).ToList();

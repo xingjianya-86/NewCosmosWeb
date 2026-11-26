@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, h, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
@@ -20,9 +20,7 @@ import {
 import { ApiError, getErrorMessage } from '@/api/http'
 import {
   createTemplateAdmin,
-  createTemplateCategory,
   deleteTemplateAdmin,
-  deleteTemplateCategory,
   downloadTemplateAdminFile,
   getTemplateAdmin,
   getTemplateCategories,
@@ -30,7 +28,6 @@ import {
   listTemplateAdmin,
   moveTemplateAdmin,
   updateTemplateAdmin,
-  updateTemplateCategory,
 } from '@/api/templateAdmin'
 import type {
   TemplateAdminDetail,
@@ -57,6 +54,9 @@ interface CategoryTreeInstance {
 
 const router = useRouter()
 const isNarrow = useMediaQuery('(max-width: 1100px)')
+
+/** 服务端“历史分类（未归类）”虚拟根路径；只用于展示，不写入模板 categories。 */
+const LEGACY_CATEGORY_ROOT = '__legacy_categories__'
 
 const mode = ref<'list' | 'upload'>('list')
 const keyword = ref('')
@@ -107,17 +107,6 @@ const categoryVisible = ref(false)
 const categoryKeys = ref<string[]>([])
 const categoryTreeRef = ref<CategoryTreeInstance | null>(null)
 const savingCategories = ref(false)
-
-const manageVisible = ref(false)
-const manageTreeRef = ref<CategoryTreeInstance | null>(null)
-const categoryMutating = ref(false)
-
-const nodeDialogVisible = ref(false)
-const nodeDialogMode = ref<'create' | 'rename'>('create')
-const nodeParent = ref<TemplateCategoryNode | null>(null)
-const nodeEditing = ref<TemplateCategoryNode | null>(null)
-const nodeLabel = ref('')
-const nodeSaving = ref(false)
 
 let listTicket = 0
 let detailTicket = 0
@@ -219,10 +208,6 @@ function categoryShort(path: string): string {
   return parts.length > 0 ? parts[parts.length - 1] : path
 }
 
-function isCustomCategory(node: TemplateCategoryNode): boolean {
-  return node.isBuiltIn === false && typeof node.id === 'number'
-}
-
 const categoryLabelMap = computed(() => {
   const map = new Map<string, string>()
   const walk = (nodes: TemplateCategoryNode[]): void => {
@@ -266,7 +251,10 @@ function collectCategoryPaths(nodes: TemplateCategoryNode[]): string[] {
 
 function readCheckedKeys(tree: CategoryTreeInstance | null): string[] {
   if (!tree) return []
-  return tree.getCheckedKeys(false).map((key) => String(key))
+  return tree
+    .getCheckedKeys(false)
+    .map((key) => String(key))
+    .filter((path) => path !== LEGACY_CATEGORY_ROOT)
 }
 
 function setTreeExpanded(tree: CategoryTreeInstance | null, expanded: boolean): void {
@@ -283,7 +271,11 @@ function setTreeExpanded(tree: CategoryTreeInstance | null, expanded: boolean): 
 }
 
 function checkAllTree(tree: CategoryTreeInstance | null): void {
-  tree?.setCheckedKeys(collectCategoryPaths(categoryTree.value))
+  tree?.setCheckedKeys(
+    collectCategoryPaths(categoryTree.value).filter(
+      (path) => path !== LEGACY_CATEGORY_ROOT,
+    ),
+  )
 }
 
 function clearTree(tree: CategoryTreeInstance | null): void {
@@ -413,9 +405,6 @@ async function loadCategories(): Promise<void> {
     }
     if (categoryVisible.value) {
       categoryTreeRef.value?.setCheckedKeys(categoryKeys.value)
-    }
-    if (manageVisible.value) {
-      setTreeExpanded(manageTreeRef.value, true)
     }
   } catch (error) {
     categoryTree.value = []
@@ -779,174 +768,29 @@ function collapseDialogCategories(): void {
 
 async function saveCategories(): Promise<void> {
   if (!detail.value) return
+  const treePaths = new Set(collectCategoryPaths(categoryTree.value))
+  if (treePaths.size === 0) {
+    ElMessage.warning('分类树尚未加载，请先重新加载分类树')
+    return
+  }
+
   const keys = readCheckedKeys(categoryTreeRef.value)
+  // 兜底：分类树未覆盖到的历史分类原样保留，避免一次编辑把「值班管理/公示/追缴」等清空。
+  const missing = (detail.value.categories ?? []).filter((path) => !treePaths.has(path))
+  const categories = Array.from(new Set([...keys, ...missing]))
+
   savingCategories.value = true
   try {
-    const result = await updateTemplateAdmin(detail.value.id, { categories: keys })
-    ElMessage.success('模板分类已保存')
+    const result = await updateTemplateAdmin(detail.value.id, { categories })
+    ElMessage.success('模板使用分类已保存')
     showConfigWarnings(warningsOf(result))
     categoryVisible.value = false
     await loadDetail(detail.value.id)
     await loadTemplates()
   } catch (error) {
-    ElMessage.error(actionError(error, '保存模板分类失败', '修改文书模板'))
+    ElMessage.error(actionError(error, '保存模板使用分类失败', '修改文书模板'))
   } finally {
     savingCategories.value = false
-  }
-}
-
-function openCategoryManager(): void {
-  manageVisible.value = true
-  if (categoryTree.value.length === 0 && !categoryLoading.value) void loadCategories()
-}
-
-function handleManageOpened(): void {
-  setTreeExpanded(manageTreeRef.value, true)
-}
-
-function expandManageTree(expanded: boolean): void {
-  setTreeExpanded(manageTreeRef.value, expanded)
-}
-
-function openRootCategoryDialog(): void {
-  nodeDialogMode.value = 'create'
-  nodeParent.value = null
-  nodeEditing.value = null
-  nodeLabel.value = ''
-  nodeDialogVisible.value = true
-}
-
-function openChildCategoryDialog(node: TemplateCategoryNode): void {
-  nodeDialogMode.value = 'create'
-  nodeParent.value = node
-  nodeEditing.value = null
-  nodeLabel.value = ''
-  nodeDialogVisible.value = true
-}
-
-function openRenameCategoryDialog(node: TemplateCategoryNode): void {
-  if (!isCustomCategory(node)) return
-  nodeDialogMode.value = 'rename'
-  nodeParent.value = null
-  nodeEditing.value = node
-  nodeLabel.value = node.label
-  nodeDialogVisible.value = true
-}
-
-async function afterCategoryMutation(): Promise<void> {
-  await loadCategories()
-  await loadTemplates()
-  if (selectedId.value !== null) await loadDetail(selectedId.value)
-  if (categoryVisible.value && detail.value) {
-    categoryKeys.value = [...(detail.value.categories ?? [])]
-    await nextTick()
-    categoryTreeRef.value?.setCheckedKeys(categoryKeys.value)
-  }
-  if (manageVisible.value) {
-    await nextTick()
-    setTreeExpanded(manageTreeRef.value, true)
-  }
-}
-
-async function submitCategoryNode(): Promise<void> {
-  if (nodeSaving.value) return
-  const label = nodeLabel.value.trim()
-  if (!label) {
-    ElMessage.warning('请输入分类名称')
-    return
-  }
-
-  if (nodeDialogMode.value === 'rename') {
-    const node = nodeEditing.value
-    const id = node?.id
-    if (!node || !isCustomCategory(node) || typeof id !== 'number') return
-    nodeSaving.value = true
-    try {
-      await updateTemplateCategory(id, { label })
-      ElMessage.success('分类已重命名')
-      nodeDialogVisible.value = false
-      await afterCategoryMutation()
-    } catch (error) {
-      ElMessage.error(actionError(error, '重命名分类失败', '管理模板分类'))
-    } finally {
-      nodeSaving.value = false
-    }
-    return
-  }
-
-  nodeSaving.value = true
-  try {
-    await createTemplateCategory({
-      parentPath: nodeParent.value?.path ?? null,
-      label,
-    })
-    ElMessage.success('分类已新增')
-    nodeDialogVisible.value = false
-    await afterCategoryMutation()
-  } catch (error) {
-    ElMessage.error(actionError(error, '新增分类失败', '管理模板分类'))
-  } finally {
-    nodeSaving.value = false
-  }
-}
-
-async function removeCategoryNode(node: TemplateCategoryNode): Promise<void> {
-  if (!isCustomCategory(node) || typeof node.id !== 'number') {
-    ElMessage.warning('内置分类不可删除')
-    return
-  }
-  if ((node.children ?? []).length > 0) {
-    ElMessage.warning('请先删除该分类下的子分类')
-    return
-  }
-
-  try {
-    await ElMessageBox.confirm(
-      `确定删除分类「${node.label}」吗？删除后不可恢复。`,
-      '确认删除分类',
-      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
-    )
-  } catch {
-    return
-  }
-
-  const id = node.id
-  categoryMutating.value = true
-  try {
-    await deleteTemplateCategory(id)
-    ElMessage.success('分类已删除')
-    await afterCategoryMutation()
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 409) {
-      if (error.message.includes('子分类')) {
-        ElMessage.error(error.message)
-        return
-      }
-      try {
-        await ElMessageBox.confirm(
-          `${error.message}\n\n是否强制移除引用该分类的模板配置，并删除此分类？`,
-          '分类仍被模板引用',
-          {
-            confirmButtonText: '强制移除并删除',
-            cancelButtonText: '取消',
-            type: 'warning',
-          },
-        )
-      } catch {
-        return
-      }
-      try {
-        await deleteTemplateCategory(id, true)
-        ElMessage.success('分类及模板引用已强制移除')
-        await afterCategoryMutation()
-      } catch (forceError) {
-        ElMessage.error(actionError(forceError, '强制删除分类失败', '管理模板分类'))
-      }
-      return
-    }
-    ElMessage.error(actionError(error, '删除分类失败', '管理模板分类'))
-  } finally {
-    categoryMutating.value = false
   }
 }
 
@@ -1009,7 +853,7 @@ onMounted(() => {
   <div class="nc-page template-page">
     <NcPageHeader
       title="文书模板管理"
-      description="维护档案文书模板、文档类型、适用分类与字段映射配置"
+      description="维护档案文书模板、文档类型、使用分类与字段映射配置"
       kicker="救助档案 · 文书模板"
     >
       <template #actions>
@@ -1051,7 +895,6 @@ onMounted(() => {
         <el-button type="primary" :icon="Plus" :disabled="mode === 'upload'" @click="openUpload">
           新增模板
         </el-button>
-        <el-button :icon="CollectionTag" @click="openCategoryManager">分类管理</el-button>
         <el-button
           :icon="Back"
           :disabled="mode === 'list' && selectedId === null"
@@ -1068,7 +911,7 @@ onMounted(() => {
           class="filter-select filter-select--wide"
           clearable
           filterable
-          placeholder="全部分类"
+          placeholder="全部使用分类"
         >
           <el-option
             v-for="path in categoryFilterOptions"
@@ -1192,14 +1035,15 @@ onMounted(() => {
         </div>
 
         <div class="form-field form-field--full">
-          <span class="field-label">适用分类（可多选，支持任意层级独立勾选）</span>
+          <span class="field-label">使用分类（可多选）</span>
+          <p class="field-hint">
+            勾选该模板在哪些业务分类下使用；档案输出、补打、月报会按这些分类查找模板。
+          </p>
           <div class="tree-tools">
             <el-button link type="primary" @click="expandUploadCategories">展开全部</el-button>
             <el-button link @click="collapseUploadCategories">收起全部</el-button>
             <el-button link type="primary" @click="checkAllUploadCategories">全选</el-button>
             <el-button link @click="clearUploadCategories">清空</el-button>
-            <el-button link type="primary" @click="openCategoryManager">管理分类</el-button>
-            <span class="muted">保存时保留父分类路径</span>
           </div>
           <el-alert
             v-if="categoryError"
@@ -1267,7 +1111,7 @@ onMounted(() => {
               <span>模板名称</span>
               <span>文件类型</span>
               <span>文档类型</span>
-              <span>分类</span>
+              <span>使用分类</span>
               <span class="sort-head">排序</span>
             </div>
 
@@ -1294,7 +1138,7 @@ onMounted(() => {
                 <span v-if="(item.categories ?? []).length > 3" class="tag tag--more">
                   +{{ (item.categories ?? []).length - 3 }}
                 </span>
-                <span v-if="(item.categories ?? []).length === 0" class="muted">未分类</span>
+                <span v-if="(item.categories ?? []).length === 0" class="muted">未指定</span>
               </span>
               <span class="sort-order">{{ item.sortOrder }}</span>
             </button>
@@ -1359,7 +1203,7 @@ onMounted(() => {
                 变更文件
               </el-button>
               <el-button :icon="Edit" @click="openConfigEdit">修改字段映射</el-button>
-              <el-button :icon="CollectionTag" @click="openCategoryEdit">修改分类</el-button>
+              <el-button :icon="CollectionTag" @click="openCategoryEdit">指定使用分类</el-button>
               <el-button
                 :icon="Top"
                 :loading="moving === 'up'"
@@ -1431,7 +1275,7 @@ onMounted(() => {
                 <dd>{{ formatDateTimeText(detail.updatedAt) }}</dd>
               </div>
               <div class="meta-full">
-                <dt>分类</dt>
+                <dt>使用分类</dt>
                 <dd class="category-tags">
                   <span
                     v-for="path in (detail.categories ?? [])"
@@ -1442,8 +1286,11 @@ onMounted(() => {
                     {{ categoryLabel(path) }}
                   </span>
                   <span v-if="(detail.categories ?? []).length === 0" class="muted">
-                    未设置分类
+                    未指定使用分类
                   </span>
+                  <el-button link type="primary" size="small" @click="openCategoryEdit">
+                    指定使用分类
+                  </el-button>
                 </dd>
               </div>
             </dl>
@@ -1562,21 +1409,20 @@ onMounted(() => {
 
     <el-dialog
       v-model="categoryVisible"
-      title="修改模板分类"
+      title="指定模板使用分类"
       :width="isNarrow ? '92%' : '600px'"
       append-to-body
       destroy-on-close
       @opened="applyCategoryDialogKeys"
     >
       <p class="dialog-hint">
-        勾选模板适用的业务分类；支持任意层级独立勾选，保存时保留父分类路径。
+        勾选该模板在哪些业务分类下使用；可多选。档案输出、补打、月报按这些分类查找模板。
       </p>
       <div class="tree-tools">
         <el-button link type="primary" @click="expandDialogCategories">展开全部</el-button>
         <el-button link @click="collapseDialogCategories">收起全部</el-button>
         <el-button link type="primary" @click="checkAllDialogCategories">全选</el-button>
         <el-button link @click="clearDialogCategories">清空</el-button>
-        <el-button link type="primary" @click="openCategoryManager">管理分类</el-button>
       </div>
       <el-alert
         v-if="categoryError"
@@ -1604,139 +1450,11 @@ onMounted(() => {
       <template #footer>
         <el-button :disabled="savingCategories" @click="categoryVisible = false">取消</el-button>
         <el-button type="primary" :loading="savingCategories" @click="saveCategories">
-          保存分类
+          保存使用分类
         </el-button>
       </template>
     </el-dialog>
 
-    <el-dialog
-      v-model="manageVisible"
-      title="分类节点管理"
-      :width="isNarrow ? '94%' : '720px'"
-      append-to-body
-      destroy-on-close
-      @opened="handleManageOpened"
-    >
-      <div class="manage-toolbar">
-        <el-button
-          type="primary"
-          :icon="Plus"
-          :disabled="categoryMutating"
-          @click="openRootCategoryDialog"
-        >
-          新增一级分类
-        </el-button>
-        <el-button @click="expandManageTree(true)">展开全部</el-button>
-        <el-button @click="expandManageTree(false)">收起全部</el-button>
-        <el-button :icon="Refresh" :loading="categoryLoading" @click="loadCategories()">
-          刷新
-        </el-button>
-      </div>
-      <p class="dialog-hint">
-        内置分类不可改名 / 删除，但可在其下新增子分类；自定义分类可新增子分类、重命名、删除。
-      </p>
-      <el-alert
-        v-if="categoryError"
-        class="inline-alert"
-        type="warning"
-        :title="categoryError"
-        :closable="false"
-        show-icon
-      >
-        <el-button link type="primary" @click="loadCategories()">重新加载分类树</el-button>
-      </el-alert>
-      <div v-loading="categoryLoading" class="tree-box tree-box--manage">
-        <el-tree
-          ref="manageTreeRef"
-          :data="categoryTree"
-          :props="categoryTreeProps"
-          node-key="path"
-          default-expand-all
-          :expand-on-click-node="false"
-          :empty-text="categoryError ? '分类加载失败，请重试' : '暂无分类'"
-        >
-          <template #default="{ data }">
-            <div class="tree-node">
-              <span class="tree-node__label">
-                <span class="tree-node__text" :title="data.path">{{ data.label }}</span>
-                <em
-                  v-if="isCustomCategory(data)"
-                  class="tree-node__badge tree-node__badge--custom"
-                >
-                  自定义
-                </em>
-                <em v-else class="tree-node__badge">内置</em>
-              </span>
-              <span class="tree-node__actions">
-                <el-button
-                  link
-                  type="primary"
-                  size="small"
-                  :disabled="categoryMutating"
-                  @click.stop="openChildCategoryDialog(data)"
-                >
-                  新增子分类
-                </el-button>
-                <template v-if="isCustomCategory(data)">
-                  <el-button
-                    link
-                    size="small"
-                    :disabled="categoryMutating"
-                    @click.stop="openRenameCategoryDialog(data)"
-                  >
-                    重命名
-                  </el-button>
-                  <el-button
-                    link
-                    type="danger"
-                    size="small"
-                    :disabled="categoryMutating"
-                    @click.stop="removeCategoryNode(data)"
-                  >
-                    删除
-                  </el-button>
-                </template>
-              </span>
-            </div>
-          </template>
-        </el-tree>
-      </div>
-      <template #footer>
-        <el-button @click="manageVisible = false">关闭</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog
-      v-model="nodeDialogVisible"
-      :title="nodeDialogMode === 'rename' ? '重命名分类' : '新增分类'"
-      :width="isNarrow ? '92%' : '460px'"
-      append-to-body
-      destroy-on-close
-    >
-      <p v-if="nodeDialogMode === 'rename'" class="dialog-hint">
-        原分类：{{ nodeEditing?.path }}
-      </p>
-      <p v-else class="dialog-hint">
-        上级分类：{{ nodeParent ? nodeParent.path : '（无，新增为一级分类）' }}
-      </p>
-      <el-form label-position="top" @submit.prevent="submitCategoryNode">
-        <el-form-item label="分类名称">
-          <el-input
-            v-model="nodeLabel"
-            maxlength="120"
-            show-word-limit
-            placeholder="请输入分类名称"
-            @keyup.enter="submitCategoryNode"
-          />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button :disabled="nodeSaving" @click="nodeDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="nodeSaving" @click="submitCategoryNode">
-          保存
-        </el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -2507,3 +2225,4 @@ onMounted(() => {
   }
 }
 </style>
+
