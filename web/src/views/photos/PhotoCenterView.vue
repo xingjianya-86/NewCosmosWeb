@@ -10,6 +10,7 @@ import type {
 import NcPageHeader from '@/components/NcPageHeader.vue'
 import PhotoBackfillPanel from './PhotoBackfillPanel.vue'
 import PhotoCaptureDialog from './PhotoCaptureDialog.vue'
+import PhotoPendingPanel from './PhotoPendingPanel.vue'
 import PhotoQueryPanel from './PhotoQueryPanel.vue'
 import { isIdCard, normalizeDomain } from './photoMeta'
 
@@ -18,6 +19,10 @@ interface BackfillPanelExpose {
 }
 
 interface QueryPanelExpose {
+  reload: () => void
+}
+
+interface PendingPanelExpose {
   reload: () => void
 }
 
@@ -44,12 +49,17 @@ const initialQueryKeyword = queryText(route.query.keyword) || initialIdCard
 const initialCategory = queryText(route.query.category)
 const presetCategory = queryText(route.query.photoCategory) || initialCategory
 
-const activeTab = ref<'backfill' | 'query'>(
-  queryText(route.query.tab) === 'query' ? 'query' : 'backfill',
+const activeTab = ref<'backfill' | 'query' | 'pending'>(
+  queryText(route.query.tab) === 'query'
+    ? 'query'
+    : queryText(route.query.tab) === 'pending'
+      ? 'pending'
+      : 'backfill',
 )
 
 const backfillRef = ref<BackfillPanelExpose | null>(null)
 const queryRef = ref<QueryPanelExpose | null>(null)
+const pendingRef = ref<PendingPanelExpose | null>(null)
 const captureVisible = ref(false)
 const capturePeople = ref<PhotoCapturePerson[]>([])
 const captureStart = ref(0)
@@ -74,6 +84,7 @@ function handleCaptureFinished(_summary: PhotoCaptureSummary): void {
 
 function handleTabChange(name: string | number): void {
   if (name === 'query') queryRef.value?.reload()
+  else if (name === 'pending') pendingRef.value?.reload()
   else if (name === 'backfill') backfillRef.value?.reload()
 }
 
@@ -126,6 +137,10 @@ onMounted(() => {
           :initial-keyword="initialQueryKeyword"
           :initial-category="initialCategory"
         />
+      </el-tab-pane>
+
+      <el-tab-pane label="待归属" name="pending" lazy>
+        <PhotoPendingPanel ref="pendingRef" />
       </el-tab-pane>
     </el-tabs>
 

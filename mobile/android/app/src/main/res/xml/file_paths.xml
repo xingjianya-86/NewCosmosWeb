@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 拍照临时文件 -->
+    <external-path name="my_images" path="." />
+    <cache-path name="my_cache_images" path="." />
+
+    <!-- 应用内更新 APK（缓存目录） -->
+    <cache-path name="nc_update_cache" path="updates/" />
+    <external-cache-path name="nc_update_external_cache" path="updates/" />
+
+    <!-- Android 10 以下：DownloadManager 下载目录中的文件安装/查看 -->
+    <external-path name="nc_downloads" path="Download/NewCosmos/" />
+</paths>

@@ -1,14 +1,17 @@
 # NewCosmos.Agent
 
-Windows 固定 PC 上的文档/打印代理（P0 控制台版）。职责：
+Windows 固定 PC 上的托盘/命令行文档与照片打印代理。职责：
 
 - 向服务端注册设备并保存 `deviceKey`
 - 每 30 秒上报心跳、机器名、Agent 版本、本机打印机列表
 - 探测 Microsoft Office / 本机打印机
 - 提供一条真实 Office COM 的模板渲染命令（模板 → PDF）
-- 轮询服务端打印/预览任务，在本地渲染 PDF、打开预览或打印，并回写状态
+- 轮询服务端打印/预览/照片任务，在本地渲染 PDF、打开预览或打印，并回写状态
+- 托盘宿主：右键绑定打印机、立即心跳、打开日志/输出目录、退出
+- 开机自启（HKCU `Run`，可选托盘/纯 worker 模式）
 
-> 后续可在此项目上加托盘/Windows 服务宿主；当前是 `OutputType=Exe` 的控制台程序。
+> 项目输出类型为 `OutputType=WinExe`（GUI 子系统）：双击运行不出现控制台窗口。
+> 托盘模式不附着控制台；CLI 命令由 `ConsoleHost` 检测并附着父控制台，命令行仍能看到输出。
 > Linux 服务端不运行本项目，也不运行 Office COM。
 
 - 目标框架：`net10.0-windows`
@@ -22,7 +25,7 @@ dotnet build src\NewCosmos.Agent\NewCosmos.Agent.csproj
 dotnet run --project src\NewCosmos.Agent\NewCosmos.Agent.csproj -- --help
 ```
 
-发布单文件/自包含示例：
+发布单文件/自包含示例（WinExe，双击不弹控制台）：
 
 ```powershell
 dotnet publish src\NewCosmos.Agent\NewCosmos.Agent.csproj -c Release -r win-x64 --self-contained true `
@@ -30,6 +33,21 @@ dotnet publish src\NewCosmos.Agent\NewCosmos.Agent.csproj -c Release -r win-x64 
 ```
 
 > 单文件发布仍需要目标机安装 Microsoft Office 桌面版；Office COM 无法随包分发。
+
+### 1.1 无控制台与 CLI 行为
+
+| 启动方式 | 行为 |
+|---|---|
+| 双击 `NewCosmos.Agent.exe`（无参数） | 进入托盘模式；不创建/不附着控制台，日志写文件，重要状态用托盘气泡提示 |
+| 双击后带错误参数 | 用 `MessageBox` 显示错误与用法，不闪黑窗 |
+| 从控制台运行 CLI（`--help` / `--version` / `--printers` / `--probe-office` / `--bind-code` / `--register` / `--heartbeat-once` / `--heartbeat` / `--worker` / `--render` / `install-autostart` 等） | `ConsoleHost` 调用 `AttachConsole(父进程)` 并重绑 stdout/stderr，命令行照常显示输出 |
+| 控制台已重定向（`> out.txt` / 管道） | 沿用已有 stdout/stderr 句柄，输出写入重定向目标 |
+| CLI 无控制台（如计划任务） | 输出暂存，结束/出错时用 `MessageBox` 展示（≤12000 字符） |
+
+- `Console.CancelKeyPress` 只在真正附着控制台时注册；托盘模式没有 Ctrl+C。
+- 异常兜底：写文件日志 + 托盘气泡/MessageBox，不依赖 `Console` 是否存在。
+- 因为入口是 GUI 子系统，`cmd` 交互式执行 CLI 时可能立即返回提示符；需要等待退出码时用
+  `Start-Process ... -Wait` 或 `cmd /c start /wait`。
 
 ## 2. 配置
 
@@ -123,11 +141,15 @@ NewCosmos.Agent.exe --register
 ## 4. 心跳
 
 ```powershell
-# 持续心跳（默认 30 秒）+ 任务轮询，Ctrl+C 退出
-NewCosmos.Agent.exe
+# 持续心跳（默认 30 秒）+ 任务轮询，Ctrl+C 退出（控制台模式）
+NewCosmos.Agent.exe --heartbeat
 
 # 只发心跳，便于排障/部署校验
 NewCosmos.Agent.exe --heartbeat-once
+
+# 托盘模式（无参数）：托盘图标 + 心跳 + 任务轮询，无控制台
+NewCosmos.Agent.exe
+NewCosmos.Agent.exe --tray
 ```
 
 - `POST /api/agent/heartbeat`
@@ -233,7 +255,10 @@ NewCosmos.Agent.exe --render `
 # 只做任务轮询（不关心跳）
 NewCosmos.Agent.exe --worker
 
-# 缺省命令 / --heartbeat：心跳 + 任务轮询并行
+# --heartbeat：心跳 + 任务轮询并行（控制台）
+NewCosmos.Agent.exe --heartbeat
+
+# 无参数 / --tray：托盘 + 心跳 + 任务轮询（无控制台）
 NewCosmos.Agent.exe
 ```
 
@@ -247,8 +272,9 @@ NewCosmos.Agent.exe
    （`fields[].fieldKey/placeholder`、`tables[].columns/startMarker/endMarker`、`indexShifts`）
    映射到模板占位符，与 `PrintExecuteService` 的口径一致；
 5. `jobKind == "Preview"` → 写 PDF 并用系统默认阅读器打开，视为完成；
-   其他任务 → 先渲染源文档与 PDF，再用 Office COM 打印（支持 `printerName` / `copies` / `isDuplex`）；
-6. 成功 `POST /complete`；失败 `POST /fail` 并带截断后的错误摘要。
+6. `jobKind == "Photo"` → 走照片打印分支（见 6.4），不读模板、不调用 Office；
+7. 其他模板任务 → 先渲染源文档与 PDF，再用 Office COM 打印（支持 `printerName` / `copies` / `isDuplex`）；
+8. 成功 `POST /complete`；失败 `POST /fail` 并带截断后的错误摘要（≤500 字符）。
 
 失败处理：
 
@@ -266,6 +292,43 @@ NewCosmos.Agent.exe
 - 预览成功：PDF 不立即删除（用户可能还开着），保留最近 `previewKeepCount` 个；
 - 任务失败：本地模板/渲染源/PDF 一并清理，避免敏感文书滞留在 `%TEMP%`。
 - 日志只记录任务号、模板名、字节数、份数、错误摘要，不写字段值、姓名或身份证。
+
+## 6.4 照片打印（JobKind=Photo）
+
+服务端 payload 字段：
+
+```json
+{
+  "jobKind": "Photo",
+  "photoDataBase64": "...",
+  "photoLayout": "FULL_PAGE|HALF_PAGE|ID_CARD",
+  "photoCategory": "ID_CARD|...",
+  "printerName": "...",
+  "copies": 1,
+  "applicantName": "...",
+  "applicantIdCard": "..."
+}
+```
+
+执行路径（`JobTaskExecutor` 最前面判断任务类型，**不会**进入模板/Office 路径）：
+
+1. `photoDataBase64` 解码；SkiaSharp 解码 WebP/JPEG/PNG，读取 `SKCodec.EncodedOrigin` 处理 EXIF 方向；
+2. 统一转 Bgra8888 位图，按 `PhotoLayoutConstants` 映射版式；
+3. `System.Drawing.Printing.PrintDocument` 打印：尊重 `printerName` / `copies`，照片任务固定 `IsDuplex=false`；
+4. 成功由 JobWorker `POST /complete`；失败 `POST /fail`（错误摘要 ≤500 字符）；
+5. 照片只在内存处理，不写临时文件，因此没有残留需要清理；`applicantName` / `applicantIdCard` 不参与日志。
+
+版式映射（`PhotoLayoutMapping`，唯一来源是 Core `PhotoLayoutConstants`）：
+
+| 版式 | 目标区域 | 缩放 |
+|---|---|---|
+| `ID_CARD` | 证件原寸包围盒（`GetBox`：242×153 点 ≈ 85.4×54mm，标准身份证 85.6×54mm 的排版取整），页面居中 | 等比装入、不裁剪、不拉伸 |
+| `HALF_PAGE` | A4 可打印区上半部分 | 等比装入上半区并居中 |
+| `FULL_PAGE`（及未知/空值） | A4 可打印区整块 | 等比缩放铺满可打印区、不裁剪 |
+
+- 版式为空的按类别默认：`ID_CARD` 类别 → 证件原寸，其余 → 整页（`PhotoLayoutConstants.DefaultForCategory`）。
+- 照片日志只写任务号、类别、字节数；不写姓名、身份证号。
+- 依赖 Windows 打印机队列；未安装指定打印机时任务直接 `fail`，不会退回默认打印机误打。
 
 ## 7. 账户绑定说明（部署必读）
 
@@ -287,6 +350,7 @@ NewCosmos.Agent.exe
 | 渲染输出 | `--out` 指定路径 |
 
 日志不会写入 `deviceKey`、`registerToken` 或公文个人敏感字段（打印/渲染日志只记录路径、字节数、错误）。
+托盘模式没有控制台输出，日志只写文件；重要状态通过托盘气泡提示。照片任务只在内存中解码/打印，不产生临时图片文件。
 
 ## 9. 退出码
 
@@ -305,27 +369,31 @@ NewCosmos.Agent.exe
 已实现：
 
 - 配置读取（文件 + 环境变量 + 命令行覆盖）
+- WinExe 无控制台启动；CLI 附着父控制台 / 无控制台 MessageBox 兜底
 - 设备注册 + DPAPI 密钥保存 + ACL 降级
 - 用网页绑定码自动注册并绑定打印机（无需 `--register` / 注册令牌）
-- 心跳循环 / 单次心跳，Ctrl+C 退出
+- 心跳循环 / 单次心跳，CLI 模式 Ctrl+C 退出
 - 打印机枚举、Office 探测
+- 托盘宿主（绑定/心跳/打开日志/输出目录/退出）与开机自启
 - 按绑定码绑定本机打印机（托盘菜单 + 命令行）
 - 单次模板渲染（Word/Excel → PDF，真实 Office COM）
 - 任务队列 claim/payload/complete/fail + 预览/打印执行 + 临时文件清理
+- 照片任务（JobKind=Photo）：WebP/JPEG/PNG 解码、EXIF 方向、整页/半页/证件原寸直打
+- 批量模板任务（TemplateBatch：预览合并/打印/保存/打开目录）、索引槽分页、打印记录回传
 
-未实现（预留接口 + TODO）：
+未实现 / 后续：
 
-- 托盘/开机自启/自动更新：后续在 Agent 宿主层补齐。
-- 照片任务（JobKind=Photo）：`/api/agent/jobs/payload` 当前只下发模板，Agent 会以明确错误回写失败。
-- 索引槽分页：当 `tableRows` 数量超过模板 `FAMILY_MEMBER_NAME_1..N` 槽位容量时，
-  Agent 只填充可用槽位（legacy `PrintExecuteService` 会分页并合并 PDF）；当前服务端仅支持
-  FamilyApplication，家庭人数通常低于模板槽位。表格类模板（`tables[]`）不受此限制。
-- 批量打印、补打、打印记录回传：依赖服务端任务 API 后续扩展。
+- 自动更新、安装包签名与升级回滚。
+- Windows 服务（Session 0）宿主：Office COM 与打印机队列依赖登录用户会话，不建议也不计划支持。
+- 照片云端二次处理（如水印）由服务端/采集端负责，Agent 只按下发字节打印。
 
 ## 11. 手工验证清单
 
-- [ ] `--version`、`--help` 正常。
+- [ ] 双击 `NewCosmos.Agent.exe` 只出现托盘图标，不出现控制台/黑窗。
+- [ ] 从控制台运行 `--version`、`--help`、`--printers` 能看到输出；`--help` 重定向到文件也正常。
+- [ ] 从资源管理器双击并传错误参数时，弹 `MessageBox` 提示且无控制台窗口。
 - [ ] `--printers` 列出真实打印机并正确标记默认打印机。
+- [ ] 照片任务三种版式（FULL_PAGE / HALF_PAGE / ID_CARD）各打印一张：方向正确、不裁剪、证件原寸居中。
 - [ ] 托盘「绑定本机打印机…」输入 6 位码后可绑定，并补发心跳。
 - [ ] 全新机器（无 agent.json / 无 deviceKey）直接输入网页绑定码：自动注册、保存密钥并绑定，无需 `--register`。
 - [ ] `--bind-code 482913` 成功打印绑定的打印机名称；过期/已用/频率限制/网络错误有明确提示。

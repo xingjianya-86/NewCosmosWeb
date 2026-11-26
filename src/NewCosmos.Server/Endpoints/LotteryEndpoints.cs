@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using Microsoft.AspNetCore.Mvc;
 using NewCosmos.Constants;
 using NewCosmos.Models.Lottery;
 using NewCosmos.Models.Results;
@@ -30,14 +31,17 @@ public static class LotteryEndpoints
 
     public static IEndpointRouteBuilder MapLotteryEndpoints(this IEndpointRouteBuilder app)
     {
-        // 开奖
+        // 汇总 / 开奖
+        app.MapGet($"{Prefix}/summary", GetSummaryAsync);
         app.MapGet($"{Prefix}/draws", GetDrawsAsync);
         app.MapGet($"{Prefix}/draws/latest", GetLatestDrawAsync);
         app.MapGet($"{Prefix}/draws/count", GetDrawCountAsync);
         app.MapGet($"{Prefix}/draws/{{drawNumber}}", GetDrawAsync);
 
-        // 同步 / 机选
+        // 同步 / 机选（POST /sync、POST /quick-pick 为旧版别名，保留兼容）
+        app.MapPost($"{Prefix}/sync-history", SyncAsync);
         app.MapPost($"{Prefix}/sync", SyncAsync);
+        app.MapGet($"{Prefix}/quick-pick", QuickPickGetAsync);
         app.MapPost($"{Prefix}/quick-pick", QuickPickAsync);
 
         // 购彩记录
@@ -45,13 +49,60 @@ public static class LotteryEndpoints
         app.MapGet($"{Prefix}/purchases/summary", GetPurchaseSummaryAsync);
         app.MapPost($"{Prefix}/purchases/verify", VerifyAsync);
 
-        // 模型 / 任务
+        // Worker 代理：健康 / 模型 / 任务
+        app.MapGet($"{Prefix}/worker/health", GetWorkerHealthAsync);
+        app.MapGet($"{Prefix}/worker/models", GetWorkerModelsAsync);
+        app.MapPost($"{Prefix}/worker/jobs/train", ProxyTrainAsync);
+        app.MapPost($"{Prefix}/worker/jobs/predict", ProxyPredictAsync);
+        app.MapGet($"{Prefix}/worker/jobs", ListWorkerJobsAsync);
+        app.MapGet($"{Prefix}/worker/jobs/{{jobId}}", GetWorkerJobAsync);
+        app.MapPost($"{Prefix}/worker/jobs/{{jobId}}/cancel", CancelWorkerJobAsync);
+
+        // 旧版别名（Web 早期版本使用，保留避免破坏已发布页面）
         app.MapGet($"{Prefix}/model-status", GetModelStatusAsync);
         app.MapPost($"{Prefix}/train", TrainAsync);
         app.MapPost($"{Prefix}/predict", PredictAsync);
         app.MapGet($"{Prefix}/jobs/{{jobId}}", GetJobAsync);
 
         return app;
+    }
+
+    // ───────────────────────────── 汇总 ─────────────────────────────
+
+    private static async Task<IResult> GetSummaryAsync(
+        string? type,
+        HttpContext context,
+        INewPermissionService permissions,
+        ILotteryDataService data,
+        ILotteryPurchaseService purchases,
+        CancellationToken ct)
+    {
+        if (await DenyAsync(context, permissions, ct) is { } denied)
+            return denied;
+        if (!TryParseLotteryType(type, out var lotteryType))
+            return InvalidRequest(context, "type 必须为 SSQ 或 DLT");
+
+        var latestResult = await data.GetLatestDrawAsync(lotteryType, ct);
+        if (latestResult.IsFailure)
+            return MapResult(context, latestResult);
+
+        var countResult = await data.GetDrawCountAsync(lotteryType, ct);
+        if (countResult.IsFailure)
+            return MapResult(context, countResult);
+
+        var recentResult = await data.GetRecentDrawsAsync(lotteryType, 10, ct);
+        if (recentResult.IsFailure)
+            return MapResult(context, recentResult);
+
+        var purchaseResult = await purchases.GetPurchaseSummaryAsync(lotteryType, ct);
+        if (purchaseResult.IsFailure)
+            return MapResult(context, purchaseResult);
+
+        return Results.Json(new LotterySummaryResponse(
+            latestResult.Value is null ? null : ToDrawDto(latestResult.Value),
+            countResult.Value,
+            recentResult.Value.Select(ToDrawDto).ToList(),
+            ToPurchaseSummaryDto(purchaseResult.Value)));
     }
 
     // ───────────────────────────── 开奖 ─────────────────────────────
@@ -209,6 +260,30 @@ public static class LotteryEndpoints
         if (count is < 1 or > MaxPredictCount)
             return InvalidRequest(context, $"count 必须在 1-{MaxPredictCount} 之间");
 
+        return QuickPickResult(lotteryType, count);
+    }
+
+    private static async Task<IResult> QuickPickGetAsync(
+        string? type,
+        int? count,
+        HttpContext context,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        if (await DenyAsync(context, permissions, ct) is { } denied)
+            return denied;
+        if (!TryParseLotteryType(type, out var lotteryType))
+            return InvalidRequest(context, "type 必须为 SSQ 或 DLT");
+
+        var safeCount = count ?? 1;
+        if (safeCount is < 1 or > MaxPredictCount)
+            return InvalidRequest(context, $"count 必须在 1-{MaxPredictCount} 之间");
+
+        return QuickPickResult(lotteryType, safeCount);
+    }
+
+    private static IResult QuickPickResult(LotteryType lotteryType, int count)
+    {
         var predictions = LotteryNumberGenerator.Generate(lotteryType, count);
         return Results.Json(new LotteryQuickPickResponse(
             predictions.Select(ToPredictionDto).ToList()));
@@ -451,8 +526,246 @@ public static class LotteryEndpoints
             job.Message,
             job.Result,
             job.Error,
+            job.LogTail is { Count: > 0 } ? string.Join('\n', job.LogTail) : null,
             predictions,
             savedCount));
+    }
+
+    // ───────────────────────────── Worker 代理 ─────────────────────────────
+
+    private static async Task<IResult> GetWorkerHealthAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        LotteryWorkerClient worker,
+        CancellationToken ct)
+    {
+        if (await DenyAsync(context, permissions, ct) is { } denied)
+            return denied;
+
+        var result = await worker.GetHealthAsync(ct);
+        return result.IsFailure ? MapResult(context, result) : Results.Json(result.Value);
+    }
+
+    private static async Task<IResult> GetWorkerModelsAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        LotteryWorkerClient worker,
+        CancellationToken ct)
+    {
+        if (await DenyAsync(context, permissions, ct) is { } denied)
+            return denied;
+
+        var result = await worker.GetModelsRawAsync(ct);
+        return result.IsFailure ? MapResult(context, result) : Results.Json(result.Value);
+    }
+
+    private static async Task<IResult> ProxyTrainAsync(
+        [FromBody] JsonElement? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        LotteryWorkerClient worker,
+        ILoggerService logger,
+        CancellationToken ct)
+    {
+        if (await DenyAsync(context, permissions, ct) is { } denied)
+            return denied;
+
+        if (request is not { ValueKind: JsonValueKind.Object } body)
+            return InvalidRequest(context, "请求体必须为 JSON 对象，且包含 lotteryType");
+
+        if (!ValidateWorkerJobBody(body, isPredict: false, out var message))
+            return InvalidRequest(context, message);
+
+        var workerResult = await worker.PostJobRawAsync("/jobs/train", body, ct);
+        if (workerResult.IsFailure)
+            return MapResult(context, workerResult);
+
+        logger.LogBusiness("彩票训练任务入队", ("RequestBody", body.GetRawText()));
+        return Results.Json(workerResult.Value, statusCode: StatusCodes.Status202Accepted);
+    }
+
+    private static async Task<IResult> ProxyPredictAsync(
+        [FromBody] JsonElement? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        LotteryWorkerClient worker,
+        ILoggerService logger,
+        CancellationToken ct)
+    {
+        if (await DenyAsync(context, permissions, ct) is { } denied)
+            return denied;
+
+        if (request is not { ValueKind: JsonValueKind.Object } body)
+            return InvalidRequest(context, "请求体必须为 JSON 对象，且包含 lotteryType");
+
+        if (!ValidateWorkerJobBody(body, isPredict: true, out var message))
+            return InvalidRequest(context, message);
+
+        var workerResult = await worker.PostJobRawAsync("/jobs/predict", body, ct);
+        if (workerResult.IsFailure)
+            return MapResult(context, workerResult);
+
+        logger.LogBusiness("彩票预测任务入队", ("RequestBody", body.GetRawText()));
+        return Results.Json(workerResult.Value, statusCode: StatusCodes.Status202Accepted);
+    }
+
+    private static async Task<IResult> ListWorkerJobsAsync(
+        int? limit,
+        string? status,
+        HttpContext context,
+        INewPermissionService permissions,
+        LotteryWorkerClient worker,
+        CancellationToken ct)
+    {
+        if (await DenyAsync(context, permissions, ct) is { } denied)
+            return denied;
+
+        var result = await worker.ListJobsRawAsync(Math.Clamp(limit ?? 50, 1, 200), status, ct);
+        return result.IsFailure ? MapResult(context, result) : Results.Json(result.Value);
+    }
+
+    private static async Task<IResult> GetWorkerJobAsync(
+        string jobId,
+        string? type,
+        HttpContext context,
+        INewPermissionService permissions,
+        LotteryWorkerClient worker,
+        ILotteryPurchaseService purchases,
+        ILoggerService logger,
+        CancellationToken ct)
+    {
+        if (await DenyAsync(context, permissions, ct) is { } denied)
+            return denied;
+        if (string.IsNullOrWhiteSpace(jobId))
+            return InvalidRequest(context, "jobId 不能为空");
+
+        var jobResult = await worker.GetJobRawAsync(jobId, ct);
+        if (jobResult.IsFailure)
+            return MapResult(context, jobResult);
+
+        var job = jobResult.Value;
+        var hasQueryType = TryParseLotteryType(type, out var queryType);
+        var lotteryType = ResolveJobLotteryType(job, hasQueryType ? queryType : null);
+        var jobStatus = TryGetString(job, "status");
+        var jobType = TryGetString(job, "type");
+
+        // 预测任务成功：解析结果并幂等入库（重复轮询 savedCount=0）。
+        if (string.Equals(jobStatus, "succeeded", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(jobType, "predict", StringComparison.OrdinalIgnoreCase)
+            && job.TryGetProperty("result", out var resultElement)
+            && resultElement.ValueKind != JsonValueKind.Null)
+        {
+            var parseResult = ParsePredictions(lotteryType, resultElement);
+            if (parseResult.IsFailure)
+                return MapResult(context, parseResult);
+
+            var algorithmName = ResolveAlgorithmName(parseResult.Value.AlgorithmCode);
+            var saveResult = await purchases.SaveFromPredictionsAsync(
+                lotteryType,
+                parseResult.Value.Predictions,
+                algorithmName,
+                jobId,
+                ct);
+            if (saveResult.IsFailure)
+                return MapResult(context, saveResult);
+
+            if (saveResult.Value > 0)
+            {
+                logger.LogBusiness("彩票预测结果入库",
+                    ("JobId", jobId),
+                    ("LotteryType", lotteryType.ToString()),
+                    ("Count", saveResult.Value));
+            }
+
+            var payload = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(job.GetRawText())
+                          ?? new Dictionary<string, JsonElement>();
+            payload["savedCount"] = JsonSerializer.SerializeToElement(saveResult.Value);
+            return Results.Json(payload);
+        }
+
+        return Results.Json(job);
+    }
+
+    private static async Task<IResult> CancelWorkerJobAsync(
+        string jobId,
+        HttpContext context,
+        INewPermissionService permissions,
+        LotteryWorkerClient worker,
+        ILoggerService logger,
+        CancellationToken ct)
+    {
+        if (await DenyAsync(context, permissions, ct) is { } denied)
+            return denied;
+        if (string.IsNullOrWhiteSpace(jobId))
+            return InvalidRequest(context, "jobId 不能为空");
+
+        var result = await worker.CancelJobRawAsync(jobId, ct);
+        if (result.IsFailure)
+            return MapResult(context, result);
+
+        logger.LogBusiness("彩票任务取消", ("JobId", jobId));
+        return Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// 只校验不重写：任务请求体必须原样转发给 Worker。彩种缺省由 Worker 决定（ssq），
+    /// 显式传入时必须为 ssq/dlt；window/count 做边界校验，避免 Worker 返回 422 英文错误。
+    /// </summary>
+    private static bool ValidateWorkerJobBody(JsonElement body, bool isPredict, out string message)
+    {
+        message = string.Empty;
+
+        if (body.TryGetProperty("lotteryType", out var lotteryType))
+        {
+            var rawType = lotteryType.ValueKind == JsonValueKind.String
+                ? lotteryType.GetString()?.Trim().ToLowerInvariant()
+                : null;
+            if (rawType is not ("ssq" or "dlt"))
+            {
+                message = "lotteryType 必须为 ssq 或 dlt";
+                return false;
+            }
+        }
+
+        if (body.TryGetProperty("window", out var window)
+            && window.ValueKind != JsonValueKind.Null)
+        {
+            if (window.ValueKind != JsonValueKind.Number
+                || !window.TryGetInt32(out var windowValue)
+                || windowValue is < 10 or > 500)
+            {
+                message = "window 必须是 10-500 之间的整数";
+                return false;
+            }
+        }
+
+        if (isPredict
+            && body.TryGetProperty("count", out var count)
+            && count.ValueKind != JsonValueKind.Null)
+        {
+            if (count.ValueKind != JsonValueKind.Number
+                || !count.TryGetInt32(out var countValue)
+                || countValue is < 1 or > MaxPredictCount)
+            {
+                message = $"count 必须是 1-{MaxPredictCount} 之间的整数";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static LotteryType ResolveJobLotteryType(JsonElement job, LotteryType? fallback)
+    {
+        if (job.TryGetProperty("params", out var parameters)
+            && parameters.ValueKind == JsonValueKind.Object
+            && TryGetString(parameters, "lotteryType") is { } raw
+            && TryParseLotteryType(raw, out var parsed))
+        {
+            return parsed;
+        }
+
+        return fallback ?? LotteryType.SSQ;
     }
 
     // ───────────────────────────── 映射 ─────────────────────────────
@@ -493,6 +806,14 @@ public static class LotteryEndpoints
         record.PrizeLevelText,
         record.PrizeAmount,
         record.StatusText);
+
+    private static LotteryPurchaseSummaryResponse ToPurchaseSummaryDto(LotteryPurchaseSummary summary) => new(
+        summary.TotalCount,
+        summary.HitCount,
+        summary.PendingCount,
+        summary.TotalPrizeAmount,
+        summary.BestPrizeLevel,
+        summary.BestPrizeDescription);
 
     private static LotteryVerificationDto ToVerificationDto(VerificationSummary summary) => new(
         summary.TotalVerified,
@@ -685,6 +1006,12 @@ public static class LotteryEndpoints
                     context, StatusCodes.Status429TooManyRequests, ApiErrorCodes.ValidationError, message);
 
             case ErrorCodes.LOTTERY_WORKER_UNREACHABLE:
+                return ApiErrors.Write(
+                    context,
+                    StatusCodes.Status503ServiceUnavailable,
+                    ApiErrorCodes.InternalError,
+                    "彩票预测服务未启动");
+
             case ErrorCodes.LOTTERY_DEPENDENCY_MISSING:
                 return ApiErrors.Write(
                     context, StatusCodes.Status503ServiceUnavailable, ApiErrorCodes.InternalError, message);

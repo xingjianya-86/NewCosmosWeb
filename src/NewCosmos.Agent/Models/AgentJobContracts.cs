@@ -39,7 +39,7 @@ public sealed class AgentJob
 
     public string JobNo { get; set; } = string.Empty;
 
-    /// <summary>Preview / Template / Photo 等；Agent 仅区分 Preview 与其他（打印）。</summary>
+    /// <summary>Preview / Template / Photo / TemplateBatch；Photo 走照片直打，其余模板任务走 Office 渲染。</summary>
     public string JobKind { get; set; } = "Template";
 
     public long? TemplateId { get; set; }
@@ -92,6 +92,21 @@ public sealed class AgentJobPayload
     public string? ApplicantName { get; set; }
 
     public string? ApplicantIdCard { get; set; }
+
+    /// <summary>
+    /// 照片任务（JobKind=Photo）的图片字节 Base64（WebP/JPEG/PNG）。
+    /// 照片任务不使用模板：Agent 解码后按 <see cref="PhotoLayout"/> 直接送打印机。
+    /// </summary>
+    [JsonPropertyName("photoDataBase64")]
+    public string? PhotoDataBase64 { get; set; }
+
+    /// <summary>照片版式：FULL_PAGE / HALF_PAGE / ID_CARD（PhotoLayoutConstants）。</summary>
+    [JsonPropertyName("photoLayout")]
+    public string? PhotoLayout { get; set; }
+
+    /// <summary>照片类别（PhotoCategoryConstants，仅用于默认版式与日志，不打印姓名/身份证）。</summary>
+    [JsonPropertyName("photoCategory")]
+    public string? PhotoCategory { get; set; }
 
     /// <summary>
     /// 模板文件 SHA256（服务端 nc_biz_templates.file_hash；缺失时服务端按 file_data 现算）。

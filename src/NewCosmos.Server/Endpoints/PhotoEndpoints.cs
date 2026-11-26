@@ -107,6 +107,9 @@ public static class PhotoEndpoints
         app.MapPost($"{Prefix}/print", PrintAsync);
         app.MapGet($"{Prefix}/export", ExportAsync);
         app.MapGet($"{Prefix}/pending", GetPendingAsync);
+        app.MapGet($"{Prefix}/pending/{{id:long}}/content", GetPendingContentAsync);
+        app.MapPost($"{Prefix}/pending/{{id:long}}/assign", AssignPendingAsync).DisableAntiforgery();
+        app.MapDelete($"{Prefix}/pending/{{id:long}}", DeletePendingAsync);
         app.MapGet($"{Prefix}/categories", GetCategoriesAsync);
 
         return app;
@@ -658,8 +661,20 @@ WHERE ($1::text = '' OR applicant_id_card ILIKE '%' || $1::text || '%'
             PhotoCount = owner.PhotoCount,
         };
 
+        // 自动水印：仅「公示核查 / 入户排查」类别。上下文只给时间/姓名/身份证；
+        // 地址、村屯坐标与水印时间由 Core SavePhotoAsync → FillWatermarkContextAsync 按档案补齐，
+        // 绘制失败由 Core 记 Warn 并按原图入库（不阻断保存），此处不重抄绘制逻辑。
+        PhotoWatermarkInfo? watermark = null;
+        if (PhotoCategoryConstants.RequiresWatermark(normalizedCategory))
+        {
+            watermark = new PhotoWatermarkInfo(
+                CapturedAt: DateTime.Now,
+                PersonName: owner.PersonName ?? string.Empty,
+                IdCard: owner.IdCard);
+        }
+
         var insertResult = await photos.InsertPhotosAsync(
-            targetOwner, normalizedCategory, [fileData], null, ct);
+            targetOwner, normalizedCategory, [fileData], watermark, ct);
         if (insertResult.IsFailure)
         {
             return MapPhotoResult(context, insertResult);
@@ -981,13 +996,24 @@ WHERE ($1::text = '' OR applicant_id_card ILIKE '%' || $1::text || '%'
 
     // ───────────────────────────── 待归属 / 类别 ─────────────────────────────
 
-    /// <summary>GET /api/photos/pending（可选模块：待归属照片服务尚未移植时返回空并说明）。</summary>
+    /// <summary>
+    /// GET /api/photos/pending?page=&amp;pageSize=&amp;keyword=&amp;category=
+    /// 待归属照片池（PC/扫描入口写入 nc_biz_archive_photo_pending，本端点只读池 + 归属/删除）。
+    /// 数据范围受限时：识别身份证在范围内，或未识别且由本人/本组织成员上传的记录才可见。
+    /// </summary>
     private static async Task<IResult> GetPendingAsync(
         HttpContext context,
         INewPermissionService permissions,
+        IArchivePhotoPendingService pending,
+        DataScopeFilterBuilder scopeBuilder,
+        IDataScopeService dataScope,
+        IDatabaseService database,
+        ILoggerService logger,
         CancellationToken ct,
         int? page,
-        int? pageSize)
+        int? pageSize,
+        string? keyword,
+        string? category)
     {
         var denied = await EndpointSecurity.RequirePermissionAsync(
             context, permissions, PermissionCodes.ARCHIVE_VIEW, ct);
@@ -996,16 +1022,292 @@ WHERE ($1::text = '' OR applicant_id_card ILIKE '%' || $1::text || '%'
             return denied;
         }
 
+        if (context.GetUserId() is not { } userId)
+        {
+            return Unauthorized(context);
+        }
+
+        if (!string.IsNullOrWhiteSpace(category) && !IsKnownCategory(category))
+        {
+            return InvalidRequest(context, "照片类别不存在");
+        }
+
         var pageIndex = Math.Clamp(page ?? 1, 1, MaxPageIndex);
         var size = Math.Clamp(pageSize ?? DefaultPageSize, 1, MaxPageSize);
 
+        var scopeResult = await ResolvePhotoScopeAsync(
+            userId, dataScope, scopeBuilder, database, logger, ct);
+        if (scopeResult.IsFailure)
+        {
+            return ScopeFailure(context, scopeResult.Message);
+        }
+
+        var scope = scopeResult.Value!;
+        var filter = scope.Restricted
+            ? new PendingPhotoScopeFilter(scope.IdCards, userId, scope.SharedOrganizationIds)
+            : null;
+
+        var result = await pending.GetPendingPagedAsync(
+            keyword, category, pageIndex, size, filter, ct);
+        if (result.IsFailure)
+        {
+            return MapPhotoResult(context, result);
+        }
+
+        var pageResult = result.Value;
+        var message = scope.Restricted && scope.IdCards.Count == 0
+            ? "当前用户数据范围内没有可归属人员，仅显示本人/本组织上传的未识别照片"
+            : null;
+
         return Results.Json(new PhotoPendingResponse(
-            [],
-            pageIndex,
-            size,
-            0,
-            false,
-            "待归属照片池（nc_biz_archive_photo_pending / IArchivePhotoPendingService）尚未移植到 Web 服务端，本期返回空列表"));
+            pageResult.Items.Select(ToPendingDto).ToList(),
+            pageResult.PageIndex,
+            pageResult.PageSize,
+            pageResult.TotalCount,
+            pageResult.TotalPages,
+            true,
+            message));
+    }
+
+    /// <summary>GET /api/photos/pending/{id}/content → 待归属照片二进制（私有缓存 5 分钟）。</summary>
+    private static async Task<IResult> GetPendingContentAsync(
+        long id,
+        HttpContext context,
+        INewPermissionService permissions,
+        IArchivePhotoPendingService pending,
+        DataScopeFilterBuilder scopeBuilder,
+        IDataScopeService dataScope,
+        IDatabaseService database,
+        ILoggerService logger,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.ARCHIVE_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetUserId() is not { } userId)
+        {
+            return Unauthorized(context);
+        }
+
+        var scopeResult = await ResolvePhotoScopeAsync(
+            userId, dataScope, scopeBuilder, database, logger, ct);
+        if (scopeResult.IsFailure)
+        {
+            return ScopeFailure(context, scopeResult.Message);
+        }
+
+        var metaResult = await pending.GetPendingMetaAsync(id, ct);
+        if (metaResult.IsFailure)
+        {
+            return ApiErrors.FromResult(context, metaResult);
+        }
+
+        var meta = metaResult.Value;
+        if (meta is null || !AllowsPending(scopeResult.Value!, meta, userId))
+        {
+            // 越权与不存在统一 404，不泄露待归属池是否存在。
+            return NotFound(context, "待归属照片不存在或无权访问");
+        }
+
+        var dataResult = await pending.GetPendingDataAsync(id, ct);
+        if (dataResult.IsFailure || dataResult.Value is not { Length: > 0 })
+        {
+            return NotFound(context, "待归属照片不存在或内容为空");
+        }
+
+        context.Response.Headers.CacheControl = "private, max-age=300";
+        return Results.File(
+            dataResult.Value,
+            PhotoFormatConstants.GetMimeType(meta.ImageFormat),
+            enableRangeProcessing: true);
+    }
+
+    /// <summary>
+    /// POST /api/photos/pending/{id}/assign
+    /// body：{ idCard, name?, category?, applicationId? } → 写入 nc_biz_archive_photos 并删除待归属行。
+    /// </summary>
+    private static async Task<IResult> AssignPendingAsync(
+        long id,
+        PhotoPendingAssignRequest? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        IArchivePhotoPendingService pending,
+        IArchivePhotoService photos,
+        DataScopeFilterBuilder scopeBuilder,
+        IDataScopeService dataScope,
+        IDatabaseService database,
+        ILoggerService logger,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.ARCHIVE_MANAGE, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        var idCard = request?.IdCard?.Trim() ?? string.Empty;
+        if (idCard.Length == 0)
+        {
+            return InvalidRequest(context, "请提供归属人身份证号");
+        }
+
+        var categoryOverride = request?.Category?.Trim();
+        if (!string.IsNullOrEmpty(categoryOverride) && !IsKnownCategory(categoryOverride))
+        {
+            return InvalidRequest(context, "照片类别不存在");
+        }
+
+        if (request?.ApplicationId is <= 0)
+        {
+            return InvalidRequest(context, "applicationId 无效");
+        }
+
+        var scopeResult = await ResolvePhotoScopeAsync(
+            user.Id, dataScope, scopeBuilder, database, logger, ct);
+        if (scopeResult.IsFailure)
+        {
+            return ScopeFailure(context, scopeResult.Message);
+        }
+
+        var scope = scopeResult.Value!;
+
+        // 待归属照片本身必须可见（先判 404，避免越权探测）。
+        var metaResult = await pending.GetPendingMetaAsync(id, ct);
+        if (metaResult.IsFailure)
+        {
+            return ApiErrors.FromResult(context, metaResult);
+        }
+
+        var meta = metaResult.Value;
+        if (meta is null || !AllowsPending(scope, meta, user.Id))
+        {
+            return NotFound(context, "待归属照片不存在或无权访问");
+        }
+
+        var ownerResult = await photos.ResolveOwnerAsync(idCard, ct);
+        if (ownerResult.IsFailure)
+        {
+            return MapPhotoResult(context, ownerResult);
+        }
+
+        var owner = ownerResult.Value!;
+        if (!scope.Allows(owner.IdCard))
+        {
+            return NotFound(context, "该人员不在当前用户数据范围内");
+        }
+
+        long? applicationId = null;
+        if (request?.ApplicationId is { } requestedApplicationId)
+        {
+            var belongs = await ApplicationBelongsToPersonAsync(
+                database, requestedApplicationId, owner.IdCard, ct);
+            if (belongs.IsFailure)
+            {
+                return ApiErrors.FromResult(context, belongs);
+            }
+
+            if (!belongs.Value)
+            {
+                return InvalidRequest(context, "applicationId 与照片归属人不匹配");
+            }
+
+            applicationId = requestedApplicationId;
+        }
+
+        var assignResult = await pending.AssignPendingAsync(
+            [id], owner.IdCard, request?.Name, categoryOverride, applicationId, ct);
+        if (assignResult.IsFailure)
+        {
+            return MapPhotoResult(context, assignResult);
+        }
+
+        var summary = assignResult.Value!;
+        if (!summary.HasSuccess || summary.PhotoIds.Count == 0)
+        {
+            return InvalidRequest(context, summary.FirstError ?? "照片归属失败");
+        }
+
+        var photoId = summary.PhotoIds[0];
+        var rowResult = await LoadPhotoRowAsync(database, photoId, ct);
+        var row = rowResult.IsSuccess ? rowResult.Value : null;
+
+        logger.LogBusiness("待归属照片归属",
+            ("PendingId", id),
+            ("PhotoId", photoId),
+            ("Category", row?.PhotoCategory ?? meta.PhotoCategory),
+            ("IdCard", DataMasker.MaskIdCard(owner.IdCard)),
+            ("Size", row?.FileSize ?? meta.FileSize));
+
+        return Results.Json(new PhotoUploadResponse(
+            photoId,
+            row?.PhotoName ?? string.Empty,
+            row?.FileSize ?? meta.FileSize));
+    }
+
+    /// <summary>DELETE /api/photos/pending/{id} → 删除待归属照片（ARCHIVE_MANAGE）。</summary>
+    private static async Task<IResult> DeletePendingAsync(
+        long id,
+        HttpContext context,
+        INewPermissionService permissions,
+        IArchivePhotoPendingService pending,
+        DataScopeFilterBuilder scopeBuilder,
+        IDataScopeService dataScope,
+        IDatabaseService database,
+        ILoggerService logger,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.ARCHIVE_MANAGE, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetUserId() is not { } userId)
+        {
+            return Unauthorized(context);
+        }
+
+        var scopeResult = await ResolvePhotoScopeAsync(
+            userId, dataScope, scopeBuilder, database, logger, ct);
+        if (scopeResult.IsFailure)
+        {
+            return ScopeFailure(context, scopeResult.Message);
+        }
+
+        var metaResult = await pending.GetPendingMetaAsync(id, ct);
+        if (metaResult.IsFailure)
+        {
+            return ApiErrors.FromResult(context, metaResult);
+        }
+
+        var meta = metaResult.Value;
+        if (meta is null || !AllowsPending(scopeResult.Value!, meta, userId))
+        {
+            return NotFound(context, "待归属照片不存在或无权访问");
+        }
+
+        var deleteResult = await pending.DeletePendingAsync(id, ct);
+        if (deleteResult.IsFailure)
+        {
+            return MapPhotoResult(context, deleteResult);
+        }
+
+        logger.LogBusiness("删除待归属照片",
+            ("PendingId", id),
+            ("Category", meta.PhotoCategory),
+            ("IdCard", DataMasker.MaskIdCard(meta.RecognizedIdCard ?? string.Empty)));
+        return Results.NoContent();
     }
 
     /// <summary>GET /api/photos/categories → 照片类别 + 业务域 + 打印版式。</summary>
@@ -1099,7 +1401,15 @@ WHERE ($1::text = '' OR applicant_id_card ILIKE '%' || $1::text || '%'
             }
         }
 
-        return Result.Success(new PhotoScope(true, allowed));
+        // 未识别待归属照片的组织共享范围：SELF 不共享，ORG/ORG_AND_CHILDREN 取可管理组织。
+        var sharedOrgIds = new HashSet<int>();
+        if (!string.Equals(scopeInfo.Scope, DataScopeConstants.SELF, StringComparison.OrdinalIgnoreCase))
+        {
+            var orgIds = await dataScope.GetManageableOrganizationIdsAsync(userId, ct);
+            sharedOrgIds.UnionWith(orgIds);
+        }
+
+        return Result.Success(new PhotoScope(true, allowed, sharedOrgIds));
     }
 
     private sealed class IdCardRow
@@ -1107,13 +1417,47 @@ WHERE ($1::text = '' OR applicant_id_card ILIKE '%' || $1::text || '%'
         public string? IdCard { get; set; }
     }
 
-    private sealed record PhotoScope(bool Restricted, HashSet<string> IdCards)
+    private sealed record PhotoScope(
+        bool Restricted,
+        HashSet<string> IdCards,
+        HashSet<int> SharedOrganizationIds)
     {
-        public static readonly PhotoScope All = new(false, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        public static readonly PhotoScope All = new(
+            false,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            new HashSet<int>());
 
         public bool Allows(string? idCard)
             => !Restricted
                || (!string.IsNullOrWhiteSpace(idCard) && IdCards.Contains(idCard.Trim()));
+    }
+
+    /// <summary>
+    /// 待归属照片可见性：全量范围全可见；受限范围下识别身份证须在可管理集合内，
+    /// 未识别照片仅上传人本人或其可管理组织（SELF 范围不共享）成员可见。
+    /// 待归属池无区划列，按身份证 + 上传人组织归属。
+    /// </summary>
+    private static bool AllowsPending(PhotoScope scope, PendingArchivePhoto row, int userId)
+    {
+        if (!scope.Restricted)
+        {
+            return true;
+        }
+
+        var recognizedIdCard = row.RecognizedIdCard?.Trim();
+        if (!string.IsNullOrEmpty(recognizedIdCard))
+        {
+            return scope.Allows(recognizedIdCard);
+        }
+
+        if (row.CreatedBy == userId)
+        {
+            return true;
+        }
+
+        return scope.SharedOrganizationIds.Count > 0
+               && row.CreatedByOrganizationId is { } orgId
+               && scope.SharedOrganizationIds.Contains(orgId);
     }
 
     // ───────────────────────────── 映射/校验 ─────────────────────────────
@@ -1167,6 +1511,24 @@ WHERE ($1::text = '' OR applicant_id_card ILIKE '%' || $1::text || '%'
                 : row.ImageFormat!,
             row.CreatedAt,
             row.CreatedByName);
+
+    private static PhotoPendingItemDto ToPendingDto(PendingArchivePhoto photo)
+        => new(
+            photo.Id,
+            string.IsNullOrWhiteSpace(photo.PhotoCategory)
+                ? PhotoCategoryConstants.OTHER_CERT
+                : photo.PhotoCategory,
+            PhotoCategoryConstants.GetDisplayName(photo.PhotoCategory),
+            photo.PhotoName,
+            photo.FileSize,
+            string.IsNullOrWhiteSpace(photo.ImageFormat)
+                ? PhotoFormatConstants.WebP
+                : photo.ImageFormat,
+            photo.RecognizedName,
+            photo.RecognizedIdCard,
+            photo.Source,
+            photo.CreatedAt,
+            photo.CreatedByName);
 
     private static PhotoListResponse ToPhotoListResponse(PagedResult<ArchivePhoto> page)
         => new(

@@ -23,11 +23,14 @@
             </StackPanel>
         </Border>
         <Border x:Name="ErrorPanel" Background="#F5F6F8" Visibility="Collapsed">
-            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="560">
-                <TextBlock Text="无法连接服务" FontSize="24" FontWeight="SemiBold"
-                           Foreground="#B91C1C" HorizontalAlignment="Center" />
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="620">
+                <TextBlock x:Name="ErrorTitle" Text="无法连接服务" FontSize="24" FontWeight="SemiBold"
+                           Foreground="#B91C1C" HorizontalAlignment="Center" TextAlignment="Center" />
                 <TextBlock x:Name="ErrorText" Text="" FontSize="14" Foreground="#4B5563"
                            Margin="0,12,0,0" TextWrapping="Wrap" TextAlignment="Center" />
+                <Button x:Name="RuntimeButton" Content="下载 WebView2 Runtime"
+                        Width="190" Height="36" Margin="0,18,0,0"
+                        Visibility="Collapsed" Click="DownloadRuntime_Click" />
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,24,0,0">
                     <Button Content="重试" Width="96" Height="36" Margin="0,0,12,0"
                             Click="Retry_Click" />
@@ -35,7 +38,8 @@
                             Click="OpenBrowser_Click" />
                 </StackPanel>
                 <TextBlock x:Name="ServerText" FontSize="12" Foreground="#9CA3AF"
-                           Margin="0,18,0,0" HorizontalAlignment="Center" />
+                           Margin="0,18,0,0" HorizontalAlignment="Center" TextWrapping="Wrap"
+                           TextAlignment="Center" />
             </StackPanel>
         </Border>
     </Grid>

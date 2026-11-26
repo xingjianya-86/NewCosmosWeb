@@ -14,6 +14,7 @@ import {
 } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 import {
+  cancelWorkerJob,
   describeLotteryError,
   enqueueTrain,
   getDrawCount,
@@ -70,6 +71,7 @@ const trainType = ref<LotteryType>('SSQ')
 const trainStarting = ref(false)
 const trainTracking = ref(false)
 const trainCancelled = ref(false)
+const trainCancelling = ref(false)
 const trainPollError = ref('')
 let trainTimer: number | undefined
 let trainToken = 0
@@ -193,6 +195,8 @@ function finishTraining(job: LotteryJob): void {
     ElMessage.success(`${trainTypeLabel.value} LSTM 模型训练完成`)
   } else if (job.status === 'Failed') {
     ElMessage.error(job.error || job.message || '模型训练失败')
+  } else if (job.status === 'Cancelled') {
+    ElMessage.info('训练任务已取消')
   }
 }
 
@@ -293,6 +297,36 @@ function cancelTraining(): void {
   ElMessage.info('已停止跟踪训练任务；后台任务可能仍在继续运行')
 }
 
+async function cancelTrainingTask(): Promise<void> {
+  const job = trainJob.value
+  if (!job?.jobId || trainCancelling.value) return
+
+  try {
+    await ElMessageBox.confirm(
+      '将请求 Worker 取消当前训练任务。已完成的训练进度可能丢失，是否继续？',
+      '取消训练任务',
+      { confirmButtonText: '取消任务', cancelButtonText: '继续训练', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+
+  trainCancelling.value = true
+  try {
+    await cancelWorkerJob(job.jobId)
+    ElMessage.success('已提交取消请求，Worker 会在安全点停止任务')
+    const value = await getJob(job.jobId, trainType.value)
+    trainJob.value = value
+    if (value.status === 'Cancelled' || value.status === 'Failed' || value.status === 'Succeeded') {
+      finishTraining(value)
+    }
+  } catch (error) {
+    ElMessage.error(describeLotteryError(error, '取消训练任务失败'))
+  } finally {
+    trainCancelling.value = false
+  }
+}
+
 async function handleSync(): Promise<void> {
   if (syncing.value) return
   syncing.value = true
@@ -369,6 +403,15 @@ onBeforeUnmount(() => {
     >
       <template #actions>
         <el-button :icon="ArrowLeft" @click="router.push('/')">返回工作台</el-button>
+        <el-button
+          type="primary"
+          :icon="Refresh"
+          :loading="syncing"
+          :disabled="loading"
+          @click="handleSync"
+        >
+          同步历史
+        </el-button>
         <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
       </template>
     </NcPageHeader>
@@ -510,6 +553,16 @@ onBeforeUnmount(() => {
       class="training-card"
     >
       <template #actions>
+        <el-button
+          v-if="trainActive && trainJob?.jobId"
+          size="small"
+          type="danger"
+          plain
+          :loading="trainCancelling"
+          @click="cancelTrainingTask"
+        >
+          取消任务
+        </el-button>
         <el-button v-if="trainActive" size="small" @click="cancelTraining">
           取消跟踪
         </el-button>
@@ -590,6 +643,9 @@ onBeforeUnmount(() => {
       </div>
 
       <template #footer>
+        <el-button :icon="MagicStick" :loading="picking" @click="handleQuickPick">
+          再选一组
+        </el-button>
         <el-button type="primary" @click="quickPickVisible = false">知道了</el-button>
       </template>
     </el-dialog>

@@ -26,6 +26,12 @@ deploy.local.ps1
 *.pem
 *.jks
 keystore.props
+# Android signing keys (do not commit)
+
+deploy/keys/*.keystore
+deploy/keys/*.pass
+mobile/android/app/*.keystore
+mobile/android/local.properties
 
 # Runtime
 logs/

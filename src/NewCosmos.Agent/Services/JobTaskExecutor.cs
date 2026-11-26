@@ -3,6 +3,7 @@ using NewCosmos.Constants;
 using NewCosmos.Helpers;
 using NewCosmos.Models.Results;
 using NewCosmos.Services.Core;
+using PrintJobConstants = NewCosmos.Models.Entities.PrintJobConstants;
 
 namespace NewCosmos.Agent.Services;
 
@@ -18,6 +19,7 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
 {
     private readonly ITemplateJobRenderer _renderer;
     private readonly IJobPrinter _printer;
+    private readonly IPhotoJobPrinter _photoPrinter;
     private readonly JobFileStore _files;
     private readonly TemplateCache _templates;
     private readonly ILoggerService _logger;
@@ -37,10 +39,12 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
         string? outputRoot = null,
         IAgentJobClient? jobClient = null,
         string? serverBaseUrl = null,
-        string? deviceKey = null)
+        string? deviceKey = null,
+        IPhotoJobPrinter? photoPrinter = null)
     {
         _renderer = renderer ?? throw new ArgumentNullException(nameof(renderer));
         _printer = printer ?? throw new ArgumentNullException(nameof(printer));
+        _photoPrinter = photoPrinter ?? new PhotoJobPrinter(logger ?? throw new ArgumentNullException(nameof(logger)));
         _files = files ?? throw new ArgumentNullException(nameof(files));
         _templates = templates ?? throw new ArgumentNullException(nameof(templates));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -55,6 +59,10 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
     {
         if (payload == null)
             throw new BusinessException("JOB_PAYLOAD_INVALID", "任务负载为空");
+
+        // 照片任务最优先：没有模板，直接解码图片并按版式打印，不能落到模板/Office 路径。
+        if (IsPhoto(job.JobKind) || IsPhoto(payload.JobKind))
+            return await ExecutePhoto(job, payload, ct).ConfigureAwait(false);
 
         // 批量模板任务优先：一份负载内含多个模板/多页，走独立执行路径。
         if (payload.Batch is not null)
@@ -194,6 +202,29 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
             _files.TryDelete(sourcePath, pdfPath);
             throw;
         }
+    }
+
+    /// <summary>
+    /// 照片任务：Base64 解码 → SkiaSharp 解码/EXIF 正向 → 按版式直接打印。
+    /// 不读模板、不调用 Office COM；照片仅在内存处理，不产生临时文件。
+    /// 日志只写任务号/类别/字节数，不写姓名或身份证号。
+    /// </summary>
+    private Task<string?> ExecutePhoto(AgentJob job, AgentJobPayload payload, CancellationToken ct)
+    {
+        var jobNo = FirstNonEmpty(job.JobNo, $"job-{job.Id}")!;
+        var category = string.IsNullOrWhiteSpace(payload.PhotoCategory) ? "-" : payload.PhotoCategory.Trim();
+        var photoData = DecodePhotoBase64(payload.PhotoDataBase64);
+        var layout = PhotoLayoutMapping.ResolveLayout(payload.PhotoLayout, payload.PhotoCategory);
+        var printerName = FirstNonEmpty(payload.PrinterName, job.PrinterName);
+        var copies = payload.Copies > 0 ? payload.Copies : Math.Max(1, job.Copies);
+
+        _logger.Info($"[JobTask] 照片任务: No={jobNo}, Category={category}, Bytes={photoData.Length}");
+
+        // 照片任务固定单面（IsDuplex=false），版式由 PhotoLayoutMapping 统一映射。
+        _photoPrinter.Print(photoData, layout, payload.PhotoCategory, printerName, copies, jobNo, ct);
+
+        _logger.Info($"[JobTask] 照片打印完成: No={jobNo}, Category={category}, Bytes={photoData.Length}");
+        return Task.FromResult<string?>(null);
     }
 
     /// <summary>名册拆页预览：每页渲染 PDF，合并成一个 PDF 再打开。</summary>
@@ -351,6 +382,29 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
 
     private static bool IsPreview(string? jobKind)
         => string.Equals(jobKind?.Trim(), "Preview", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsPhoto(string? jobKind)
+        => string.Equals(jobKind?.Trim(), PrintJobConstants.JobKindPhoto, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>照片 Base64 解码；错误摘要不包含原始数据，避免把图片内容写进日志/回写。</summary>
+    private static byte[] DecodePhotoBase64(string? base64)
+    {
+        if (string.IsNullOrWhiteSpace(base64))
+            throw new BusinessException("JOB_PAYLOAD_INVALID", "照片任务缺少图片数据（photoDataBase64 为空）");
+
+        try
+        {
+            var bytes = Convert.FromBase64String(base64);
+            if (bytes.Length == 0)
+                throw new BusinessException("JOB_PAYLOAD_INVALID", "照片数据为空");
+
+            return bytes;
+        }
+        catch (FormatException ex)
+        {
+            throw new BusinessException("JOB_PAYLOAD_INVALID", "照片 Base64 数据损坏，无法解码", ex);
+        }
+    }
 
     private static byte[] DecodeBase64(string base64)
     {

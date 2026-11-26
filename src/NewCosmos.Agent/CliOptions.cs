@@ -214,12 +214,12 @@ public sealed class CliOptions
     public static void PrintUsage()
     {
         Console.WriteLine("""
-NewCosmos.Agent — Windows 固定 PC 的 Office/打印代理（P0）
+NewCosmos.Agent — Windows 固定 PC 的文档/照片打印代理
 
 用法:
   NewCosmos.Agent.exe [命令] [选项]
 
-命令（缺省 = tray：托盘 + 心跳 + 任务轮询）:
+命令（缺省 = tray：托盘 + 心跳 + 任务轮询；托盘模式不弹控制台）:
   --tray                托盘模式（缺省）：托盘图标 + 心跳 + 任务轮询
   --register            用一次性注册令牌注册本机（可选；通常直接用 --bind-code 自动注册）
   --heartbeat           心跳 + 任务轮询并行（控制台，Ctrl+C 退出）
@@ -266,7 +266,9 @@ NewCosmos.Agent — Windows 固定 PC 的 Office/打印代理（P0）
     Agent 会自动注册本机、保存设备密钥并完成打印机绑定，无需注册令牌。
   - 仓库/源码不包含任何密码或令牌；注册令牌只从环境变量/配置文件/命令行读取。
   - deviceKey 默认 DPAPI(CurrentUser) 加密；DPAPI 不可用时降级为当前用户 ACL 文件并记警告。
-  - worker 轮询 /api/agent/jobs/*：Preview 任务用默认 PDF 阅读器打开；其他任务渲染 PDF 并打印。
+  - worker 轮询 /api/agent/jobs/*：Preview 任务用默认 PDF 阅读器打开；模板任务渲染 PDF 并打印；
+    Photo 任务按 photoLayout（整页/半页/证件原寸）直接打印照片，不走 Office。
+  - CLI 从控制台启动会附着父控制台；从资源管理器双击且参数错误时用 MessageBox 提示。
   - 打印与渲染依赖 Windows + Microsoft Office 桌面版；Linux 服务端不运行 Agent。
 """);
     }

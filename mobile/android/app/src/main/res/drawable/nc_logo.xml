@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+
+    <!-- 外环 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M48,10 A38,38 0 1 1 47.99,10 Z"
+        android:strokeColor="#D9B45B"
+        android:strokeWidth="3" />
+
+    <!-- 权杖杆 -->
+    <path
+        android:fillColor="#D9B45B"
+        android:pathData="M45,27 L51,27 L51,70 L45,70 Z" />
+
+    <!-- 杖首圆球 -->
+    <path
+        android:fillColor="#D9B45B"
+        android:pathData="M48,17 m-7,0 a7,7 0 1 0 14,0 a7,7 0 1 0 -14,0 Z" />
+
+    <!-- 横饰 -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M37,39 L59,39"
+        android:strokeColor="#D9B45B"
+        android:strokeWidth="4"
+        android:strokeLineCap="round" />
+
+    <!-- 底座 -->
+    <path
+        android:fillColor="#D9B45B"
+        android:pathData="M48,69 L56,77 L48,85 L40,77 Z" />
+</vector>

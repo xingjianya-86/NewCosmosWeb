@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      仅 debug 构建生效（src/debug 覆盖 src/main 的同名资源）。
+      联调时允许 http://NC_MOBILE_URL（局域网/本机）加载页面与接口；
+      Release 构建始终使用 src/main 的禁止明文配置。
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

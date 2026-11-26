@@ -12,3 +12,18 @@
 
 # dotnet publish / 手工构建产物
 **/publish/
+
+# 代码签名证书/私钥（Windows PFX、Android keystore、密码文件等，绝不入库）
+keys/*
+
+# WebView2 等离线安装包缓存（大文件）
+installer/cache/*
+!installer/cache/README.md
+
+# 生成的更新清单（只提交 .example）
+update/latest.json
+update/latest.json.sig
+android/latest.json
+android/latest.json.sig
+android/latest.debug.json
+android/latest.debug.json.sig

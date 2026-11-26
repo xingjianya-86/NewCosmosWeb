@@ -775,6 +775,39 @@ public static class PrintJobEndpoints
             return await BuildBatchPayloadAsync(context, job, queue, ct);
         }
 
+        // 照片任务：没有模板，图片字节直接放在 photo_data；Agent 按 photoLayout 渲染后送打印机。
+        if (string.Equals(job.JobKind, PrintJobConstants.JobKindPhoto, StringComparison.Ordinal))
+        {
+            if (job.PhotoData is not { Length: > 0 })
+            {
+                return ApiErrors.Write(context, StatusCodes.Status409Conflict,
+                    "PHOTO_DATA_EMPTY", "照片任务缺少图片数据");
+            }
+
+            return Results.Json(new AgentJobPayloadResponse(
+                null,
+                string.Empty,
+                "photo",
+                new Dictionary<string, string>(StringComparer.Ordinal),
+                [],
+                job.JobKind,
+                job.PrinterName,
+                job.Copies,
+                false,
+                job.ApplicantName,
+                job.ApplicantIdCard,
+                null,
+                null,
+                null,
+                null,
+                [],
+                false,
+                null,
+                Convert.ToBase64String(job.PhotoData),
+                job.PhotoLayout,
+                job.PhotoCategory));
+        }
+
         if (job.TemplateId is not > 0)
         {
             return InvalidRequest(context, "任务缺少模板 ID");
@@ -1604,6 +1637,7 @@ public sealed record AgentJobItem(
 /// templateConfigJson 为附加字段：Agent 用它把 FieldKeys 映射到模板占位符（否则无法正确渲染）。
 /// templateHash + images 供 Agent 本地模板缓存与照片内嵌（images.placeholder 与 config 一致）。
 /// cached=true 表示按 Agent 上报的 cachedTemplateHash 命中缓存，此时 templateFileBase64 为 null。
+/// photoDataBase64/photoLayout/photoCategory 仅 JobKind=Photo 时有值（照片任务无模板）。
 /// </summary>
 public sealed record AgentJobPayloadResponse(
     [property: System.Text.Json.Serialization.JsonIgnore(
@@ -1625,7 +1659,16 @@ public sealed record AgentJobPayloadResponse(
     string? TemplateHash,
     IReadOnlyList<PrintImagePayload> Images,
     bool Cached,
-    AgentBatchPayload? Batch);
+    AgentBatchPayload? Batch,
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? PhotoDataBase64 = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? PhotoLayout = null,
+    [property: System.Text.Json.Serialization.JsonIgnore(
+        Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? PhotoCategory = null);
 
 /// <summary>
 /// GET /api/agent/jobs/{id}/payload 批量任务段（JobKind=TemplateBatch）。

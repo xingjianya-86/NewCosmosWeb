@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -9,7 +9,7 @@
     <AssemblyName>NewCosmos.Agent</AssemblyName>
     <LangVersion>latest</LangVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <!-- 托盘图标需要 WinForms；保持 OutputType=Exe，控制台输出仍由 Console 负责（worker 模式纯控制台）。 -->
+    <!-- WinExe：桌面双击不弹控制台；CLI 由 ConsoleHost 在检测到父控制台时附着并重绑 stdout/stderr。 -->
     <UseWindowsForms>true</UseWindowsForms>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest</AnalysisLevel>

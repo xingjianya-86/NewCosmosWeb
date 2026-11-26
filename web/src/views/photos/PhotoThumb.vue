@@ -1,15 +1,18 @@
 <script setup lang="ts">
-import { usePhotoContent } from './usePhotoContent'
+import { type PhotoContentSource, usePhotoContent } from './usePhotoContent'
 
 const props = withDefaults(
   defineProps<{
     photoId: number
     alt?: string
     fit?: 'cover' | 'contain'
+    /** 取图来源：正式照片 / 待归属照片池。 */
+    source?: PhotoContentSource
   }>(),
   {
     alt: '照片',
     fit: 'cover',
+    source: 'photo',
   },
 )
 
@@ -17,7 +20,7 @@ const emit = defineEmits<{
   (event: 'open'): void
 }>()
 
-const { src, loading, error, reload } = usePhotoContent(() => props.photoId)
+const { src, loading, error, reload } = usePhotoContent(() => props.photoId, props.source)
 
 function open(): void {
   emit('open')

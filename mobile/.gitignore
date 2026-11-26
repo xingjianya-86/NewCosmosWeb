@@ -1,0 +1,18 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Capacitor / Android build output
+android/.gradle/
+android/build/
+android/app/build/
+android/capacitor-cordova-android-plugins/build/
+android/local.properties
+android/app/release/
+android/app/debug/
+*.apk
+*.aab
+*.idsig
+
+# Local sync state
+.cap/

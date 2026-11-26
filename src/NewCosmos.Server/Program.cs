@@ -103,7 +103,7 @@ builder.Services.Configure<RouteHandlerOptions>(options => options.ThrowOnBadReq
 // Core 服务：数据库、日志、会话、用户。
 builder.Services.AddSingleton<ILoggerService, LoggerService>();
 builder.Services.AddSingleton<ISessionGuard, RequestSessionGuard>();
-builder.Services.AddSingleton<ISchemaSyncService, NoopSchemaSyncService>();
+builder.Services.AddSingleton<ISchemaSyncService, ServerSchemaSyncService>();
 builder.Services.AddSingleton<PostgreSqlDatabaseService>();
 builder.Services.AddSingleton<IDatabaseService>(
     provider => provider.GetRequiredService<PostgreSqlDatabaseService>());
@@ -203,6 +203,8 @@ builder.Services.AddScoped<ArchivePhotoService>();
 // 照片中心：跨四业务域的照片补全/查询/导出/打印（Core 版照片服务，与上面 Server 旧照片服务并存）。
 builder.Services.AddScoped<NewCosmos.Services.Domain.ArchiveManagement.IArchivePhotoService,
     NewCosmos.Services.Domain.ArchiveManagement.ArchivePhotoService>();
+builder.Services.AddScoped<NewCosmos.Services.Domain.ArchiveManagement.IArchivePhotoPendingService,
+    NewCosmos.Services.Domain.ArchiveManagement.ArchivePhotoPendingService>();
 builder.Services.AddScoped<PhotoPrintService>();
 builder.Services.AddScoped<TemplateAdminService>();
 builder.Services.AddScoped<PublicityService>();

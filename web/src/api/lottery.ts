@@ -9,9 +9,12 @@ import type {
   LotteryPurchasePage,
   LotteryPurchaseRecord,
   LotteryPurchaseSummary,
+  LotterySummary,
   LotterySyncResult,
   LotteryType,
   LotteryVerification,
+  LotteryWorkerHealth,
+  LotteryWorkerModel,
 } from '@/types/lottery'
 import { lotteryPrizeLevelLabel } from '@/types/lottery'
 import { ApiError, apiHttp, getErrorMessage } from './http'
@@ -93,6 +96,11 @@ function toPercent(value: unknown): number {
 
 function toProgress(value: unknown): number {
   return Math.round(toPercent(value) * 10) / 10
+}
+
+/** 策略契合度：服务端契约固定为 0-100，不能套用 0-1 小数的进度口径。 */
+function toConfidence(value: unknown): number {
+  return Math.min(100, Math.max(0, toNumber(value)))
 }
 
 /** 同时查看根对象与 data 包裹层；取第一个非空字段。 */
@@ -213,6 +221,40 @@ export function getDrawCount(type: LotteryType): Promise<number> {
   })
 }
 
+function normalizePurchaseSummaryFrom(value: unknown): LotteryPurchaseSummary {
+  const allLayers = layers(value)
+  return {
+    totalCount: toNumber(pick(allLayers, ['totalCount', 'total'])),
+    hitCount: toNumber(pick(allLayers, ['hitCount', 'hit'])),
+    pendingCount: toNumber(pick(allLayers, ['pendingCount', 'pending'])),
+    totalPrizeAmount: toNumber(pick(allLayers, ['totalPrizeAmount', 'prizeAmount'])),
+    bestPrizeLevel: toNumber(pick(allLayers, ['bestPrizeLevel'])),
+    bestPrizeDescription: toText(pick(allLayers, ['bestPrizeDescription'])),
+  }
+}
+
+/** 首屏汇总：最新开奖 + 历史期数 + 最近开奖 + 购彩统计（一次请求）。 */
+export function getSummary(type: LotteryType): Promise<LotterySummary> {
+  return apiHttp
+    .get<unknown>('/lottery/summary', { params: { type } })
+    .then((response) => {
+      const allLayers = layers(response.data)
+      const latestRaw = pick(allLayers, ['latestDraw', 'latest'])
+      const recentRaw = pickArray(response.data, ['recentDraws', 'recent', 'draws'])
+
+      return {
+        latestDraw: latestRaw ? normalizeDraw(latestRaw) : null,
+        drawCount: toNumber(pick(allLayers, ['drawCount', 'total', 'count'])),
+        recentDraws: recentRaw
+          .map(normalizeDraw)
+          .filter((item): item is LotteryDraw => item !== null),
+        purchaseSummary: normalizePurchaseSummaryFrom(
+          pick(allLayers, ['purchaseSummary', 'summary']) ?? {},
+        ),
+      }
+    })
+}
+
 function normalizeVerification(value: unknown): LotteryVerification | null {
   const raw = asRecord(value)
   if (!raw) return null
@@ -231,7 +273,7 @@ function normalizeVerification(value: unknown): LotteryVerification | null {
 /** 增量同步开奖数据；同步完成后后端会顺带验证购彩记录。 */
 export function syncHistory(type: LotteryType): Promise<LotterySyncResult> {
   // 首次全量同步可能较慢，单独放宽超时；其它接口沿用全局 20 秒。
-  return apiHttp.post<unknown>('/lottery/sync', { type }, { timeout: 120_000 }).then((response) => {
+  return apiHttp.post<unknown>('/lottery/sync-history', { type }, { timeout: 120_000 }).then((response) => {
     const allLayers = layers(response.data)
     const rawVerification = pick(allLayers, ['verification', 'verifyResult', 'verificationSummary'])
     return {
@@ -254,7 +296,7 @@ function normalizePrediction(value: unknown): LotteryPrediction | null {
   return {
     redNumbers,
     blueNumbers,
-    confidence: toPercent(raw.confidence ?? raw.confidenceScore ?? raw.score),
+    confidence: toConfidence(raw.confidence ?? raw.confidenceScore ?? raw.score),
     algorithm: toText(raw.algorithm),
     algorithmName: toText(raw.algorithmName ?? raw.algorithm) || '机器学习(LSTM)',
   }
@@ -279,23 +321,73 @@ function extractPredictions(value: unknown): LotteryPrediction[] {
 /** 快速机选（不入库，仅返回一组号码）。 */
 export function quickPick(type: LotteryType, count = 1): Promise<LotteryPrediction[]> {
   return apiHttp
-    .post<unknown>('/lottery/quick-pick', { type, count })
+    .get<unknown>('/lottery/quick-pick', { params: { type, count } })
     .then((response) => extractPredictions(response.data))
 }
 
-/** 模型状态：未就绪时前端应先引导用户去训练。 */
+/** Worker 彩种编码：SSQ/DLT → ssq/dlt。 */
+function toWorkerType(type: LotteryType): 'ssq' | 'dlt' {
+  return type === 'DLT' ? 'dlt' : 'ssq'
+}
+
+/** 模型状态：直接读取 Worker /models，未就绪时前端应先引导用户去训练。 */
 export function getModelStatus(type: LotteryType): Promise<LotteryModelStatus> {
-  return apiHttp
-    .get<unknown>('/lottery/model-status', { params: { type } })
-    .then((response) => {
-      const allLayers = layers(response.data)
-      const trainedAt = toText(pick(allLayers, ['trainedAt', 'trainedTime']))
-      return {
-        ready: toBool(pick(allLayers, ['ready', 'isReady', 'available'])),
-        window: toNumber(pick(allLayers, ['window', 'lookbackWindow']), 73),
-        trainedAt: trainedAt || null,
-      }
-    })
+  return apiHttp.get<unknown>('/lottery/worker/models').then((response) => {
+    const workerType = toWorkerType(type)
+    const models = pickArray(response.data, ['models'])
+      .map(asRecord)
+      .filter((item): item is Record<string, unknown> => item !== null)
+      .filter((item) => {
+        const rawType = toText(item.lotteryType).toLowerCase()
+        return rawType === workerType || rawType === type.toLowerCase()
+      })
+
+    const model =
+      models.find((item) => toNumber(item.window) === 73) ??
+      models.sort((a, b) =>
+        toText(b.trainedAt).localeCompare(toText(a.trainedAt)),
+      )[0]
+
+    return {
+      ready: Boolean(model),
+      window: toNumber(model?.window, 73),
+      trainedAt: toText(model?.trainedAt) || null,
+    }
+  })
+}
+
+/** Worker 原始模型清单（诊断/管理用）。 */
+export function getWorkerModels(): Promise<LotteryWorkerModel[]> {
+  return apiHttp.get<unknown>('/lottery/worker/models').then((response) =>
+    pickArray(response.data, ['models'])
+      .map((item) => {
+        const raw = asRecord(item)
+        if (!raw) return null
+        return {
+          lotteryType: toText(raw.lotteryType),
+          window: toNumber(raw.window),
+          trainedAt: toText(raw.trainedAt) || null,
+        } satisfies LotteryWorkerModel
+      })
+      .filter((item): item is LotteryWorkerModel => item !== null),
+  )
+}
+
+/** Worker 健康检查（队列/依赖/内存限制）。 */
+export function getWorkerHealth(): Promise<LotteryWorkerHealth> {
+  return apiHttp.get<unknown>('/lottery/worker/health').then((response) => {
+    const raw = asRecord(response.data) ?? {}
+    return {
+      status: toText(raw.status) || 'unknown',
+      service: toText(raw.service),
+      version: toText(raw.version),
+      missingDependencies: Array.isArray(raw.missingDependencies)
+        ? raw.missingDependencies.map((item) => toText(item)).filter(Boolean)
+        : [],
+      queue: asRecord(raw.queue) ?? {},
+      limits: asRecord(raw.limits) ?? {},
+    }
+  })
 }
 
 /* ───────────────────────── 任务 ───────────────────────── */
@@ -403,30 +495,51 @@ function normalizeJob(value: unknown): LotteryJob {
   }
 }
 
-/** 训练入队。训练可能持续数十分钟，调用方需轮询 getJob。 */
+/** 训练入队。body 按 Worker 契约原样提交（Server 不做改写）。 */
 export function enqueueTrain(type: LotteryType): Promise<LotteryJob> {
   return apiHttp
-    .post<unknown>('/lottery/train', { type })
+    .post<unknown>('/lottery/worker/jobs/train', { lotteryType: toWorkerType(type) })
     .then((response) => normalizeJob(response.data))
 }
 
-/** 预测入队。成功后后端自动写入购彩记录。 */
+/** 预测入队。成功后后端在任务详情轮询时自动写入购彩记录。 */
 export function enqueuePredict(type: LotteryType, count: number): Promise<LotteryJob> {
   return apiHttp
-    .post<unknown>('/lottery/predict', { type, count })
+    .post<unknown>('/lottery/worker/jobs/predict', {
+      lotteryType: toWorkerType(type),
+      count,
+    })
     .then((response) => normalizeJob(response.data))
 }
 
 /** 查询任务状态；训练/预测页面按固定间隔轮询。 */
 export function getJob(jobId: string, type?: LotteryType): Promise<LotteryJob> {
   return apiHttp
-    .get<unknown>(`/lottery/jobs/${encodeURIComponent(jobId)}`, {
+    .get<unknown>(`/lottery/worker/jobs/${encodeURIComponent(jobId)}`, {
       params: type ? { type } : undefined,
     })
     .then((response) => {
       const job = normalizeJob(response.data)
       return job.jobId ? job : { ...job, jobId }
     })
+}
+
+/** Worker 任务列表（倒序，默认 50 条）。 */
+export function listWorkerJobs(limit = 50): Promise<LotteryJob[]> {
+  return apiHttp
+    .get<unknown>('/lottery/worker/jobs', { params: { limit } })
+    .then((response) =>
+      pickArray(response.data, ['items', 'jobs'])
+        .map(normalizeJob)
+        .filter((job) => Boolean(job.jobId)),
+    )
+}
+
+/** 取消排队中/运行中的 Worker 任务。 */
+export function cancelWorkerJob(jobId: string): Promise<void> {
+  return apiHttp
+    .post<unknown>(`/lottery/worker/jobs/${encodeURIComponent(jobId)}/cancel`)
+    .then(() => undefined)
 }
 
 /* ───────────────────────── 购彩记录 ───────────────────────── */

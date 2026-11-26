@@ -2,13 +2,20 @@
 import { computed } from 'vue'
 import type { PhotoRecord } from '@/types/photos'
 import { useMediaQuery } from '@/composables/useMediaQuery'
-import { usePhotoContent } from './usePhotoContent'
+import { type PhotoContentSource, usePhotoContent } from './usePhotoContent'
 import { FALLBACK_PHOTO_CATEGORIES, categoryLabelFrom, displayPhotoName, formatDateTimeText, formatFileSize } from './photoMeta'
 
-const props = defineProps<{
-  modelValue: boolean
-  photo: PhotoRecord | null
-}>()
+const props = withDefaults(
+  defineProps<{
+    modelValue: boolean
+    photo: PhotoRecord | null
+    /** 取图来源：正式照片 / 待归属照片池。 */
+    source?: PhotoContentSource
+  }>(),
+  {
+    source: 'photo',
+  },
+)
 
 const emit = defineEmits<{
   (event: 'update:modelValue', value: boolean): void
@@ -21,8 +28,9 @@ const visible = computed({
   set: (value: boolean) => emit('update:modelValue', value),
 })
 
-const { src, loading, error, reload } = usePhotoContent(() =>
-  props.modelValue && props.photo ? props.photo.id : null,
+const { src, loading, error, reload } = usePhotoContent(
+  () => (props.modelValue && props.photo ? props.photo.id : null),
+  props.source,
 )
 
 const title = computed(() => (props.photo ? displayPhotoName(props.photo) : '照片预览'))

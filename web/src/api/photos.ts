@@ -5,6 +5,11 @@ import type {
   PhotoCategory,
   PhotoOcrResult,
   PhotoPage,
+  PhotoPendingAssignInput,
+  PhotoPendingAssignResult,
+  PhotoPendingItem,
+  PhotoPendingPage,
+  PhotoPendingQuery,
   PhotoPrintFailure,
   PhotoPrintInput,
   PhotoPrintResult,
@@ -325,6 +330,98 @@ export function recognizePhotoIdCard(file: File): Promise<PhotoOcrResult> {
 export function deletePhoto(id: number): Promise<void> {
   return apiHttp
     .delete(`/photos/${encodeURIComponent(String(id))}`)
+    .then(() => undefined)
+}
+
+/* ───────────────────────── 待归属照片池 ───────────────────────── */
+
+function normalizePendingPhoto(value: unknown): PhotoPendingItem | null {
+  const raw = asRecord(value)
+  if (!raw) return null
+
+  const id = toNullableNumber(raw.id ?? raw.pendingId ?? raw.pending_id)
+  if (id === null) return null
+
+  return {
+    id,
+    category: toText(raw.category ?? raw.photoCategory).trim(),
+    categoryLabel: toText(raw.categoryName ?? raw.photoCategoryName ?? raw.categoryLabel).trim(),
+    photoName: toText(raw.photoName ?? raw.name ?? raw.fileName).trim(),
+    fileSize: Math.max(0, toNumber(raw.fileSize ?? raw.size)),
+    imageFormat: toText(raw.imageFormat ?? raw.format).trim(),
+    recognizedName: toText(raw.recognizedName ?? raw.recognisedName).trim(),
+    recognizedIdCard: toText(raw.recognizedIdCard ?? raw.recognisedIdCard).trim(),
+    source: toText(raw.source).trim(),
+    createdAt: toText(raw.createdAt).trim(),
+    createdByName: toText(raw.createdByName ?? raw.uploadedBy).trim(),
+  }
+}
+
+/** 待归属照片分页（ARCHIVE_VIEW）；不含图片二进制，缩略图走 getPendingPhotoContent。 */
+export function listPendingPhotos(params: PhotoPendingQuery = {}): Promise<PhotoPendingPage> {
+  const page = params.page ?? 1
+  const pageSize = params.pageSize ?? 20
+  return apiHttp
+    .get<unknown>('/photos/pending', { params: { page, pageSize } })
+    .then((response) => {
+      const pageData = unwrapPage(response.data, page, pageSize)
+      const root = asRecord(response.data)
+      const nested = root ? asRecord(root.data) : null
+      const source = nested ?? root
+      return {
+        items: pageData.items
+          .map(normalizePendingPhoto)
+          .filter((item): item is PhotoPendingItem => item !== null),
+        total: pageData.total,
+        page: pageData.page,
+        pageSize: pageData.pageSize,
+        available: toBooleanOrNull(source?.available) ?? true,
+        message: toText(source?.message).trim() || undefined,
+      }
+    })
+}
+
+/** 待归属照片原图内容（Blob）；预览/缩略图用。 */
+export function getPendingPhotoContent(id: number, signal?: AbortSignal): Promise<Blob> {
+  return apiHttp
+    .get<Blob>(`/photos/pending/${encodeURIComponent(String(id))}/content`, {
+      responseType: 'blob',
+      signal,
+      timeout: 60_000,
+    })
+    .then((response) => response.data)
+}
+
+/** 归属待归属照片到已建档人员（ARCHIVE_MANAGE）：写正式照片档案并移出待归属池。 */
+export function assignPendingPhoto(
+  id: number,
+  input: PhotoPendingAssignInput,
+): Promise<PhotoPendingAssignResult> {
+  const body: Record<string, unknown> = { idCard: input.idCard.trim() }
+  if (input.name?.trim()) body.name = input.name.trim()
+  if (input.category?.trim()) body.category = input.category.trim()
+  if (input.applicationId !== undefined && input.applicationId !== null) {
+    body.applicationId = input.applicationId
+  }
+
+  return apiHttp
+    .post<unknown>(`/photos/pending/${encodeURIComponent(String(id))}/assign`, body, {
+      timeout: 120_000,
+    })
+    .then((response) => {
+      const raw = asRecord(response.data) ?? {}
+      return {
+        id: toNumber(raw.id ?? raw.photoId),
+        photoName: toText(raw.photoName).trim(),
+        fileSize: toNumber(raw.fileSize),
+      }
+    })
+}
+
+/** 删除待归属照片（ARCHIVE_MANAGE）。 */
+export function deletePendingPhoto(id: number): Promise<void> {
+  return apiHttp
+    .delete(`/photos/pending/${encodeURIComponent(String(id))}`)
     .then(() => undefined)
 }
 

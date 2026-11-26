@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="colorPrimary">#AB3227</color>
+    <color name="colorPrimaryDark">#8A241B</color>
+    <color name="colorAccent">#D9B45B</color>
+
+    <color name="nc_brand">#AB3227</color>
+    <color name="nc_brand_dark">#8A241B</color>
+    <color name="nc_gold">#D9B45B</color>
+    <color name="nc_window_bg">#F4F6FA</color>
+    <color name="nc_splash_bg">#0B1220</color>
+    <color name="nc_ink">#16233C</color>
+    <color name="nc_muted">#5C6B82</color>
+</resources>

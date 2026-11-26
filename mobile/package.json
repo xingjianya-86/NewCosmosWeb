@@ -1,0 +1,21 @@
+{
+  "name": "newcosmos-mobile",
+  "version": "2.0.20261126",
+  "private": true,
+  "description": "NewCosmos Android shell - Capacitor WebView wrapper around the existing Vue web app",
+  "scripts": {
+    "sync": "cap sync android",
+    "open:android": "cap open android",
+    "build:debug": "cap sync android && cd android && gradlew.bat assembleDebug",
+    "build:release": "cap sync android && cd android && gradlew.bat assembleRelease"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.6.3",
+    "@capacitor/core": "^8.6.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.6.3",
+    "@types/node": "^22.10.2",
+    "typescript": "~5.7.2"
+  }
+}

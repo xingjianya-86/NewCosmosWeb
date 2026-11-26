@@ -103,14 +103,42 @@ public sealed record PhotoPrintResponse(
     IReadOnlyList<string> JobNos,
     IReadOnlyList<string> Failures);
 
-/// <summary>待归属照片（照片中心可选模块；服务未移植时 available=false）。</summary>
+/// <summary>
+/// 待归属照片行：身份证未定先存池，列表只返回元数据（图片走 /api/photos/pending/{id}/content）。
+/// <see cref="RecognizedName"/> / <see cref="RecognizedIdCard"/> 为 OCR 识别结果，可空。
+/// </summary>
+public sealed record PhotoPendingItemDto(
+    long Id,
+    string Category,
+    string CategoryName,
+    string? PhotoName,
+    long FileSize,
+    string ImageFormat,
+    string? RecognizedName,
+    string? RecognizedIdCard,
+    string? Source,
+    DateTime CreatedAt,
+    string? CreatedByName);
+
+/// <summary>待归属照片分页响应。<see cref="Available"/> 保留兼容旧前端探测（现已恒为 true）。</summary>
 public sealed record PhotoPendingResponse(
-    IReadOnlyList<PhotoListItemDto> Items,
+    IReadOnlyList<PhotoPendingItemDto> Items,
     int PageIndex,
     int PageSize,
     long TotalCount,
+    int TotalPages,
     bool Available,
-    string Message);
+    string? Message);
+
+/// <summary>
+/// 待归属照片归属请求：身份证必填（须已在四类业务档案中），
+/// 姓名/类别/申请 ID 可选覆盖待归属记录原值。
+/// </summary>
+public sealed record PhotoPendingAssignRequest(
+    string? IdCard,
+    string? Name,
+    string? Category,
+    long? ApplicationId);
 
 public sealed record PhotoCategoryOptionDto(string Code, string Name);
 

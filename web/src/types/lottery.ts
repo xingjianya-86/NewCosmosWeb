@@ -81,6 +81,14 @@ export interface LotteryDrawPage {
   pageSize: number
 }
 
+/** GET /api/lottery/summary：首屏一次取回最新开奖、期数、最近列表和购彩统计。 */
+export interface LotterySummary {
+  latestDraw: LotteryDraw | null
+  drawCount: number
+  recentDraws: LotteryDraw[]
+  purchaseSummary: LotteryPurchaseSummary
+}
+
 export interface LotteryVerification {
   totalVerified: number
   hitCount: number
@@ -145,6 +153,23 @@ export interface LotteryModelStatus {
   ready: boolean
   window: number
   trainedAt: string | null
+}
+
+/** GET /api/lottery/worker/models 的元素（Worker 原始契约）。 */
+export interface LotteryWorkerModel {
+  lotteryType: string
+  window: number
+  trainedAt: string | null
+}
+
+/** GET /api/lottery/worker/health 的常用字段；其余原始字段保留在 queue/limits。 */
+export interface LotteryWorkerHealth {
+  status: string
+  service: string
+  version: string
+  missingDependencies: string[]
+  queue: Record<string, unknown>
+  limits: Record<string, unknown>
 }
 
 export interface LotteryJob {

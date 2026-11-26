@@ -1,144 +1,210 @@
-using System.Text;
-using NewCosmos.Agent;
 using NewCosmos.Agent.Configuration;
 using NewCosmos.Agent.Services;
+using NewCosmos.Services.Core;
 
 namespace NewCosmos.Agent;
 
 internal static class Program
 {
     /// <summary>
-    /// 入口保持 STA（WinForms 托盘/通知气泡要求）：
-    /// 托盘模式下 Application.Run 之前不做任何 await，确保消息循环跑在 STA 线程上。
+    /// 入口保持 STA（WinForms 托盘/通知气泡要求）。
+    /// 托盘模式下 Application.Run 之前不做任何 await，确保消息循环跑在 STA 线程上；
+    /// CLI 模式同步等待异步命令完成，输出由 <see cref="ConsoleHost"/> 负责。
     /// </summary>
     [STAThread]
-    private static async Task<int> Main(string[] args)
+    private static int Main(string[] args)
     {
-        try
-        {
-            Console.OutputEncoding = Encoding.UTF8;
-        }
-        catch (Exception)
-        {
-            // 某些重定向/无控制台环境不支持切换编码——继续用默认编码
-        }
-
-        if (!CliOptions.TryParse(args, out var options, out var parseError))
-        {
-            AgentConsole.Error(parseError ?? "参数解析失败");
-            CliOptions.PrintUsage();
-            return 2;
-        }
-
-        if (options.Help)
-        {
-            CliOptions.PrintUsage();
-            return 0;
-        }
-
-        if (options.ShowVersion)
-        {
-            Console.WriteLine($"NewCosmos.Agent {AgentRuntime.Version}");
-            return 0;
-        }
-
-        if (options.Command is "install-autostart" or "uninstall-autostart")
-        {
-            return RunAutoStartCommand(options);
-        }
-
-        var configPath = AgentConfigStore.ResolvePath(options.ConfigPath);
-        var logger = AgentRuntime.CreateLogger();
-        using var loggerScope = logger as IDisposable;
+        ILoggerService? logger = null;
 
         try
         {
-            var settings = AgentConfigStore.Load(configPath, logger);
-            ApplyOverrides(settings, options);
-            settings.Normalize(configPath);
-
-            using var cts = new CancellationTokenSource();
-            Console.CancelKeyPress += (_, eventArgs) =>
+            if (!CliOptions.TryParse(args, out var options, out var parseError))
             {
-                eventArgs.Cancel = true;
-                AgentConsole.Warn("收到 Ctrl+C，正在停止...");
-                try { cts.Cancel(); } catch { /* 忽略 */ }
-            };
-
-            using var client = new HttpAgentClient(AgentRuntime.Version);
-
-            if (options.Command == "tray")
-            {
-                // 缺省模式：托盘 + 心跳 + 任务轮询（托盘退出时取消后台循环）。
-                // 注意：此处不能先 await，否则 Application.Run 可能离开 STA 线程。
-                System.Windows.Forms.Application.EnableVisualStyles();
-                using var tray = new TrayApplicationContext(settings, configPath, client, logger, cts);
-                System.Windows.Forms.Application.Run(tray);
-
-                var exitCode = 0;
-                try
-                {
-                    exitCode = await tray.Completion.ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // 用户退出：后台循环被取消属正常
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError(ex, "[Agent] 托盘后台循环异常退出");
-                    exitCode = 1;
-                }
-
-                return exitCode;
+                ConsoleHost.Initialize(cliMode: true);
+                AgentConsole.Error(parseError ?? "参数解析失败");
+                CliOptions.PrintUsage();
+                return 2;
             }
 
-            switch (options.Command)
+            if (options.Help)
             {
-                case "register":
-                    return await RegistrationRunner.RunAsync(settings, configPath, client, logger, cts.Token);
+                ConsoleHost.Initialize(cliMode: true);
+                CliOptions.PrintUsage();
+                return 0;
+            }
 
-                case "heartbeat-once":
-                    return await HeartbeatRunner.RunAsync(settings, configPath, client, once: true, logger, cts.Token);
+            if (options.ShowVersion)
+            {
+                ConsoleHost.Initialize(cliMode: true);
+                Console.WriteLine($"NewCosmos.Agent {AgentRuntime.Version}");
+                return 0;
+            }
 
-                case "heartbeat":
-                    // 控制台并行模式：心跳与任务轮询并行；任一退出即全部停止。
-                    return await AgentServiceRunner.RunHeartbeatAndWorkerAsync(
-                        settings, configPath, client, client, logger, cts);
+            if (options.Command is "install-autostart" or "uninstall-autostart")
+            {
+                ConsoleHost.Initialize(cliMode: true);
+                return RunAutoStartCommand(options);
+            }
 
-                case "worker":
-                    return await WorkerRunner.RunAsync(settings, configPath, client, logger, cts.Token);
+            var isTray = options.Command == "tray";
+            ConsoleHost.Initialize(cliMode: !isTray);
 
-                case "printers":
-                    return PrintPrinters(logger);
+            var configPath = AgentConfigStore.ResolvePath(options.ConfigPath);
+            logger = AgentRuntime.CreateLogger();
+            using var loggerScope = logger as IDisposable;
 
-                case "bind-code":
-                    return await PrinterBindRunner.RunCliAsync(
-                        settings, configPath, client, options.BindCode, logger, cts.Token);
+            try
+            {
+                var settings = AgentConfigStore.Load(configPath, logger);
+                ApplyOverrides(settings, options);
+                settings.Normalize(configPath);
 
-                case "probe-office":
-                    return ProbeOffice(logger);
+                using var cts = new CancellationTokenSource();
 
-                case "render":
-                    return await TemplateRenderService.RunAsync(
-                        options.Template ?? string.Empty,
-                        options.Data ?? string.Empty,
-                        options.Out ?? string.Empty,
-                        logger,
-                        cts.Token);
+                // 只有真正附着控制台时才注册 Ctrl+C；托盘/双击模式没有控制台信号。
+                if (ConsoleHost.HasConsole)
+                {
+                    Console.CancelKeyPress += (_, eventArgs) =>
+                    {
+                        eventArgs.Cancel = true;
+                        AgentConsole.Warn("收到 Ctrl+C，正在停止...");
+                        try { cts.Cancel(); } catch { /* 忽略 */ }
+                    };
+                }
 
-                default:
-                    AgentConsole.Error($"未知命令: {options.Command}");
-                    CliOptions.PrintUsage();
-                    return 2;
+                using var client = new HttpAgentClient(AgentRuntime.Version);
+
+                if (isTray)
+                {
+                    // 缺省模式：托盘 + 心跳 + 任务轮询（托盘退出时取消后台循环）。
+                    System.Windows.Forms.Application.EnableVisualStyles();
+                    using var tray = new TrayApplicationContext(settings, configPath, client, logger, cts);
+                    System.Windows.Forms.Application.Run(tray);
+
+                    var exitCode = 0;
+                    try
+                    {
+                        exitCode = tray.Completion.ConfigureAwait(false).GetAwaiter().GetResult();
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // 用户退出：后台循环被取消属正常
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "[Agent] 托盘后台循环异常退出");
+                        exitCode = 1;
+                    }
+
+                    return exitCode;
+                }
+
+                return RunCliCommand(options, settings, configPath, client, logger, cts);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "[Agent] 未处理异常");
+                ReportFailure($"Agent 运行异常: {ex.Message}");
+                return 1;
             }
         }
         catch (Exception ex)
         {
-            AgentConsole.Error($"Agent 运行异常: {ex.Message}");
-            logger.LogError(ex, "[Agent] 未处理异常");
+            try
+            {
+                TryLogFailure(logger, ex);
+            }
+            catch (Exception)
+            {
+                // 日志都不可用时继续走 MessageBox/控制台兜底。
+            }
+
+            ReportFailure($"Agent 启动失败: {ex.Message}");
             return 1;
         }
+        finally
+        {
+            // CLI 从资源管理器双击时，用 MessageBox 展示暂存的输出（含 --help / 参数错误）。
+            ConsoleHost.CompleteCli();
+            ConsoleHost.Detach();
+        }
+    }
+
+    /// <summary>执行非托盘 CLI 命令；错误由外层统一记录并回写退出码。</summary>
+    private static int RunCliCommand(
+        CliOptions options,
+        AgentSettings settings,
+        string configPath,
+        HttpAgentClient client,
+        ILoggerService logger,
+        CancellationTokenSource cts)
+    {
+        switch (options.Command)
+        {
+            case "register":
+                return RegistrationRunner
+                    .RunAsync(settings, configPath, client, logger, cts.Token)
+                    .ConfigureAwait(false).GetAwaiter().GetResult();
+
+            case "heartbeat-once":
+                return HeartbeatRunner
+                    .RunAsync(settings, configPath, client, once: true, logger, cts.Token)
+                    .ConfigureAwait(false).GetAwaiter().GetResult();
+
+            case "heartbeat":
+                // 控制台并行模式：心跳与任务轮询并行；任一退出即全部停止。
+                return AgentServiceRunner
+                    .RunHeartbeatAndWorkerAsync(settings, configPath, client, client, logger, cts)
+                    .ConfigureAwait(false).GetAwaiter().GetResult();
+
+            case "worker":
+                return WorkerRunner
+                    .RunAsync(settings, configPath, client, logger, cts.Token)
+                    .ConfigureAwait(false).GetAwaiter().GetResult();
+
+            case "printers":
+                return PrintPrinters(logger);
+
+            case "bind-code":
+                return PrinterBindRunner
+                    .RunCliAsync(settings, configPath, client, options.BindCode, logger, cts.Token)
+                    .ConfigureAwait(false).GetAwaiter().GetResult();
+
+            case "probe-office":
+                return ProbeOffice(logger);
+
+            case "render":
+                return TemplateRenderService
+                    .RunAsync(
+                        options.Template ?? string.Empty,
+                        options.Data ?? string.Empty,
+                        options.Out ?? string.Empty,
+                        logger,
+                        cts.Token)
+                    .ConfigureAwait(false).GetAwaiter().GetResult();
+
+            default:
+                AgentConsole.Error($"未知命令: {options.Command}");
+                CliOptions.PrintUsage();
+                return 2;
+        }
+    }
+
+    /// <summary>异常兜底：文件日志 +（托盘模式）MessageBox；CLI 无控制台由暂存输出统一弹出。</summary>
+    private static void ReportFailure(string message)
+    {
+        AgentConsole.Error(message);
+
+        if (ConsoleHost.IsTrayMode)
+            ConsoleHost.ReportError("NewCosmos Agent", message);
+    }
+
+    private static void TryLogFailure(ILoggerService? logger, Exception ex)
+    {
+        var target = logger ?? AgentRuntime.CreateLogger();
+        target.LogError(ex, "[Agent] 未处理异常");
+        if (!ReferenceEquals(target, logger))
+            (target as IDisposable)?.Dispose();
     }
 
     private static int RunAutoStartCommand(CliOptions options)
@@ -186,7 +252,7 @@ internal static class Program
             settings.PrintJobsDirectory = options.PrintJobsDirectory.Trim();
     }
 
-    private static int PrintPrinters(NewCosmos.Services.Core.ILoggerService logger)
+    private static int PrintPrinters(ILoggerService logger)
     {
         var printers = PrinterDiscovery.GetInstalledPrinters(logger);
         if (printers.Count == 0)
@@ -202,7 +268,7 @@ internal static class Program
         return 0;
     }
 
-    private static int ProbeOffice(NewCosmos.Services.Core.ILoggerService logger)
+    private static int ProbeOffice(ILoggerService logger)
     {
         var info = OfficeProbe.Detect(logger);
         AgentConsole.Info(OfficeProbe.Describe(info));

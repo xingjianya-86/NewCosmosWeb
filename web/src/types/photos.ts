@@ -112,6 +112,59 @@ export interface PhotoOcrResult {
   fields: Record<string, string>
 }
 
+/* ───────────────────────── 待归属照片池 ───────────────────────── */
+
+/** 待归属照片（身份证未定先存池；joinable 后才写入正式照片档案）。 */
+export interface PhotoPendingItem {
+  id: number
+  category: string
+  categoryLabel: string
+  photoName: string
+  fileSize: number
+  imageFormat: string
+  /** OCR 识别姓名（可空）。 */
+  recognizedName: string
+  /** OCR 识别身份证号（可空）。 */
+  recognizedIdCard: string
+  /** 来源（拍照 / 相册 / 拖入 …）。 */
+  source: string
+  createdAt: string
+  createdByName: string
+}
+
+export interface PhotoPendingQuery {
+  page?: number
+  pageSize?: number
+}
+
+export interface PhotoPendingPage {
+  items: PhotoPendingItem[]
+  total: number
+  page: number
+  pageSize: number
+  /** 服务端是否已启用待归属池（兼容旧服务端返回空列表）。 */
+  available: boolean
+  /** 数据范围等提示文案。 */
+  message?: string
+}
+
+export interface PhotoPendingAssignInput {
+  /** 必填：18 位身份证号，须已在四类业务档案中。 */
+  idCard: string
+  /** 可选覆盖姓名（为空则取档案姓名）。 */
+  name?: string
+  /** 可选覆盖类别（为空沿用待归属照片原类别）。 */
+  category?: string
+  /** 可选绑定申请 ID（须属于该身份证）。 */
+  applicationId?: number | null
+}
+
+export interface PhotoPendingAssignResult {
+  id: number
+  photoName: string
+  fileSize: number
+}
+
 /* ───────────────────────── 打印 / 导出 ───────────────────────── */
 
 export interface PhotoPrintInput {

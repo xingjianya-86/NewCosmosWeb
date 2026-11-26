@@ -1,0 +1,7 @@
+{
+  "version": "2.0.20261124",
+  "url": "https://cosmos-static.sua17.cn:20000/downloads/windows/NewCosmosShellSetup_2.0.20261124.exe",
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "notes": "修复打印任务重试；更新 Shell 启动页。",
+  "publishedAt": "2026-11-26T12:00:00+08:00"
+}

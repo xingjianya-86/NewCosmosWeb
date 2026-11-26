@@ -50,10 +50,11 @@ public static class WorkerRunner
 
         var renderer = new TemplateJobRenderer(logger);
         var printer = new JobPrinter(renderer, logger);
+        var photoPrinter = new PhotoJobPrinter(logger);
         var templates = new TemplateCache(logger);
         var executor = new JobTaskExecutor(
             renderer, printer, files, templates, logger, settings.PreviewKeepCount, settings.OutputRoot,
-            client, settings.ServerBaseUrl, deviceKey);
+            client, settings.ServerBaseUrl, deviceKey, photoPrinter);
 
         var worker = new JobWorker(
             client,

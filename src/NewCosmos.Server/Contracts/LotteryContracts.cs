@@ -117,6 +117,7 @@ public sealed record LotteryJobEnqueueResponse(string JobId, string Status);
 
 /// <summary>
 /// 任务详情。predict 成功时附带解析后的 predictions 与本次实际入库数（重复轮询 savedCount=0）。
+/// LogTail 为 Worker 最近日志（换行拼接），用于训练页展示进度摘要。
 /// </summary>
 public sealed record LotteryJobResponse(
     string JobId,
@@ -126,5 +127,16 @@ public sealed record LotteryJobResponse(
     string? Message,
     JsonElement? Result,
     JsonElement? Error,
+    string? LogTail,
     IReadOnlyList<LotteryPredictionDto>? Predictions,
     int? SavedCount);
+
+/// <summary>
+/// 彩票助手汇总：最新开奖、历史期数、最近开奖列表、购彩统计。
+/// 用于首页一次请求完成首屏加载，避免多次往返。
+/// </summary>
+public sealed record LotterySummaryResponse(
+    LotteryDrawDto? LatestDraw,
+    int DrawCount,
+    IReadOnlyList<LotteryDrawDto> RecentDraws,
+    LotteryPurchaseSummaryResponse PurchaseSummary);

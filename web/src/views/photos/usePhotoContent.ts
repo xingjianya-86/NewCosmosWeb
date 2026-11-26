@@ -1,12 +1,18 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
-import { getPhotoContent } from '@/api/photos'
+import { getPendingPhotoContent, getPhotoContent } from '@/api/photos'
 import { getErrorMessage } from '@/api/http'
 
+/** 取图来源：正式照片档案 / 待归属照片池。 */
+export type PhotoContentSource = 'photo' | 'pending'
+
 /**
- * 通过 /api/photos/{id}/content 取原图并转成 object URL。
+ * 通过 /api/photos/{id}/content（或 /api/photos/pending/{id}/content）取原图并转成 object URL。
  * 列表只下载当前可见缩略图，不拉 Base64 大数组。
  */
-export function usePhotoContent(photoId: () => number | null) {
+export function usePhotoContent(
+  photoId: () => number | null,
+  source: PhotoContentSource = 'photo',
+) {
   const src = ref('')
   const loading = ref(false)
   const error = ref('')
@@ -41,7 +47,10 @@ export function usePhotoContent(photoId: () => number | null) {
     loading.value = true
 
     try {
-      const blob = await getPhotoContent(id, abort.signal)
+      const blob =
+        source === 'pending'
+          ? await getPendingPhotoContent(id, abort.signal)
+          : await getPhotoContent(id, abort.signal)
       if (current !== ticket) return
       if (!blob || blob.size === 0) throw new Error('照片内容为空')
 
@@ -58,7 +67,7 @@ export function usePhotoContent(photoId: () => number | null) {
     }
   }
 
-  watch(photoId, () => void load(), { immediate: true })
+  watch([photoId, () => source], () => void load(), { immediate: true })
 
   onBeforeUnmount(() => {
     ticket += 1

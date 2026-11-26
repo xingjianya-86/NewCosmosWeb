@@ -1,34 +1,43 @@
-﻿using System.Diagnostics;
+﻿using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
-using System.Text.Json;
 using System.Windows;
 using Microsoft.Web.WebView2.Core;
+using NewCosmos.Shell.Services;
 
 namespace NewCosmos.Shell;
 
 public partial class MainWindow : Window
 {
+    private const string RuntimeDownloadUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+
     private readonly ShellOptions _options;
     private bool _initialized;
+    private bool _initializing;
 
-    public MainWindow()
+    public MainWindow(ShellOptions options)
     {
+        _options = options;
         InitializeComponent();
-        _options = ShellOptions.Load();
-        Title = _options.Title;
-        ServerText.Text = _options.StartUrl;
+        Title = options.Title;
+        ServerText.Text = options.StartUrl;
         Loaded += OnLoaded;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         if (_initialized) return;
-        _initialized = true;
         await InitializeWebViewAsync();
     }
 
     private async Task InitializeWebViewAsync()
     {
+        if (_initializing) return;
+        _initializing = true;
+        LoadingPanel.Visibility = Visibility.Visible;
+        ErrorPanel.Visibility = Visibility.Collapsed;
+        LoadingText.Text = "正在加载…";
+
         try
         {
             var userData = Path.Combine(
@@ -46,11 +55,15 @@ public partial class MainWindow : Window
             core.Settings.IsZoomControlEnabled = true;
             core.Settings.AreBrowserAcceleratorKeysEnabled = true;
 
-            core.NavigationStarting += OnNavigationStarting;
-            core.NewWindowRequested += OnNewWindowRequested;
-            core.NavigationCompleted += OnNavigationCompleted;
-            core.ProcessFailed += OnProcessFailed;
-            core.DownloadStarting += OnDownloadStarting;
+            if (!_initialized)
+            {
+                core.NavigationStarting += OnNavigationStarting;
+                core.NewWindowRequested += OnNewWindowRequested;
+                core.NavigationCompleted += OnNavigationCompleted;
+                core.ProcessFailed += OnProcessFailed;
+                core.DownloadStarting += OnDownloadStarting;
+                _initialized = true;
+            }
 
             WebView.Visibility = Visibility.Visible;
             LoadingPanel.Visibility = Visibility.Collapsed;
@@ -58,7 +71,40 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            ShowError($"WebView2 初始化失败：{ex.Message}");
+            HandleInitializationFailure(ex);
+        }
+        finally
+        {
+            _initializing = false;
+        }
+    }
+
+    private void HandleInitializationFailure(Exception ex)
+    {
+        if (IsRuntimeMissing())
+        {
+            ShowError(
+                "未安装 WebView2 Runtime",
+                "本机缺少 Microsoft Edge WebView2 Runtime，无法显示页面。\r\n" +
+                "请点击下方按钮下载安装；安装完成后回到本窗口点击“重试”。\r\n\r\n" +
+                RuntimeDownloadUrl,
+                showRuntimeDownload: true);
+            return;
+        }
+
+        ShowError("WebView2 初始化失败", $"WebView2 初始化失败：{ex.Message}", showRuntimeDownload: false);
+    }
+
+    private static bool IsRuntimeMissing()
+    {
+        try
+        {
+            return string.IsNullOrWhiteSpace(CoreWebView2Environment.GetAvailableBrowserVersionString());
+        }
+        catch
+        {
+            // 未安装时 GetAvailableBrowserVersionString 会抛异常。
+            return true;
         }
     }
 
@@ -82,33 +128,41 @@ public partial class MainWindow : Window
         if (e.IsSuccess)
         {
             ErrorPanel.Visibility = Visibility.Collapsed;
+            RuntimeButton.Visibility = Visibility.Collapsed;
             WebView.Visibility = Visibility.Visible;
             return;
         }
 
-        ShowError($"页面加载失败：{e.WebErrorStatus}（{_options.StartUrl}）");
+        ShowError("无法连接服务",
+            $"页面加载失败：{e.WebErrorStatus}\r\n{_options.StartUrl}",
+            showRuntimeDownload: false);
     }
 
     private void OnProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs e)
     {
-        ShowError($"WebView2 进程异常：{e.ProcessFailedKind}");
+        ShowError("页面进程异常", $"WebView2 进程异常：{e.ProcessFailedKind}", showRuntimeDownload: false);
     }
 
     private void OnDownloadStarting(object? sender, CoreWebView2DownloadStartingEventArgs e)
     {
-        // 默认保存到用户下载目录；不覆盖文件名，交给 WebView2/系统。
+        // 默认保存到系统下载目录；不覆盖文件名，交给 WebView2/系统。
         e.DownloadOperation.StateChanged += (_, _) =>
         {
-            if (e.DownloadOperation.State == CoreWebView2DownloadState.Completed)
+            if (e.DownloadOperation.State != CoreWebView2DownloadState.Completed) return;
+
+            var path = e.DownloadOperation.ResultFilePath;
+            if (path is null || !File.Exists(path)) return;
+
+            try
             {
-                var path = e.DownloadOperation.ResultFilePath;
-                if (File.Exists(path))
+                Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"")
                 {
-                    Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"")
-                    {
-                        UseShellExecute = true
-                    });
-                }
+                    UseShellExecute = true
+                });
+            }
+            catch
+            {
+                // 资源管理器定位失败不影响下载结果。
             }
         };
     }
@@ -127,75 +181,61 @@ public partial class MainWindow : Window
 
     private static void OpenExternal(string uri)
     {
-        try
-        {
-            Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
-        }
-        catch
-        {
-            // 外部链接打开失败不阻塞主窗口。
-        }
+        // 外部链接打开失败不阻塞主窗口。
+        ShellLauncher.OpenUrl(uri, out _);
     }
 
-    private void ShowError(string message)
+    private void ShowError(string title, string message, bool showRuntimeDownload)
     {
+        ErrorTitle.Text = title;
         ErrorText.Text = message;
+        RuntimeButton.Visibility = showRuntimeDownload ? Visibility.Visible : Visibility.Collapsed;
         ErrorPanel.Visibility = Visibility.Visible;
         LoadingPanel.Visibility = Visibility.Collapsed;
         WebView.Visibility = Visibility.Collapsed;
     }
 
-    private void Retry_Click(object sender, RoutedEventArgs e)
+    private async void Retry_Click(object sender, RoutedEventArgs e)
     {
         ErrorPanel.Visibility = Visibility.Collapsed;
+        RuntimeButton.Visibility = Visibility.Collapsed;
         LoadingPanel.Visibility = Visibility.Visible;
         LoadingText.Text = "正在重连…";
-        WebView.CoreWebView2?.Navigate(_options.StartUrl);
+
+        if (WebView.CoreWebView2 is not null)
+        {
+            WebView.Visibility = Visibility.Visible;
+            WebView.CoreWebView2.Navigate(_options.StartUrl);
+            return;
+        }
+
+        await InitializeWebViewAsync();
     }
 
-    private void OpenBrowser_Click(object sender, RoutedEventArgs e) => OpenExternal(_options.StartUrl);
-}
+    private void OpenBrowser_Click(object sender, RoutedEventArgs e) =>
+        ShellLauncher.OpenUrl(_options.StartUrl, out _);
 
-public sealed class ShellOptions
-{
-    public string StartUrl { get; init; } = "https://cosmos.sua17.cn/";
-    public string Title { get; init; } = "帝皇权杖δ-me13 社会救助管理系统";
-    public bool EnableDevTools { get; init; }
-    public string[] AllowedHosts { get; init; } = ["cosmos.sua17.cn", "cosmos-static.sua17.cn"];
-
-    public static ShellOptions Load()
+    private void DownloadRuntime_Click(object sender, RoutedEventArgs e)
     {
-        var envUrl = Environment.GetEnvironmentVariable("NC_SHELL_URL");
-        var configPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "NewCosmos", "shell.json");
+        if (ShellLauncher.OpenUrl(RuntimeDownloadUrl, out var error)) return;
 
-        ShellOptions? fromFile = null;
-        try
+        System.Windows.MessageBox.Show(this,
+            $"无法打开下载链接：{error}\r\n\r\n请手动访问：\r\n{RuntimeDownloadUrl}",
+            "WebView2 Runtime",
+            System.Windows.MessageBoxButton.OK,
+            System.Windows.MessageBoxImage.Warning);
+    }
+
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        if (System.Windows.Application.Current is App { IsExiting: false } && _options.MinimizeToTray)
         {
-            if (File.Exists(configPath))
-            {
-                fromFile = JsonSerializer.Deserialize<ShellOptions>(
-                    File.ReadAllText(configPath),
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            }
-        }
-        catch
-        {
-            // 配置损坏时用默认值，不阻塞启动。
+            e.Cancel = true;
+            Hide();
+            ((App)System.Windows.Application.Current).NotifyMinimizedToTray();
+            return;
         }
 
-        var options = fromFile ?? new ShellOptions();
-        if (!string.IsNullOrWhiteSpace(envUrl))
-        {
-            options = new ShellOptions
-            {
-                StartUrl = envUrl.Trim(),
-                Title = options.Title,
-                EnableDevTools = options.EnableDevTools,
-                AllowedHosts = options.AllowedHosts
-            };
-        }
-        return options;
+        base.OnClosing(e);
     }
 }
