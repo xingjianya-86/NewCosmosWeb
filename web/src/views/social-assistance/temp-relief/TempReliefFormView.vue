@@ -16,6 +16,7 @@ import {
   UserFilled,
 } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
+import { getIcd10 } from '@/api/icd10'
 import {
   changeTempReliefApplyDate,
   confirmTempReliefApplication,
@@ -24,7 +25,6 @@ import {
   getTempReliefCandidate,
   getTempReliefFamilyStatus,
   getTempReliefFormDefaults,
-  getTempReliefIcd10,
   getTempReliefInsuredIdentity,
   getTempReliefPolicySnapshot,
   getTempReliefPublicizePreview,
@@ -1624,7 +1624,7 @@ async function handleDiseaseCodeChange(row: DiseaseRow): Promise<void> {
   if (!code || row.diseaseName.trim()) return
 
   try {
-    const result = await getTempReliefIcd10(code)
+    const result = await getIcd10(code)
     const current = diseases.value.find((item) => item.key === row.key)
     if (!current) return
     if (current.diseaseCode.trim().toLowerCase() !== code.toLowerCase()) return

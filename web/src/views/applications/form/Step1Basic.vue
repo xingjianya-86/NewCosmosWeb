@@ -4,6 +4,7 @@ import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { changeApplicationDate } from '@/api/applicationForm'
 import { getErrorMessage } from '@/api/http'
+import { getIcd10 } from '@/api/icd10'
 import AddressCascader from '@/components/AddressCascader.vue'
 import NcCard from '@/components/NcCard.vue'
 import {
@@ -58,6 +59,24 @@ const diseaseCategory = computed<string>({
     diseaseFields.value.diseaseCategory = value
   },
 })
+
+/** 疾病编码变更：共享 ICD-10 查询回填病名/一级分类；只填空值，不覆盖手工修改。 */
+async function handleDiseaseCodeChange(): Promise<void> {
+  const code = diseaseCode.value.trim()
+  if (!code) return
+  try {
+    const result = await getIcd10(code)
+    if (diseaseCode.value.trim().toLowerCase() !== code.toLowerCase()) return
+    if (!basic.value.diseaseName?.trim() && result.name) {
+      basic.value.diseaseName = result.name
+    }
+    if (!diseaseCategory.value && result.category) {
+      diseaseCategory.value = result.category
+    }
+  } catch {
+    // 字典查询失败不阻断手工录入。
+  }
+}
 
 /** 健康状态只读展示：勾选“是否重病”时显示重病（当前为重残/重病且重残者保留原值）。 */
 const healthStatusDisplay = computed(() => {
@@ -473,6 +492,7 @@ defineExpose({ validate })
               placeholder="如 A00.900，输入后自动带出疾病"
               clearable
               :disabled="isLocked"
+              @change="handleDiseaseCodeChange"
             />
           </label>
 

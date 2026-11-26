@@ -54,7 +54,18 @@ public static class Icd10Catalog
 
             var map = JsonSerializer.Deserialize<Dictionary<string, string>>(json,
                 new JsonSerializerOptions { ReadCommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
-            return map != null && map.Count > 0 ? map : new Dictionary<string, string>();
+            if (map == null || map.Count == 0)
+                return new Dictionary<string, string>();
+
+            // ICD-10 字典大量编码使用小写 x（如 Z51.800x095），而输入常为大写 X；
+            // 统一用大小写不敏感比较器，避免 Z51.800X095 查不到。
+            var normalized = new Dictionary<string, string>(map.Count, StringComparer.OrdinalIgnoreCase);
+            foreach (var (key, value) in map)
+            {
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                normalized[key.Trim()] = value;
+            }
+            return normalized;
         }
         catch (Exception ex)
         {

@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Plus } from '@element-plus/icons-vue'
 import NcCard from '@/components/NcCard.vue'
 import AddressCascader from '@/components/AddressCascader.vue'
+import { getIcd10 } from '@/api/icd10'
 import { formatMoney } from '../format'
 import { createMember, createSupporter } from './formModel'
 import {
@@ -130,6 +131,35 @@ type MemberRow = ApplicationFormMember & {
 
 const members = computed(() => props.form.members)
 const supporters = computed(() => props.form.supporters as SupporterRow[])
+
+/** 疾病编码变更：共享 ICD-10 查询回填病名/一级分类；只填空值，不覆盖手工修改。 */
+async function handleMemberDiseaseCodeChange(member: MemberRow): Promise<void> {
+  const code = member.diseaseCode.trim()
+  if (!code) return
+  try {
+    const result = await getIcd10(code)
+    if (member.diseaseCode.trim().toLowerCase() !== code.toLowerCase()) return
+    if (!member.diseaseName?.trim() && result.name) member.diseaseName = result.name
+    if (!member.diseaseCategory && result.category) member.diseaseCategory = result.category
+  } catch {
+    // 字典查询失败不阻断手工录入。
+  }
+}
+
+async function handleSupporterDiseaseCodeChange(supporter: SupporterRow): Promise<void> {
+  const code = supporter.diseaseCode.trim()
+  if (!code) return
+  try {
+    const result = await getIcd10(code)
+    if (supporter.diseaseCode.trim().toLowerCase() !== code.toLowerCase()) return
+    if (!supporter.secondaryDiseaseName?.trim() && result.name) {
+      supporter.secondaryDiseaseName = result.name
+    }
+    if (!supporter.diseaseCategory && result.category) supporter.diseaseCategory = result.category
+  } catch {
+    // 字典查询失败不阻断手工录入。
+  }
+}
 
 /**
  * 申请表家庭人口（含户主，年赡养费乘数）：
@@ -775,6 +805,7 @@ onMounted(() => {
                   placeholder="如 A00.900"
                   clearable
                   :disabled="isReadonly"
+                  @change="handleMemberDiseaseCodeChange(member)"
                 />
               </label>
 
@@ -1205,6 +1236,7 @@ onMounted(() => {
                   placeholder="如 A00.900"
                   clearable
                   :disabled="isReadonly"
+                  @change="handleSupporterDiseaseCodeChange(supporter)"
                 />
               </label>
 

@@ -210,6 +210,7 @@ app.MapCollegeStudentEndpoints();
 app.MapNearRelativeEndpoints();
 app.MapQuickVerifyEndpoints();
 app.MapTempReliefEndpoints();
+app.MapIcd10Endpoints();
 app.MapRecoveryEndpoints();
 app.MapArchiveEndpoints();
 app.MapArchivePhotoEndpoints();
