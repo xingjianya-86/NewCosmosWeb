@@ -176,9 +176,9 @@ public abstract class ReprintProviderBase(
         {
             sql = @"SELECT id, name, doc_type, file_type, sort_order, categories
                     FROM nc_biz_templates
-                    WHERE categories && $1::text[]
+                    WHERE categories && string_to_array($1, ',')
                     ORDER BY sort_order ASC, name ASC";
-            parameters = [scope];
+            parameters = [string.Join(",", scope)];
         }
         else
         {

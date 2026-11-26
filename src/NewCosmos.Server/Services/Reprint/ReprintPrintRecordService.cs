@@ -277,9 +277,9 @@ public sealed class ReprintPrintRecordService(IDatabaseService database)
         }
 
         var result = await database.QueryAsync<ReprintTemplateIdRow>(
-            @"SELECT id, name FROM nc_biz_templates WHERE name = ANY($1::text[])",
+            @"SELECT id, name FROM nc_biz_templates WHERE name = ANY(string_to_array($1, ','))",
             ct,
-            names.ToArray());
+            string.Join(",", names));
 
         if (result.IsFailure)
         {
