@@ -12,6 +12,10 @@ public sealed class ShellOptions
     public const string DefaultTitle = "帝皇权杖δ-me13 社会救助管理系统";
     public const string DefaultStartUrl = "https://cosmos.sua17.cn/";
 
+    /// <summary>生产更新清单；安装包同目录 Agent 也会使用。</summary>
+    public const string DefaultUpdateManifestUrl =
+        "https://cosmos-static.sua17.cn:20000/downloads/windows/latest.json";
+
     /// <summary>启动后加载的页面地址。</summary>
     public string StartUrl { get; set; } = DefaultStartUrl;
 
@@ -28,7 +32,7 @@ public sealed class ShellOptions
     public bool MinimizeToTray { get; set; } = true;
 
     /// <summary>在线更新清单地址（JSON：version/url/sha256/notes/publishedAt）；空 = 不检查。</summary>
-    public string UpdateManifestUrl { get; set; } = string.Empty;
+    public string UpdateManifestUrl { get; set; } = DefaultUpdateManifestUrl;
 
     /// <summary>
     /// 可选：显式指定 NewCosmos.Agent.exe 路径。
@@ -81,7 +85,9 @@ public sealed class ShellOptions
                 .Select(h => h.Trim())
                 .ToArray();
 
-        UpdateManifestUrl = (UpdateManifestUrl ?? string.Empty).Trim();
+        UpdateManifestUrl = string.IsNullOrWhiteSpace(UpdateManifestUrl)
+            ? DefaultUpdateManifestUrl
+            : UpdateManifestUrl.Trim();
         AgentPath = (AgentPath ?? string.Empty).Trim();
     }
 }
