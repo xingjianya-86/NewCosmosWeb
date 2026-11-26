@@ -346,6 +346,24 @@ const router = createRouter({
           meta: { title: '银行流水核对' },
         },
         {
+          path: 'system/users',
+          name: 'system-users',
+          component: () => import('@/views/system/users/UserManagementView.vue'),
+          meta: { title: '用户与权限管理' },
+        },
+        {
+          path: 'system/users/online',
+          name: 'system-users-online',
+          component: () => import('@/views/system/users/OnlineSessionsView.vue'),
+          meta: { title: '在线会话' },
+        },
+        {
+          path: 'system/organizations',
+          name: 'system-organizations',
+          component: () => import('@/views/system/organizations/OrganizationManageView.vue'),
+          meta: { title: '经办机构管理' },
+        },
+        {
           path: 'archives/publicity',
           name: 'archive-publicity',
           component: () => import('@/views/archives/PublicityView.vue'),

@@ -291,7 +291,7 @@ const moduleGroups: ModuleGroup[] = [
         iconBg: '#FDF2F8',
         iconColor: '#7f231b',
         buttonText: '进入模块',
-        to: '/coming-soon/users',
+        to: '/system/users',
       },
       {
         title: '值班管理',

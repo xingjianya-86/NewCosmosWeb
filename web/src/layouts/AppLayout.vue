@@ -66,8 +66,8 @@ const navGroups: NavGroup[] = [
     title: '管理工具',
     items: [
       { label: '数据中心', icon: DataBoard, path: '/system/data-center' },
-      { label: '用户与权限管理', icon: User, path: '/coming-soon/users' },
-      { label: '经办机构管理', icon: OfficeBuilding, path: '/coming-soon/organizations' },
+      { label: '用户与权限管理', icon: User, path: '/system/users' },
+      { label: '经办机构管理', icon: OfficeBuilding, path: '/system/organizations' },
       { label: '文书模板管理', icon: Document, path: '/archives/templates' },
       { label: '历史补打中心', icon: Tickets, path: '/reprint' },
       { label: '值班管理', icon: Calendar, path: '/duty' },

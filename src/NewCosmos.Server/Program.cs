@@ -113,6 +113,7 @@ builder.Services.AddSingleton<IRegionService, RegionService>();
 // 权限与数据范围：服务端强制校验，不信任前端。
 builder.Services.AddSingleton<INewPermissionService, NewPermissionService>();
 builder.Services.AddSingleton<IDataScopeService, DataScopeService>();
+builder.Services.AddSingleton<IRoleService, RoleService>();
 
 // 业务统计/查询服务：全部复用 Core，禁止在 Server 重抄口径。
 builder.Services.AddSingleton<ISeedMergeService, SeedMergeService>();
@@ -272,6 +273,8 @@ app.MapDataImportEndpoints();
 app.MapDictionaryEndpoints();
 app.MapStandardConfigEndpoints();
 app.MapBankFlowEndpoints();
+app.MapOrganizationEndpoints();
+app.MapUserManagementEndpoints();
 app.MapRegionEndpoints();
 
 if (serverOptions.AutoMigrate)
