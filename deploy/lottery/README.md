@@ -147,7 +147,7 @@ curl -s 'http://127.0.0.1:8790/jobs?status=running&limit=20'   # 附加：任务
 
 ## 7. 接口契约（NewCosmos.Server 调用）
 
-- Base URL：`http://127.0.0.1:8790`（不得经 `.1` 或公网 nginx 暴露）
+- Base URL：`http://newcosmos-lottery:8790`（同 `newcosmos_default` 网络；不得经 `.1` 或公网 nginx 暴露）
 - 编码：`application/json; charset=utf-8`
 - 时间：ISO 8601 UTC（`2026-11-24T10:00:00.000Z`）
 - 无认证头；调用方必须是同机 Server 进程（或同一内部网络）
@@ -228,6 +228,19 @@ curl -s 'http://127.0.0.1:8790/jobs?status=running&limit=20'   # 附加：任务
   "code": "ssq",
   "trained_on_issues": ["2024001", "2026123"],
   "timestamp": "2026-11-24T10:20:00"
+}
+```
+
+### `GET /models` → `200`
+
+列出已训练模型，供 Server 判定「模型就绪」：
+
+```json
+{
+  "models": [
+    { "lotteryType": "ssq", "window": 73, "trainedAt": "2026-10-11T08:16:04.479402" }
+  ],
+  "modelDir": "/models"
 }
 ```
 
@@ -333,11 +346,9 @@ docker compose restart lottery                  # 重启（会取消运行中任
 
 ## 11. 安全
 
-- 端口只绑 `127.0.0.1:8790`；**禁止**在 nginx/防火墙把 8790 暴露到公网。
-- 无内置认证：任何能访问该端口的人都能提交训练。若 Server 也是容器，建议：
-  1. 让 Server 与 Worker 加入同一 user-defined 内部网络，compose 中删掉 `ports`
-     并加 `expose: ["8790"]`，Server 用 `http://lottery:8790`；或
-  2. 仅在宿主机绑定 `172.17.0.1:8790:8790`，并限制防火墙来源。
+- 不映射宿主端口；Worker 加入 `newcosmos_default` 网络，Server 用
+  `http://newcosmos-lottery:8790` 访问。**禁止**在 nginx/防火墙把 8790 暴露到公网。
+- 无内置认证：任何能访问该端口的人都能提交训练，因此只允许同 Docker 网络访问。
 - 数据库密码只存在 `.env` 与容器环境；legacy 通过 `PGPASSWORD` 读取，不进命令行。
 - 镜像非 root（uid 10001）、`no-new-privileges`、`pids_limit=256`。
 - 输入只允许 `ssq/dlt` 与受限窗口/注数，避免任意命令/路径注入。
