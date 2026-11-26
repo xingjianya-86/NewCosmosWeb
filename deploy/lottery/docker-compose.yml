@@ -1,6 +1,9 @@
 # NewCosmos 彩票 Worker 单机编排
-# 端口只绑 127.0.0.1:8790（供同机 NewCosmos.Server 调用），不映射公网。
+# 不映射宿主端口：加入 newcosmos_default 网络，由 Server 通过
+# http://newcosmos-lottery:8790 访问（宿主机 8790 已被其它服务占用）。
 # 使用：cp .env.example .env && 编辑 .env && docker compose up -d --build
+
+name: newcosmos-lottery
 
 services:
   lottery:
@@ -11,8 +14,12 @@ services:
     container_name: newcosmos-lottery
     restart: unless-stopped
 
-    ports:
-      - "127.0.0.1:8790:8790"
+    # 如需本机调试，可临时改为 "127.0.0.1:8791:8790"（不要用 8790）。
+    expose:
+      - "8790"
+
+    networks:
+      - newcosmos
 
     environment:
       NC_DB_HOST: ${NC_DB_HOST:-host.docker.internal}
@@ -46,16 +53,9 @@ services:
           cpus: "0.25"
           memory: 256m
 
-    pids_limit: 256
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 30s
-
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
 
     healthcheck:
       test:
@@ -69,3 +69,14 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  newcosmos:
+    external: true
+    name: newcosmos_default

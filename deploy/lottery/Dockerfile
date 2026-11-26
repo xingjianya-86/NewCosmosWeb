@@ -1,7 +1,7 @@
-# syntax=docker/dockerfile:1
 # NewCosmos 彩票 Worker（CPU-only）
 # 构建上下文 = src/NewCosmos.LotteryWorker（见 deploy/lottery/docker-compose.yml）
-FROM python:3.11-slim
+# 生产服务器无法直连 Docker Hub：基础镜像走 DaoCloud 镜像，pip 走阿里云镜像。
+FROM docker.1ms.run/library/python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
@@ -10,6 +10,8 @@ ENV PYTHONUNBUFFERED=1 \
     LC_ALL=C.UTF-8 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
     TF_CPP_MIN_LOG_LEVEL=2 \
     MPLBACKEND=Agg \
     OMP_NUM_THREADS=2 \
@@ -17,7 +19,10 @@ ENV PYTHONUNBUFFERED=1 \
     TF_NUM_INTEROP_THREADS=1
 
 # libgomp1：TensorFlow CPU 运行时依赖；其余为基础镜像自带
-RUN apt-get update \
+# 生产服务器无法直连 deb.debian.org，apt 源切阿里云镜像。
+RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g; s|http://security.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
+        /etc/apt/sources.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true \
+    && apt-get update \
     && apt-get install -y --no-install-recommends libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 

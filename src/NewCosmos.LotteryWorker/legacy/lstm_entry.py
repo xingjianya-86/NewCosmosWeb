@@ -41,6 +41,13 @@ if not (_PROJECT / "src").is_dir():
     sys.exit(3)
 sys.path.insert(0, str(_PROJECT))
 
+# psycopg2 必须在 TensorFlow/Keras 之前导入：TF 2.21 的 OpenSSL/libstdc++ 与
+# psycopg2-binary 的 libpq 在“先 TF 后 psycopg2”顺序下会在 connect 时段错误。
+try:
+    import psycopg2  # noqa: E402,F401
+except ImportError:  # 运行环境未装 psycopg2 时保持原有报错路径
+    psycopg2 = None  # type: ignore[assignment]
+
 import pandas as pd  # noqa: E402
 
 import src.config as _cfg  # noqa: E402  (必须先于任何 pipeline 导入)

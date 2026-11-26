@@ -1,12 +1,13 @@
 # NewCosmos 彩票 Worker 运行时依赖（Python 3.11，CPU-only）
-# 说明：legacy 原版按 TensorFlow 2.15 / Keras 2 开发；此处使用 tensorflow-cpu
-# 以减小镜像体积（无 GPU，服务器为 4C CPU）。升级 TF 需重新验证 legacy 兼容性。
+# 说明：桌面端模型由 TensorFlow 2.21 / Keras 3 训练（.keras 为 Keras 3 格式，
+# 含 quantization_config 等新字段），Worker 必须使用同代 TF/Keras 才能加载；
+# legacy 的 src.bootstrap 提供 TF/Keras 兼容 shim。升级 TF 需重新验证 legacy 兼容性。
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
 
-tensorflow-cpu==2.15.1
-keras==2.15.0
+tensorflow-cpu==2.21.0
+keras>=3.11,<4
 numpy>=1.24,<2.0
 pandas==2.2.2
 

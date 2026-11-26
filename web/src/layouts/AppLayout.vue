@@ -77,7 +77,7 @@ const navGroups: NavGroup[] = [
   },
   {
     title: '娱乐天地',
-    items: [{ label: '彩票助手', icon: Trophy, path: '/coming-soon/lottery' }],
+    items: [{ label: '彩票助手', icon: Trophy, path: '/lottery' }],
   },
   {
     title: '链接',
@@ -124,6 +124,10 @@ const activePath = computed(() => {
   }
   if (route.path === '/printers' || route.path.startsWith('/printers/')) return '/printers'
   if (route.path === '/duty' || route.path.startsWith('/duty/')) return '/duty'
+  if (route.path === '/lottery' || route.path.startsWith('/lottery/')) return '/lottery'
+  if (route.path === '/system/organizations' || route.path.startsWith('/system/organizations/')) {
+    return '/system/organizations'
+  }
   if (
     route.path === '/archives/query' ||
     route.path.startsWith('/archives/query/') ||

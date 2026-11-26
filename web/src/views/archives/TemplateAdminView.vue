@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, h, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import {
   ArrowLeft,
   Back,
@@ -10,6 +10,7 @@ import {
   Delete,
   Download,
   Edit,
+  Plus,
   Refresh,
   Search,
   Top,
@@ -19,7 +20,9 @@ import {
 import { ApiError, getErrorMessage } from '@/api/http'
 import {
   createTemplateAdmin,
+  createTemplateCategory,
   deleteTemplateAdmin,
+  deleteTemplateCategory,
   downloadTemplateAdminFile,
   getTemplateAdmin,
   getTemplateCategories,
@@ -27,6 +30,7 @@ import {
   listTemplateAdmin,
   moveTemplateAdmin,
   updateTemplateAdmin,
+  updateTemplateCategory,
 } from '@/api/templateAdmin'
 import type {
   TemplateAdminDetail,
@@ -40,9 +44,15 @@ import NcStatusDot from '@/components/NcStatusDot.vue'
 import { useMediaQuery } from '@/composables/useMediaQuery'
 import { formatDateTimeText } from './archiveDisplay'
 
+interface CategoryTreeNodeInstance {
+  expand(callback?: () => void, expandParent?: boolean): void
+  collapse(): void
+}
+
 interface CategoryTreeInstance {
   setCheckedKeys(keys: string[], leafOnly?: boolean): void
   getCheckedKeys(leafOnly?: boolean): Array<string | number>
+  getNode(key: string | number): CategoryTreeNodeInstance | null
 }
 
 const router = useRouter()
@@ -54,12 +64,18 @@ const templates = ref<TemplateAdminListItem[]>([])
 const listLoading = ref(false)
 const listError = ref('')
 
+const filterCategory = ref('')
+const filterDocType = ref('')
+const filterFileType = ref('')
+
 const selectedId = ref<number | null>(null)
 const detail = ref<TemplateAdminDetail | null>(null)
 const detailLoading = ref(false)
 const detailError = ref('')
 const copies = ref(1)
 const savingCopies = ref(false)
+const detailDocType = ref('')
+const savingDocType = ref(false)
 const downloading = ref(false)
 const changingFile = ref(false)
 const moving = ref<TemplateMoveDirection | null>(null)
@@ -92,6 +108,17 @@ const categoryKeys = ref<string[]>([])
 const categoryTreeRef = ref<CategoryTreeInstance | null>(null)
 const savingCategories = ref(false)
 
+const manageVisible = ref(false)
+const manageTreeRef = ref<CategoryTreeInstance | null>(null)
+const categoryMutating = ref(false)
+
+const nodeDialogVisible = ref(false)
+const nodeDialogMode = ref<'create' | 'rename'>('create')
+const nodeParent = ref<TemplateCategoryNode | null>(null)
+const nodeEditing = ref<TemplateCategoryNode | null>(null)
+const nodeLabel = ref('')
+const nodeSaving = ref(false)
+
 let listTicket = 0
 let detailTicket = 0
 
@@ -107,6 +134,47 @@ function actionError(
   return getErrorMessage(error, fallback)
 }
 
+function normalizeWarnings(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    .map((item) => item.trim())
+}
+
+function warningsOf(result: unknown): string[] {
+  if (!result || typeof result !== 'object') return []
+  return normalizeWarnings((result as { configWarnings?: unknown }).configWarnings)
+}
+
+function showConfigWarnings(value: unknown): void {
+  const warnings = normalizeWarnings(value)
+  if (warnings.length === 0) return
+  ElNotification({
+    title: `配置提示（${warnings.length}）`,
+    type: 'warning',
+    duration: 12_000,
+    showClose: true,
+    message: h(
+      'div',
+      { style: 'display:flex;flex-direction:column;gap:4px;line-height:1.6;' },
+      [
+        ...warnings.slice(0, 5).map((text, index) =>
+          h('p', { key: index, style: 'margin:0' }, text),
+        ),
+        ...(warnings.length > 5
+          ? [
+              h(
+                'p',
+                { key: 'more', style: 'margin:0;color:#909399' },
+                `…另有 ${warnings.length - 5} 项，详见模板详情`,
+              ),
+            ]
+          : []),
+      ],
+    ),
+  })
+}
+
 function saveBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
@@ -118,10 +186,17 @@ function saveBlob(blob: Blob, filename: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-function fileTypeLabel(value: string | null | undefined): string {
+function fileKind(value: string | null | undefined): 'word' | 'excel' | 'other' {
   const normalized = (value ?? '').trim().toLowerCase()
-  if (normalized.includes('excel') || normalized.includes('xls')) return 'Excel 表格'
-  if (normalized.includes('word') || normalized.includes('doc')) return 'Word 文档'
+  if (normalized.includes('excel') || normalized.includes('xls')) return 'excel'
+  if (normalized.includes('word') || normalized.includes('doc')) return 'word'
+  return 'other'
+}
+
+function fileTypeLabel(value: string | null | undefined): string {
+  const kind = fileKind(value)
+  if (kind === 'excel') return 'Excel 表格'
+  if (kind === 'word') return 'Word 文档'
   return value || '—'
 }
 
@@ -144,6 +219,10 @@ function categoryShort(path: string): string {
   return parts.length > 0 ? parts[parts.length - 1] : path
 }
 
+function isCustomCategory(node: TemplateCategoryNode): boolean {
+  return node.isBuiltIn === false && typeof node.id === 'number'
+}
+
 const categoryLabelMap = computed(() => {
   const map = new Map<string, string>()
   const walk = (nodes: TemplateCategoryNode[]): void => {
@@ -156,19 +235,29 @@ const categoryLabelMap = computed(() => {
   return map
 })
 
+const categoryAncestorMap = computed(() => {
+  const map = new Map<string, string[]>()
+  const walk = (nodes: TemplateCategoryNode[], ancestors: string[]): void => {
+    for (const node of nodes) {
+      if (node.path) map.set(node.path, ancestors)
+      const nextAncestors = node.path ? [...ancestors, node.path] : ancestors
+      if (node.children && node.children.length > 0) walk(node.children, nextAncestors)
+    }
+  }
+  walk(categoryTree.value, [])
+  return map
+})
+
 function categoryLabel(path: string): string {
   return categoryLabelMap.value.get(path) ?? categoryShort(path)
 }
 
-function leafPaths(nodes: TemplateCategoryNode[]): string[] {
+function collectCategoryPaths(nodes: TemplateCategoryNode[]): string[] {
   const paths: string[] = []
   const walk = (list: TemplateCategoryNode[]): void => {
     for (const node of list) {
-      if (node.isLeaf || !node.children || node.children.length === 0) {
-        if (node.path) paths.push(node.path)
-      } else {
-        walk(node.children)
-      }
+      if (node.path) paths.push(node.path)
+      if (node.children && node.children.length > 0) walk(node.children)
     }
   }
   walk(nodes)
@@ -177,7 +266,28 @@ function leafPaths(nodes: TemplateCategoryNode[]): string[] {
 
 function readCheckedKeys(tree: CategoryTreeInstance | null): string[] {
   if (!tree) return []
-  return tree.getCheckedKeys(true).map((key) => String(key))
+  return tree.getCheckedKeys(false).map((key) => String(key))
+}
+
+function setTreeExpanded(tree: CategoryTreeInstance | null, expanded: boolean): void {
+  if (!tree) return
+  for (const path of collectCategoryPaths(categoryTree.value)) {
+    const node = tree.getNode(path)
+    if (!node) continue
+    if (expanded) {
+      node.expand()
+    } else {
+      node.collapse()
+    }
+  }
+}
+
+function checkAllTree(tree: CategoryTreeInstance | null): void {
+  tree?.setCheckedKeys(collectCategoryPaths(categoryTree.value))
+}
+
+function clearTree(tree: CategoryTreeInstance | null): void {
+  tree?.setCheckedKeys([])
 }
 
 function parseConfigJson(text: string | null | undefined): Record<string, unknown> | null {
@@ -226,13 +336,86 @@ function prettyConfig(text: string | null | undefined): string {
   }
 }
 
+const hasFilters = computed(
+  () =>
+    filterCategory.value !== '' ||
+    filterDocType.value !== '' ||
+    filterFileType.value !== '',
+)
+
+const filteredTemplates = computed(() => {
+  const category = filterCategory.value
+  const docType = filterDocType.value
+  const kind = filterFileType.value
+  return templates.value.filter((item) => {
+    if (category) {
+      const matched = (item.categories ?? []).some((path) => {
+        if (path === category || path.startsWith(`${category}/`)) return true
+        const ancestors = categoryAncestorMap.value.get(path) ?? []
+        return ancestors.includes(category)
+      })
+      if (!matched) return false
+    }
+    if (docType && (item.docType ?? '') !== docType) return false
+    if (kind && fileKind(item.fileType) !== kind) return false
+    return true
+  })
+})
+
+const categoryFilterOptions = computed(() => {
+  const paths = new Set<string>()
+  for (const item of templates.value) {
+    for (const path of item.categories ?? []) {
+      if (path) paths.add(path)
+    }
+  }
+  return [...paths].sort((left, right) => left.localeCompare(right, 'zh-CN'))
+})
+
+const docTypeFilterOptions = computed(() => {
+  const types = new Set<string>(docTypes.value)
+  for (const item of templates.value) {
+    if (item.docType) types.add(item.docType)
+  }
+  return [...types].filter(Boolean).sort((left, right) => left.localeCompare(right, 'zh-CN'))
+})
+
+const detailDocTypeOptions = computed(() => {
+  const types = new Set<string>(docTypes.value)
+  const current = (detail.value?.docType ?? '').trim()
+  if (current) types.add(current)
+  return [...types].filter(Boolean)
+})
+
+const classificationCopiesCount = computed(() => {
+  const map = detail.value?.copiesByClassification
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return 0
+  return Object.keys(map).length
+})
+
+const detailWarnings = computed(() => normalizeWarnings(detail.value?.configWarnings))
+
+function clearFilters(): void {
+  filterCategory.value = ''
+  filterDocType.value = ''
+  filterFileType.value = ''
+}
+
 async function loadCategories(): Promise<void> {
+  const uploadChecked = uploadTreeRef.value ? readCheckedKeys(uploadTreeRef.value) : null
   categoryLoading.value = true
   categoryError.value = ''
   try {
     categoryTree.value = await getTemplateCategories()
+    await nextTick()
+    if (uploadTreeRef.value && uploadChecked) {
+      uploadTreeRef.value.setCheckedKeys(uploadChecked)
+    }
     if (categoryVisible.value) {
-      void nextTick(() => categoryTreeRef.value?.setCheckedKeys(categoryKeys.value))
+      categoryTreeRef.value?.setCheckedKeys(categoryKeys.value)
+    }
+    if (manageVisible.value) {
+      setTreeExpanded(manageTreeRef.value, true)
     }
   } catch (error) {
     categoryTree.value = []
@@ -287,6 +470,7 @@ async function loadDetail(id: number): Promise<void> {
     if (ticket !== detailTicket || selectedId.value !== id) return
     detail.value = response
     copies.value = resolveCopies(response)
+    detailDocType.value = response.docType ?? ''
   } catch (error) {
     if (ticket !== detailTicket || selectedId.value !== id) return
     detailError.value = actionError(error, '模板详情加载失败', '查看文书模板')
@@ -308,6 +492,7 @@ function handleSearch(): void {
 
 function resetSearch(): void {
   keyword.value = ''
+  clearFilters()
   void loadTemplates()
 }
 
@@ -337,7 +522,7 @@ function resetUpload(): void {
   uploadDocType.value = ''
   uploadConfigJson.value = ''
   if (uploadFileInput.value) uploadFileInput.value.value = ''
-  void nextTick(() => uploadTreeRef.value?.setCheckedKeys([]))
+  void nextTick(() => clearTree(uploadTreeRef.value))
 }
 
 function pickUploadFile(): void {
@@ -364,11 +549,19 @@ function onUploadFileChange(event: Event): void {
 }
 
 function checkAllUploadCategories(): void {
-  uploadTreeRef.value?.setCheckedKeys(leafPaths(categoryTree.value))
+  checkAllTree(uploadTreeRef.value)
 }
 
 function clearUploadCategories(): void {
-  uploadTreeRef.value?.setCheckedKeys([])
+  clearTree(uploadTreeRef.value)
+}
+
+function expandUploadCategories(): void {
+  setTreeExpanded(uploadTreeRef.value, true)
+}
+
+function collapseUploadCategories(): void {
+  setTreeExpanded(uploadTreeRef.value, false)
 }
 
 async function submitUpload(): Promise<void> {
@@ -407,8 +600,10 @@ async function submitUpload(): Promise<void> {
       configJson: configJson || undefined,
     })
     ElMessage.success('模板上传成功')
+    showConfigWarnings(warningsOf(created))
     mode.value = 'list'
     keyword.value = ''
+    clearFilters()
     resetUpload()
     await loadTemplates()
     if (created?.id) {
@@ -425,8 +620,8 @@ async function submitUpload(): Promise<void> {
 async function refreshAll(): Promise<void> {
   await loadTemplates()
   if (selectedId.value !== null) await loadDetail(selectedId.value)
-  if (categoryTree.value.length === 0) void loadCategories()
-  if (docTypes.value.length === 0) void loadDocTypes()
+  void loadCategories()
+  void loadDocTypes()
 }
 
 function chooseReplaceFile(): void {
@@ -446,7 +641,7 @@ async function onReplaceFileChange(event: Event): Promise<void> {
   const current = detail.value
   changingFile.value = true
   try {
-    await updateTemplateAdmin(current.id, {
+    const result = await updateTemplateAdmin(current.id, {
       file,
       name: current.name,
       docType: current.docType,
@@ -454,6 +649,7 @@ async function onReplaceFileChange(event: Event): Promise<void> {
       configJson: current.configJson ?? '',
     })
     ElMessage.success('模板文件已更新')
+    showConfigWarnings(warningsOf(result))
     await loadDetail(current.id)
     await loadTemplates()
   } catch (error) {
@@ -487,8 +683,9 @@ async function saveCopies(): Promise<void> {
 
   savingCopies.value = true
   try {
-    await updateTemplateAdmin(detail.value.id, { copies: value })
+    const result = await updateTemplateAdmin(detail.value.id, { copies: value })
     ElMessage.success('默认份数已保存')
+    showConfigWarnings(warningsOf(result))
     await loadDetail(detail.value.id)
     await loadTemplates()
   } catch (error) {
@@ -518,8 +715,9 @@ async function saveConfig(): Promise<void> {
 
   savingConfig.value = true
   try {
-    await updateTemplateAdmin(detail.value.id, { configJson: text })
+    const result = await updateTemplateAdmin(detail.value.id, { configJson: text })
     ElMessage.success('字段映射已保存')
+    showConfigWarnings(warningsOf(result))
     configVisible.value = false
     await loadDetail(detail.value.id)
     await loadTemplates()
@@ -527,6 +725,28 @@ async function saveConfig(): Promise<void> {
     ElMessage.error(actionError(error, '保存字段映射失败', '修改文书模板'))
   } finally {
     savingConfig.value = false
+  }
+}
+
+async function saveDocType(): Promise<void> {
+  if (!detail.value) return
+  const value = detailDocType.value.trim()
+  if (!value) {
+    ElMessage.warning('请选择文档类型')
+    return
+  }
+
+  savingDocType.value = true
+  try {
+    const result = await updateTemplateAdmin(detail.value.id, { docType: value })
+    ElMessage.success('文档类型已保存')
+    showConfigWarnings(warningsOf(result))
+    await loadDetail(detail.value.id)
+    await loadTemplates()
+  } catch (error) {
+    ElMessage.error(actionError(error, '保存文档类型失败', '修改文书模板'))
+  } finally {
+    savingDocType.value = false
   }
 }
 
@@ -541,13 +761,30 @@ function applyCategoryDialogKeys(): void {
   categoryTreeRef.value?.setCheckedKeys(categoryKeys.value)
 }
 
+function checkAllDialogCategories(): void {
+  checkAllTree(categoryTreeRef.value)
+}
+
+function clearDialogCategories(): void {
+  clearTree(categoryTreeRef.value)
+}
+
+function expandDialogCategories(): void {
+  setTreeExpanded(categoryTreeRef.value, true)
+}
+
+function collapseDialogCategories(): void {
+  setTreeExpanded(categoryTreeRef.value, false)
+}
+
 async function saveCategories(): Promise<void> {
   if (!detail.value) return
   const keys = readCheckedKeys(categoryTreeRef.value)
   savingCategories.value = true
   try {
-    await updateTemplateAdmin(detail.value.id, { categories: keys })
+    const result = await updateTemplateAdmin(detail.value.id, { categories: keys })
     ElMessage.success('模板分类已保存')
+    showConfigWarnings(warningsOf(result))
     categoryVisible.value = false
     await loadDetail(detail.value.id)
     await loadTemplates()
@@ -555,6 +792,161 @@ async function saveCategories(): Promise<void> {
     ElMessage.error(actionError(error, '保存模板分类失败', '修改文书模板'))
   } finally {
     savingCategories.value = false
+  }
+}
+
+function openCategoryManager(): void {
+  manageVisible.value = true
+  if (categoryTree.value.length === 0 && !categoryLoading.value) void loadCategories()
+}
+
+function handleManageOpened(): void {
+  setTreeExpanded(manageTreeRef.value, true)
+}
+
+function expandManageTree(expanded: boolean): void {
+  setTreeExpanded(manageTreeRef.value, expanded)
+}
+
+function openRootCategoryDialog(): void {
+  nodeDialogMode.value = 'create'
+  nodeParent.value = null
+  nodeEditing.value = null
+  nodeLabel.value = ''
+  nodeDialogVisible.value = true
+}
+
+function openChildCategoryDialog(node: TemplateCategoryNode): void {
+  nodeDialogMode.value = 'create'
+  nodeParent.value = node
+  nodeEditing.value = null
+  nodeLabel.value = ''
+  nodeDialogVisible.value = true
+}
+
+function openRenameCategoryDialog(node: TemplateCategoryNode): void {
+  if (!isCustomCategory(node)) return
+  nodeDialogMode.value = 'rename'
+  nodeParent.value = null
+  nodeEditing.value = node
+  nodeLabel.value = node.label
+  nodeDialogVisible.value = true
+}
+
+async function afterCategoryMutation(): Promise<void> {
+  await loadCategories()
+  await loadTemplates()
+  if (selectedId.value !== null) await loadDetail(selectedId.value)
+  if (categoryVisible.value && detail.value) {
+    categoryKeys.value = [...(detail.value.categories ?? [])]
+    await nextTick()
+    categoryTreeRef.value?.setCheckedKeys(categoryKeys.value)
+  }
+  if (manageVisible.value) {
+    await nextTick()
+    setTreeExpanded(manageTreeRef.value, true)
+  }
+}
+
+async function submitCategoryNode(): Promise<void> {
+  if (nodeSaving.value) return
+  const label = nodeLabel.value.trim()
+  if (!label) {
+    ElMessage.warning('请输入分类名称')
+    return
+  }
+
+  if (nodeDialogMode.value === 'rename') {
+    const node = nodeEditing.value
+    const id = node?.id
+    if (!node || !isCustomCategory(node) || typeof id !== 'number') return
+    nodeSaving.value = true
+    try {
+      await updateTemplateCategory(id, { label })
+      ElMessage.success('分类已重命名')
+      nodeDialogVisible.value = false
+      await afterCategoryMutation()
+    } catch (error) {
+      ElMessage.error(actionError(error, '重命名分类失败', '管理模板分类'))
+    } finally {
+      nodeSaving.value = false
+    }
+    return
+  }
+
+  nodeSaving.value = true
+  try {
+    await createTemplateCategory({
+      parentPath: nodeParent.value?.path ?? null,
+      label,
+    })
+    ElMessage.success('分类已新增')
+    nodeDialogVisible.value = false
+    await afterCategoryMutation()
+  } catch (error) {
+    ElMessage.error(actionError(error, '新增分类失败', '管理模板分类'))
+  } finally {
+    nodeSaving.value = false
+  }
+}
+
+async function removeCategoryNode(node: TemplateCategoryNode): Promise<void> {
+  if (!isCustomCategory(node) || typeof node.id !== 'number') {
+    ElMessage.warning('内置分类不可删除')
+    return
+  }
+  if ((node.children ?? []).length > 0) {
+    ElMessage.warning('请先删除该分类下的子分类')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确定删除分类「${node.label}」吗？删除后不可恢复。`,
+      '确认删除分类',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+
+  const id = node.id
+  categoryMutating.value = true
+  try {
+    await deleteTemplateCategory(id)
+    ElMessage.success('分类已删除')
+    await afterCategoryMutation()
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) {
+      if (error.message.includes('子分类')) {
+        ElMessage.error(error.message)
+        return
+      }
+      try {
+        await ElMessageBox.confirm(
+          `${error.message}\n\n是否强制移除引用该分类的模板配置，并删除此分类？`,
+          '分类仍被模板引用',
+          {
+            confirmButtonText: '强制移除并删除',
+            cancelButtonText: '取消',
+            type: 'warning',
+          },
+        )
+      } catch {
+        return
+      }
+      try {
+        await deleteTemplateCategory(id, true)
+        ElMessage.success('分类及模板引用已强制移除')
+        await afterCategoryMutation()
+      } catch (forceError) {
+        ElMessage.error(actionError(forceError, '强制删除分类失败', '管理模板分类'))
+      }
+      return
+    }
+    ElMessage.error(actionError(error, '删除分类失败', '管理模板分类'))
+  } finally {
+    categoryMutating.value = false
   }
 }
 
@@ -656,9 +1048,10 @@ onMounted(() => {
 
         <div class="toolbar-spacer" />
 
-        <el-button type="primary" :icon="Upload" :disabled="mode === 'upload'" @click="openUpload">
-          上传模板
+        <el-button type="primary" :icon="Plus" :disabled="mode === 'upload'" @click="openUpload">
+          新增模板
         </el-button>
+        <el-button :icon="CollectionTag" @click="openCategoryManager">分类管理</el-button>
         <el-button
           :icon="Back"
           :disabled="mode === 'list' && selectedId === null"
@@ -667,6 +1060,54 @@ onMounted(() => {
           返回列表
         </el-button>
       </form>
+
+      <div v-if="mode === 'list'" class="filter-bar">
+        <span class="filter-label">筛选</span>
+        <el-select
+          v-model="filterCategory"
+          class="filter-select filter-select--wide"
+          clearable
+          filterable
+          placeholder="全部分类"
+        >
+          <el-option
+            v-for="path in categoryFilterOptions"
+            :key="path"
+            :label="path"
+            :value="path"
+          />
+        </el-select>
+        <el-select
+          v-model="filterDocType"
+          class="filter-select"
+          clearable
+          filterable
+          placeholder="全部文档类型"
+        >
+          <el-option
+            v-for="type in docTypeFilterOptions"
+            :key="type"
+            :label="type"
+            :value="type"
+          />
+        </el-select>
+        <el-select
+          v-model="filterFileType"
+          class="filter-select"
+          clearable
+          placeholder="全部文件类型"
+        >
+          <el-option label="Word 文档" value="word" />
+          <el-option label="Excel 表格" value="excel" />
+          <el-option label="其他" value="other" />
+        </el-select>
+        <el-button v-if="hasFilters" link type="primary" @click="clearFilters">
+          清除筛选
+        </el-button>
+        <span class="filter-count muted">
+          显示 {{ filteredTemplates.length }} / {{ templates.length }}
+        </span>
+      </div>
     </NcCard>
 
     <el-alert
@@ -680,7 +1121,7 @@ onMounted(() => {
       <el-button link type="primary" @click="loadTemplates()">重新加载</el-button>
     </el-alert>
 
-    <NcCard v-if="mode === 'upload'" title="上传文书模板" class="upload-card">
+    <NcCard v-if="mode === 'upload'" title="新增文书模板" class="upload-card">
       <template #actions>
         <NcStatusDot status="default" label="新建模板" />
       </template>
@@ -751,11 +1192,14 @@ onMounted(() => {
         </div>
 
         <div class="form-field form-field--full">
-          <span class="field-label">适用分类（可多选）</span>
+          <span class="field-label">适用分类（可多选，支持任意层级独立勾选）</span>
           <div class="tree-tools">
+            <el-button link type="primary" @click="expandUploadCategories">展开全部</el-button>
+            <el-button link @click="collapseUploadCategories">收起全部</el-button>
             <el-button link type="primary" @click="checkAllUploadCategories">全选</el-button>
             <el-button link @click="clearUploadCategories">清空</el-button>
-            <span class="muted">仅保存叶子分类</span>
+            <el-button link type="primary" @click="openCategoryManager">管理分类</el-button>
+            <span class="muted">保存时保留父分类路径</span>
           </div>
           <el-alert
             v-if="categoryError"
@@ -764,7 +1208,9 @@ onMounted(() => {
             :title="categoryError"
             :closable="false"
             show-icon
-          />
+          >
+            <el-button link type="primary" @click="loadCategories()">重新加载分类树</el-button>
+          </el-alert>
           <div v-loading="categoryLoading" class="tree-box">
             <el-tree
               ref="uploadTreeRef"
@@ -772,8 +1218,9 @@ onMounted(() => {
               :props="categoryTreeProps"
               node-key="path"
               show-checkbox
+              check-strictly
               default-expand-all
-              empty-text="暂无分类"
+              :empty-text="categoryError ? '分类加载失败，请重试' : '暂无分类'"
             />
           </div>
         </div>
@@ -791,7 +1238,7 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="form-actions">
+      <div class="form-actions form-actions--sticky">
         <el-button :disabled="uploadSubmitting" @click="backToList">取消</el-button>
         <el-button type="primary" :loading="uploadSubmitting" @click="submitUpload">
           上传模板
@@ -802,13 +1249,20 @@ onMounted(() => {
     <div v-else class="browse-grid" :class="{ 'browse-grid--detail': selectedId !== null }">
       <NcCard padding="none" class="list-card" title="模板列表">
         <template #actions>
-          <NcStatusDot status="default" :label="`共 ${templates.length} 个`" />
+          <NcStatusDot
+            status="default"
+            :label="
+              hasFilters
+                ? `显示 ${filteredTemplates.length} / ${templates.length} 个`
+                : `共 ${templates.length} 个`
+            "
+          />
         </template>
 
         <div v-loading="listLoading && templates.length > 0" class="list-area">
           <el-skeleton v-if="listLoading && templates.length === 0" :rows="7" animated class="list-skeleton" />
 
-          <div v-else-if="templates.length > 0" class="template-table">
+          <div v-else-if="filteredTemplates.length > 0" class="template-table">
             <div class="template-table__head">
               <span>模板名称</span>
               <span>文件类型</span>
@@ -818,7 +1272,7 @@ onMounted(() => {
             </div>
 
             <button
-              v-for="item in templates"
+              v-for="item in filteredTemplates"
               :key="item.id"
               type="button"
               class="template-row"
@@ -847,8 +1301,14 @@ onMounted(() => {
           </div>
 
           <div v-else-if="!listLoading && !listError" class="empty-wrap">
-            <el-empty description="暂无文书模板" :image-size="72">
-              <p class="empty-hint">点击「上传模板」添加第一份文书模板。</p>
+            <el-empty
+              :description="templates.length > 0 ? '没有符合筛选条件的模板' : '暂无文书模板'"
+              :image-size="72"
+            >
+              <el-button v-if="hasFilters" type="primary" plain @click="clearFilters">
+                清除筛选
+              </el-button>
+              <p v-else class="empty-hint">点击「新增模板」添加第一份文书模板。</p>
             </el-empty>
           </div>
         </div>
@@ -886,6 +1346,64 @@ onMounted(() => {
                 <span class="chip chip--seal">{{ detail.docType || '未设文档类型' }}</span>
               </div>
             </header>
+
+            <div class="detail-actions detail-actions--top">
+              <el-button :icon="Download" :loading="downloading" @click="downloadFile">
+                下载
+              </el-button>
+              <el-button
+                :icon="UploadFilled"
+                :loading="changingFile"
+                @click="chooseReplaceFile"
+              >
+                变更文件
+              </el-button>
+              <el-button :icon="Edit" @click="openConfigEdit">修改字段映射</el-button>
+              <el-button :icon="CollectionTag" @click="openCategoryEdit">修改分类</el-button>
+              <el-button
+                :icon="Top"
+                :loading="moving === 'up'"
+                :disabled="moving !== null"
+                @click="moveTemplate('up')"
+              >
+                上移
+              </el-button>
+              <el-button
+                :icon="Bottom"
+                :loading="moving === 'down'"
+                :disabled="moving !== null"
+                @click="moveTemplate('down')"
+              >
+                下移
+              </el-button>
+              <el-button
+                type="danger"
+                plain
+                :icon="Delete"
+                :loading="deleting"
+                @click="removeTemplate"
+              >
+                删除
+              </el-button>
+            </div>
+
+            <el-alert
+              v-if="detailWarnings.length > 0"
+              class="inline-alert"
+              type="warning"
+              :closable="false"
+              show-icon
+            >
+              <template #title>配置提示（{{ detailWarnings.length }}）</template>
+              <ul class="warning-list">
+                <li v-for="(warning, index) in detailWarnings.slice(0, 12)" :key="index">
+                  {{ warning }}
+                </li>
+                <li v-if="detailWarnings.length > 12" class="warning-more">
+                  …另有 {{ detailWarnings.length - 12 }} 项（仅提示，不影响保存）
+                </li>
+              </ul>
+            </el-alert>
 
             <dl class="meta-grid">
               <div>
@@ -930,8 +1448,55 @@ onMounted(() => {
               </div>
             </dl>
 
+            <div class="doc-type-editor">
+              <span class="field-label">文档类型</span>
+              <el-alert
+                v-if="docTypesError"
+                class="inline-alert"
+                type="warning"
+                :title="docTypesError"
+                :closable="false"
+                show-icon
+              >
+                <el-button link type="primary" @click="loadDocTypes()">重新加载文档类型</el-button>
+              </el-alert>
+              <div class="copies-row">
+                <el-select
+                  v-model="detailDocType"
+                  class="doc-type-select"
+                  filterable
+                  clearable
+                  :loading="docTypesLoading"
+                  placeholder="请选择文档类型"
+                >
+                  <el-option
+                    v-for="type in detailDocTypeOptions"
+                    :key="type"
+                    :label="type"
+                    :value="type"
+                  />
+                </el-select>
+                <el-button
+                  type="primary"
+                  plain
+                  :loading="savingDocType"
+                  :disabled="!detailDocType"
+                  @click="saveDocType"
+                >
+                  保存文档类型
+                </el-button>
+              </div>
+            </div>
+
             <div class="copies-editor">
               <span class="field-label">默认份数（1-99）</span>
+              <p class="field-hint copies-hint">
+                {{
+                  classificationCopiesCount > 0
+                    ? `该模板已配置 ${classificationCopiesCount} 项分类级份数（分类命中时优先）`
+                    : '未配置分类级份数'
+                }}
+              </p>
               <div class="copies-row">
                 <el-input-number
                   v-model="copies"
@@ -965,46 +1530,6 @@ onMounted(() => {
               accept=".docx,.xlsx"
               @change="onReplaceFileChange"
             />
-
-            <div class="detail-actions">
-              <el-button :icon="Download" :loading="downloading" @click="downloadFile">
-                下载
-              </el-button>
-              <el-button
-                :icon="UploadFilled"
-                :loading="changingFile"
-                @click="chooseReplaceFile"
-              >
-                变更文件
-              </el-button>
-              <el-button :icon="Edit" @click="openConfigEdit">修改字段映射</el-button>
-              <el-button :icon="CollectionTag" @click="openCategoryEdit">修改分类</el-button>
-              <el-button
-                :icon="Top"
-                :loading="moving === 'up'"
-                :disabled="moving !== null"
-                @click="moveTemplate('up')"
-              >
-                上移
-              </el-button>
-              <el-button
-                :icon="Bottom"
-                :loading="moving === 'down'"
-                :disabled="moving !== null"
-                @click="moveTemplate('down')"
-              >
-                下移
-              </el-button>
-              <el-button
-                type="danger"
-                plain
-                :icon="Delete"
-                :loading="deleting"
-                @click="removeTemplate"
-              >
-                删除
-              </el-button>
-            </div>
           </div>
         </NcCard>
       </aside>
@@ -1038,12 +1563,21 @@ onMounted(() => {
     <el-dialog
       v-model="categoryVisible"
       title="修改模板分类"
-      :width="isNarrow ? '92%' : '560px'"
+      :width="isNarrow ? '92%' : '600px'"
       append-to-body
       destroy-on-close
       @opened="applyCategoryDialogKeys"
     >
-      <p class="dialog-hint">勾选模板适用的业务分类；保存时仅提交叶子分类路径。</p>
+      <p class="dialog-hint">
+        勾选模板适用的业务分类；支持任意层级独立勾选，保存时保留父分类路径。
+      </p>
+      <div class="tree-tools">
+        <el-button link type="primary" @click="expandDialogCategories">展开全部</el-button>
+        <el-button link @click="collapseDialogCategories">收起全部</el-button>
+        <el-button link type="primary" @click="checkAllDialogCategories">全选</el-button>
+        <el-button link @click="clearDialogCategories">清空</el-button>
+        <el-button link type="primary" @click="openCategoryManager">管理分类</el-button>
+      </div>
       <el-alert
         v-if="categoryError"
         class="inline-alert"
@@ -1051,7 +1585,9 @@ onMounted(() => {
         :title="categoryError"
         :closable="false"
         show-icon
-      />
+      >
+        <el-button link type="primary" @click="loadCategories()">重新加载分类树</el-button>
+      </el-alert>
       <div v-loading="categoryLoading" class="tree-box">
         <el-tree
           ref="categoryTreeRef"
@@ -1059,15 +1595,145 @@ onMounted(() => {
           :props="categoryTreeProps"
           node-key="path"
           show-checkbox
+          check-strictly
           default-expand-all
           :default-checked-keys="categoryKeys"
-          empty-text="暂无分类"
+          :empty-text="categoryError ? '分类加载失败，请重试' : '暂无分类'"
         />
       </div>
       <template #footer>
         <el-button :disabled="savingCategories" @click="categoryVisible = false">取消</el-button>
         <el-button type="primary" :loading="savingCategories" @click="saveCategories">
           保存分类
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="manageVisible"
+      title="分类节点管理"
+      :width="isNarrow ? '94%' : '720px'"
+      append-to-body
+      destroy-on-close
+      @opened="handleManageOpened"
+    >
+      <div class="manage-toolbar">
+        <el-button
+          type="primary"
+          :icon="Plus"
+          :disabled="categoryMutating"
+          @click="openRootCategoryDialog"
+        >
+          新增一级分类
+        </el-button>
+        <el-button @click="expandManageTree(true)">展开全部</el-button>
+        <el-button @click="expandManageTree(false)">收起全部</el-button>
+        <el-button :icon="Refresh" :loading="categoryLoading" @click="loadCategories()">
+          刷新
+        </el-button>
+      </div>
+      <p class="dialog-hint">
+        内置分类不可改名 / 删除，但可在其下新增子分类；自定义分类可新增子分类、重命名、删除。
+      </p>
+      <el-alert
+        v-if="categoryError"
+        class="inline-alert"
+        type="warning"
+        :title="categoryError"
+        :closable="false"
+        show-icon
+      >
+        <el-button link type="primary" @click="loadCategories()">重新加载分类树</el-button>
+      </el-alert>
+      <div v-loading="categoryLoading" class="tree-box tree-box--manage">
+        <el-tree
+          ref="manageTreeRef"
+          :data="categoryTree"
+          :props="categoryTreeProps"
+          node-key="path"
+          default-expand-all
+          :expand-on-click-node="false"
+          :empty-text="categoryError ? '分类加载失败，请重试' : '暂无分类'"
+        >
+          <template #default="{ data }">
+            <div class="tree-node">
+              <span class="tree-node__label">
+                <span class="tree-node__text" :title="data.path">{{ data.label }}</span>
+                <em
+                  v-if="isCustomCategory(data)"
+                  class="tree-node__badge tree-node__badge--custom"
+                >
+                  自定义
+                </em>
+                <em v-else class="tree-node__badge">内置</em>
+              </span>
+              <span class="tree-node__actions">
+                <el-button
+                  link
+                  type="primary"
+                  size="small"
+                  :disabled="categoryMutating"
+                  @click.stop="openChildCategoryDialog(data)"
+                >
+                  新增子分类
+                </el-button>
+                <template v-if="isCustomCategory(data)">
+                  <el-button
+                    link
+                    size="small"
+                    :disabled="categoryMutating"
+                    @click.stop="openRenameCategoryDialog(data)"
+                  >
+                    重命名
+                  </el-button>
+                  <el-button
+                    link
+                    type="danger"
+                    size="small"
+                    :disabled="categoryMutating"
+                    @click.stop="removeCategoryNode(data)"
+                  >
+                    删除
+                  </el-button>
+                </template>
+              </span>
+            </div>
+          </template>
+        </el-tree>
+      </div>
+      <template #footer>
+        <el-button @click="manageVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="nodeDialogVisible"
+      :title="nodeDialogMode === 'rename' ? '重命名分类' : '新增分类'"
+      :width="isNarrow ? '92%' : '460px'"
+      append-to-body
+      destroy-on-close
+    >
+      <p v-if="nodeDialogMode === 'rename'" class="dialog-hint">
+        原分类：{{ nodeEditing?.path }}
+      </p>
+      <p v-else class="dialog-hint">
+        上级分类：{{ nodeParent ? nodeParent.path : '（无，新增为一级分类）' }}
+      </p>
+      <el-form label-position="top" @submit.prevent="submitCategoryNode">
+        <el-form-item label="分类名称">
+          <el-input
+            v-model="nodeLabel"
+            maxlength="120"
+            show-word-limit
+            placeholder="请输入分类名称"
+            @keyup.enter="submitCategoryNode"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="nodeSaving" @click="nodeDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="nodeSaving" @click="submitCategoryNode">
+          保存
         </el-button>
       </template>
     </el-dialog>
@@ -1082,10 +1748,13 @@ onMounted(() => {
 }
 
 .toolbar-card,
-.list-card,
-.detail-card,
-.upload-card {
+.list-card {
   overflow: hidden;
+}
+
+.upload-card {
+  /* sticky 提交栏需要非滚动祖先，不能使用 overflow: hidden */
+  overflow: visible;
 }
 
 .toolbar {
@@ -1103,6 +1772,35 @@ onMounted(() => {
 
 .toolbar-spacer {
   flex: 1;
+}
+
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--nc-line-faint);
+}
+
+.filter-label {
+  color: var(--nc-muted);
+  font-family: var(--nc-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.filter-select {
+  width: 150px;
+}
+
+.filter-select--wide {
+  width: 220px;
+}
+
+.filter-count {
+  margin-left: auto;
 }
 
 .load-error {
@@ -1271,9 +1969,24 @@ onMounted(() => {
   text-align: center;
 }
 
+/* 详情列不再 sticky，详情卡自身限高滚动，避免底部操作被视口裁掉 */
 .detail-column {
-  position: sticky;
-  top: 16px;
+  min-width: 0;
+}
+
+.detail-card {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 32px);
+}
+
+.detail-card :deep(.nc-card__head) {
+  flex: none;
+}
+
+.detail-card :deep(.nc-card__body) {
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .detail-body {
@@ -1338,11 +2051,16 @@ onMounted(() => {
   white-space: normal;
 }
 
-.copies-editor {
+.copies-editor,
+.doc-type-editor {
   padding: 12px;
   border: 1px solid var(--nc-line-faint);
   border-radius: var(--nc-radius-sm);
   background-color: var(--nc-paper-3);
+}
+
+.copies-hint {
+  margin: 4px 0 0;
 }
 
 .copies-row {
@@ -1357,8 +2075,28 @@ onMounted(() => {
   width: 130px;
 }
 
+.doc-type-select {
+  width: 100%;
+  max-width: 260px;
+}
+
 .copies-row :deep(.el-button) {
   margin-left: 0;
+}
+
+.warning-list {
+  max-height: 180px;
+  margin: 4px 0 0;
+  padding-left: 18px;
+  overflow: auto;
+}
+
+.warning-list li {
+  line-height: 1.7;
+}
+
+.warning-list .warning-more {
+  color: var(--nc-muted);
 }
 
 .config-block {
@@ -1400,6 +2138,17 @@ onMounted(() => {
   gap: 8px;
   padding-top: 12px;
   border-top: 1px solid var(--nc-line-faint);
+}
+
+.detail-actions--top {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-top: 0;
+  padding-bottom: 12px;
+  border-top: none;
+  border-bottom: 1px solid var(--nc-line-faint);
+  background-color: var(--nc-paper-2);
 }
 
 .detail-actions :deep(.el-button) {
@@ -1500,6 +2249,15 @@ onMounted(() => {
   background-color: var(--nc-paper-soft);
 }
 
+.tree-box--manage {
+  max-height: 460px;
+}
+
+.tree-box :deep(.el-tree-node__label) {
+  flex: 1;
+  min-width: 0;
+}
+
 .config-input :deep(.el-textarea__inner) {
   font-family: var(--nc-font-mono);
   font-size: 12px;
@@ -1514,6 +2272,18 @@ onMounted(() => {
   border-top: 1px solid var(--nc-line-faint);
 }
 
+.form-actions--sticky {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  margin: 6px -22px -20px;
+  padding: 12px 22px;
+  border-top: 1px solid var(--nc-line);
+  border-radius: 0 0 var(--nc-radius-sm) var(--nc-radius-sm);
+  background-color: var(--nc-paper-2);
+  box-shadow: 0 -6px 12px -10px rgb(0 0 0 / 28%);
+}
+
 .form-actions :deep(.el-button) {
   margin-left: 0;
 }
@@ -1523,6 +2293,77 @@ onMounted(() => {
   color: var(--nc-muted);
   font-size: var(--nc-text-sm);
   line-height: 1.6;
+}
+
+.manage-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.manage-toolbar :deep(.el-button) {
+  margin-left: 0;
+}
+
+.tree-node {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 1px 0;
+}
+
+.tree-node__label {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tree-node__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-node__badge {
+  flex: none;
+  padding: 0 4px;
+  border: 1px solid var(--nc-line);
+  border-radius: var(--nc-radius-xs);
+  color: var(--nc-muted);
+  font-size: 9px;
+  font-style: normal;
+  line-height: 1.6;
+}
+
+.tree-node__badge--custom {
+  border-color: var(--nc-seal);
+  background-color: var(--nc-seal-soft);
+  color: var(--nc-seal-dark);
+}
+
+.tree-node__actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--nc-transition);
+}
+
+.tree-node__actions :deep(.el-button) {
+  margin-left: 0;
+}
+
+:deep(.el-tree-node__content:hover) .tree-node__actions,
+.tree-node:focus-within .tree-node__actions {
+  opacity: 1;
 }
 
 @media (max-width: 1280px) {
@@ -1542,8 +2383,21 @@ onMounted(() => {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .detail-column {
+  .detail-card {
+    display: block;
+    max-height: none;
+  }
+
+  .detail-card :deep(.nc-card__body) {
+    overflow-y: visible;
+  }
+
+  .detail-actions--top {
     position: static;
+  }
+
+  .tree-node__actions {
+    opacity: 1;
   }
 }
 
@@ -1563,6 +2417,16 @@ onMounted(() => {
 
   .toolbar :deep(.el-button) {
     flex: 1;
+  }
+
+  .filter-select,
+  .filter-select--wide {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .filter-count {
+    margin-left: 0;
   }
 
   .template-table__head {
@@ -1619,6 +2483,11 @@ onMounted(() => {
 
   .form-actions {
     flex-direction: column-reverse;
+  }
+
+  .form-actions--sticky {
+    margin: 6px -15px -16px;
+    padding: 12px 15px;
   }
 
   .form-actions :deep(.el-button) {

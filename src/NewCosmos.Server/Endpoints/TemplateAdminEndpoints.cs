@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using NewCosmos.Constants;
 using NewCosmos.Models.Results;
+using NewCosmos.Server.Contracts;
 using NewCosmos.Server.Infrastructure;
 using NewCosmos.Server.Services;
 using NewCosmos.Services.UserManagement;
@@ -22,6 +23,9 @@ public static class TemplateAdminEndpoints
     {
         app.MapGet(Prefix, ListAsync);
         app.MapGet($"{Prefix}/categories", GetCategoriesAsync);
+        app.MapPost($"{Prefix}/categories", CreateCategoryAsync);
+        app.MapPut($"{Prefix}/categories/{{id:long}}", RenameCategoryAsync).DisableAntiforgery();
+        app.MapDelete($"{Prefix}/categories/{{id:long}}", DeleteCategoryAsync);
         app.MapGet($"{Prefix}/doc-types", GetDocTypesAsync);
         app.MapGet($"{Prefix}/{{id:long}}", GetDetailAsync);
         app.MapGet($"{Prefix}/{{id:long}}/file", GetFileAsync);
@@ -53,10 +57,11 @@ public static class TemplateAdminEndpoints
             : Results.Json(result.Value);
     }
 
-    /// <summary>GET /api/template-admin/categories → 固定分类树。</summary>
+    /// <summary>GET /api/template-admin/categories → 内置 + 自定义分类树。</summary>
     private static async Task<IResult> GetCategoriesAsync(
         HttpContext context,
         INewPermissionService permissions,
+        TemplateAdminService templates,
         CancellationToken ct)
     {
         var denied = await RequireAsync(context, permissions, ct);
@@ -65,7 +70,10 @@ public static class TemplateAdminEndpoints
             return denied;
         }
 
-        return Results.Json(TemplateAdminService.GetCategoryTree());
+        var result = await templates.GetCategoryTreeAsync(ct);
+        return result.IsFailure
+            ? MapResult(context, result)
+            : Results.Json(result.Value);
     }
 
     /// <summary>GET /api/template-admin/doc-types → TemplateDocTypes.All。</summary>
@@ -81,6 +89,82 @@ public static class TemplateAdminEndpoints
         }
 
         return Results.Json(TemplateAdminService.GetDocTypes());
+    }
+
+    /// <summary>POST /api/template-admin/categories body {parentPath,label} → {id,path}。</summary>
+    private static async Task<IResult> CreateCategoryAsync(
+        [FromBody] TemplateCategoryCreateRequest? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        TemplateAdminService templates,
+        CancellationToken ct)
+    {
+        var denied = await RequireAsync(context, permissions, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (request is null)
+        {
+            return InvalidRequest(context, "请求体不能为空");
+        }
+
+        var result = await templates.CreateCategoryAsync(request.ParentPath, request.Label, ct);
+        if (result.IsFailure)
+        {
+            return MapResult(context, result);
+        }
+
+        return Results.Json(new { id = result.Value.Id, path = result.Value.Path });
+    }
+
+    /// <summary>PUT /api/template-admin/categories/{id} body {label} → {id,path}。</summary>
+    private static async Task<IResult> RenameCategoryAsync(
+        long id,
+        [FromBody] TemplateCategoryUpdateRequest? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        TemplateAdminService templates,
+        CancellationToken ct)
+    {
+        var denied = await RequireAsync(context, permissions, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (request is null)
+        {
+            return InvalidRequest(context, "请求体不能为空");
+        }
+
+        var result = await templates.RenameCategoryAsync(id, request.Label, ct);
+        if (result.IsFailure)
+        {
+            return MapResult(context, result);
+        }
+
+        return Results.Json(new { id = result.Value.Id, path = result.Value.Path });
+    }
+
+    /// <summary>DELETE /api/template-admin/categories/{id}?force=false → 204 / 409。</summary>
+    private static async Task<IResult> DeleteCategoryAsync(
+        long id,
+        HttpContext context,
+        INewPermissionService permissions,
+        TemplateAdminService templates,
+        bool? force,
+        CancellationToken ct)
+    {
+        var denied = await RequireAsync(context, permissions, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        var result = await templates.DeleteCategoryAsync(id, force ?? false, ct);
+        return result.IsFailure ? MapResult(context, result) : Results.NoContent();
     }
 
     /// <summary>GET /api/template-admin/{id} → 详情（含 configJson / categories / 默认份数）。</summary>
@@ -134,7 +218,7 @@ public static class TemplateAdminEndpoints
     }
 
     /// <summary>
-    /// POST /api/template-admin（multipart：file、name、docType、categories、configJson?）→ { id }
+    /// POST /api/template-admin（multipart：file、name、docType、categories、configJson?）→ { id, configWarnings }
     /// categories 支持 JSON 数组或逗号分隔；docType 必须在 TemplateDocTypes.All。
     /// </summary>
     private static async Task<IResult> CreateAsync(
@@ -160,11 +244,16 @@ public static class TemplateAdminEndpoints
 
         return result.IsFailure
             ? MapResult(context, result)
-            : Results.Json(new { id = result.Value });
+            : Results.Json(new
+            {
+                id = result.Value.Id,
+                configWarnings = result.Value.ConfigWarnings
+            });
     }
 
     /// <summary>
-    /// PUT /api/template-admin/{id}（multipart：可选 file、name、docType、categories、configJson、copies）。
+    /// PUT /api/template-admin/{id}（multipart：可选 file、name、docType、categories、configJson、copies）
+    /// → 200 { configWarnings }。
     /// file 非空时替换 file_data / hash / type；copies 只改 config_json.copies（1-99），保留其他键。
     /// </summary>
     private static async Task<IResult> UpdateAsync(
@@ -190,7 +279,9 @@ public static class TemplateAdminEndpoints
         var result = await templates.UpdateAsync(
             id, name, docType, categories, configJson, copies, fileData, file?.FileName, ct);
 
-        return result.IsFailure ? MapResult(context, result) : Results.NoContent();
+        return result.IsFailure
+            ? MapResult(context, result)
+            : Results.Json(new { configWarnings = result.Value });
     }
 
     /// <summary>DELETE /api/template-admin/{id} → 物理删除。</summary>
@@ -277,9 +368,17 @@ public static class TemplateAdminEndpoints
         if (result.ErrorCode is ErrorCodes.TEMPLATE_NOT_FOUND
             or ErrorCodes.FILE_NOT_FOUND
             or ErrorCodes.RECORD_NOT_FOUND
-            or ErrorCodes.NOT_FOUND)
+            or ErrorCodes.NOT_FOUND
+            or TemplateAdminService.CategoryNotFound)
         {
             return NotFound(context, result.Message ?? "请求的资源不存在");
+        }
+
+        if (result.ErrorCode is TemplateAdminService.CategoryHasChildren
+            or TemplateAdminService.CategoryInUse
+            or TemplateAdminService.CategoryDuplicate)
+        {
+            return Conflict(context, result.Message ?? "分类操作冲突");
         }
 
         if (result.ErrorCode == ErrorCodes.VALIDATION_FAILED)
@@ -292,6 +391,10 @@ public static class TemplateAdminEndpoints
 
     private static IResult InvalidRequest(HttpContext context, string message)
         => ApiErrors.Write(context, StatusCodes.Status400BadRequest,
+            ApiErrorCodes.ValidationError, message);
+
+    private static IResult Conflict(HttpContext context, string message)
+        => ApiErrors.Write(context, StatusCodes.Status409Conflict,
             ApiErrorCodes.ValidationError, message);
 
     private static IResult NotFound(HttpContext context, string message)

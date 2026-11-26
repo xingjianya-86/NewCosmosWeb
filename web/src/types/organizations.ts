@@ -11,6 +11,8 @@ export interface OrganizationStats {
   totalUsers: number
   parentOrganizations: number
   rootOrganizations: number
+  /** 数据范围内特困供养机构数。 */
+  specialCareInstitutionCount: number
 }
 
 export interface OrganizationTreeResponse {
@@ -43,6 +45,12 @@ export interface OrganizationDetail {
   countyName: string
   townName: string
   villageName: string
+  /** 组织关联用户数（详情接口附带）。 */
+  userCount: number
+  /** 创建时间（ISO 字符串）。 */
+  createdAt: string | null
+  /** 更新时间（ISO 字符串）。 */
+  updatedAt: string | null
 }
 
 export interface OrganizationSaveInput {

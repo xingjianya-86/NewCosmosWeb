@@ -198,6 +198,7 @@ public class OrganizationService : BaseService, IOrganizationService
             InstitutionType = request.InstitutionType,
             InstitutionCategory = request.InstitutionCategory,
             IsSpecialCareInstitution = request.IsSpecialCareInstitution,
+            ProvinceId = request.ProvinceId,
             CityId = request.CityId,
             CountyId = request.CountyId,
             TownId = request.TownId,

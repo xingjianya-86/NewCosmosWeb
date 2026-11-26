@@ -333,6 +333,34 @@ public static class ErrorCodes
 
     #endregion
 
+    #region 彩票助手 (LOTTERY_xxx)
+
+    /// <summary>开奖数据同步失败（官方接口不可用/解析失败）</summary>
+    public const string LOTTERY_SYNC_FAILED = "LOTTERY_SYNC_FAILED";
+
+    /// <summary>彩票 Worker 不可达（未启动、网络不通或地址错误）</summary>
+    public const string LOTTERY_WORKER_UNREACHABLE = "LOTTERY_WORKER_UNREACHABLE";
+
+    /// <summary>Worker 返回的其他错误</summary>
+    public const string LOTTERY_WORKER_ERROR = "LOTTERY_WORKER_ERROR";
+
+    /// <summary>训练模型不存在或窗口不匹配（需先训练）</summary>
+    public const string LOTTERY_MODEL_NOT_FOUND = "LOTTERY_MODEL_NOT_FOUND";
+
+    /// <summary>Worker 任务不存在（Worker 重启后内存队列丢失）</summary>
+    public const string LOTTERY_JOB_NOT_FOUND = "LOTTERY_JOB_NOT_FOUND";
+
+    /// <summary>Worker 队列已满，稍后重试</summary>
+    public const string LOTTERY_QUEUE_FULL = "LOTTERY_QUEUE_FULL";
+
+    /// <summary>Worker 依赖缺失或数据库未配置</summary>
+    public const string LOTTERY_DEPENDENCY_MISSING = "LOTTERY_DEPENDENCY_MISSING";
+
+    /// <summary>开奖数据格式无效</summary>
+    public const string LOTTERY_DATA_INVALID = "LOTTERY_DATA_INVALID";
+
+    #endregion
+
     #region 操作状态 (OP_xxx)
 
     /// <summary>操作进行中</summary>

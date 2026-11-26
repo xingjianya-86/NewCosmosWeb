@@ -11,8 +11,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -114,6 +116,54 @@ def health(request: Request) -> dict:
             "maxPendingJobs": settings.max_pending_jobs,
         },
     }
+
+
+# ---------------------------------------------------------------- 模型
+
+
+def _read_metadata(path: Path) -> dict:
+    try:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except (OSError, ValueError):
+        logger.warning("模型元数据读取失败: %s", path)
+    return {}
+
+
+@app.get("/models")
+def list_models(request: Request) -> dict:
+    """列出已训练模型（供 Server 判定「模型就绪」，不触发任何训练）。"""
+    settings = request.app.state.settings
+    models: list[dict] = []
+    root = settings.model_dir
+    if root.is_dir():
+        for type_dir in sorted(root.iterdir()):
+            if not type_dir.is_dir():
+                continue
+            lottery_type = type_dir.name.lower()
+            if lottery_type not in ("ssq", "dlt"):
+                continue
+            for window_dir in sorted(type_dir.glob("window_*")):
+                if not window_dir.is_dir():
+                    continue
+                if not (window_dir / "red.keras").is_file() or not (window_dir / "blue.keras").is_file():
+                    continue
+                try:
+                    window = int(window_dir.name.split("_", 1)[1])
+                except (IndexError, ValueError):
+                    continue
+                metadata = _read_metadata(window_dir / "metadata.json")
+                models.append(
+                    {
+                        "lotteryType": lottery_type,
+                        "window": window,
+                        "trainedAt": metadata.get("trained_at") or metadata.get("timestamp"),
+                        "metadata": metadata,
+                    }
+                )
+    return {"models": models, "modelDir": str(root)}
 
 
 # ---------------------------------------------------------------- 任务

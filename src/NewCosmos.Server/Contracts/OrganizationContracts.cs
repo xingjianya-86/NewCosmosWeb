@@ -18,15 +18,20 @@ public sealed record OrganizationTreeNodeDto(
 /// <summary>
 /// 组织树统计：
 /// <para>totalOrganizations=范围内机构总数；totalUsers=范围内机构关联用户数；</para>
-/// <para>parentOrganizations=存在（范围内）下级的机构数；rootOrganizations=返回树中的顶级机构数。</para>
+/// <para>parentOrganizations=存在（范围内）下级的机构数；rootOrganizations=返回树中的顶级机构数；</para>
+/// <para>specialCareInstitutionCount=范围内特困供养机构数。</para>
 /// </summary>
 public sealed record OrganizationStatsDto(
     int TotalOrganizations,
     int TotalUsers,
     int ParentOrganizations,
-    int RootOrganizations);
+    int RootOrganizations,
+    int SpecialCareInstitutionCount);
 
-/// <summary>组织详情：字段与 PC <c>Organization</c> 对齐（区划名称由 Core 查询 JOIN 带出）。</summary>
+/// <summary>
+/// 组织详情：字段与 PC <c>Organization</c> 对齐（区划名称由 Core 查询 JOIN 带出）。
+/// UserCount 为该组织下的用户数（<c>IOrganizationService.GetUserCountAsync</c>）。
+/// </summary>
 public sealed record OrganizationDetailDto(
     int Id,
     string Name,
@@ -51,7 +56,10 @@ public sealed record OrganizationDetailDto(
     string CityName,
     string CountyName,
     string TownName,
-    string VillageName);
+    string VillageName,
+    int UserCount,
+    DateTime CreatedAt,
+    DateTime UpdatedAt);
 
 /// <summary>上级组织下拉项（仅在当前用户可管理组织范围内）。</summary>
 public sealed record OrganizationOptionDto(

@@ -1,15 +1,16 @@
 # 彩票 Worker 部署（10.110.0.2）
 
 NewCosmos 彩票训练/推理的独立容器：Python 3.11 + FastAPI + TensorFlow CPU。
-容器只监听 `127.0.0.1:8790`（或内部网络），**不映射公网**；NewCosmos.Server
-通过 `http://127.0.0.1:8790` 入队/轮询，认证与权限仍在 Server 侧。
+容器加入 `newcosmos_default` 网络，**不映射宿主端口/公网**；NewCosmos.Server
+通过 `http://newcosmos-lottery:8790` 入队/轮询，认证与权限仍在 Server 侧。
+（宿主机 8790 已被其它服务占用，因此不要再映射 `127.0.0.1:8790`。）
 
 ## 1. 组成
 
 ```text
 deploy/lottery/
 ├─ Dockerfile            python:3.11-slim、非 root(uid 10001)、HEALTHCHECK
-├─ docker-compose.yml    memory 2g / cpus 1.5、回环端口、模型/任务卷
+├─ docker-compose.yml    memory 2g / cpus 1.5、newcosmos_default 网络、模型/任务卷
 ├─ .env.example          复制为 .env 后填写（.env 不入库）
 └─ data/                 运行时创建（不入库）
    ├─ models/<彩种>/window_<N>/{red.keras,blue.keras,metadata.json}
@@ -38,7 +39,7 @@ vi .env                               # 填 NC_DB_*，密码只放 .env
 
 docker compose up -d --build
 docker compose ps
-curl -s http://127.0.0.1:8790/health | python3 -m json.tool
+docker exec newcosmos-lottery python -c "import urllib.request,json;print(json.dumps(json.load(urllib.request.urlopen('http://127.0.0.1:8790/health')),ensure_ascii=False,indent=2))"
 ```
 
 `docker compose` 会自动读取同目录 `.env` 做变量替换。更新代码后：

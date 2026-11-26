@@ -1,4 +1,4 @@
-using NewCosmos.Constants;
+﻿using NewCosmos.Constants;
 using NewCosmos.Models.Results;
 using NewCosmos.Server.Contracts;
 using NewCosmos.Server.Infrastructure;
@@ -14,8 +14,10 @@ namespace NewCosmos.Server.Endpoints;
 /// 用户权限 · 经办机构管理接口（对齐 PC <c>OrganizationPage</c> / <c>OrganizationImportPage</c>）。
 /// <para>
 /// 读接口要求 <c>ORG_VIEW</c>，写接口分别要求 <c>ORG_CREATE</c> / <c>ORG_EDIT</c> / <c>ORG_DELETE</c>。
-/// 数据范围来自 Core <see cref="IDataScopeService"/>：非全量范围用户只能看到/修改自己可管理组织子树，
-/// 树只返回范围内节点（父节点在范围外时该节点按顶级返回），越权一律 404。
+/// 数据范围来自 Core <see cref="IDataScopeService"/>：读接口只返回当前用户可管理组织子树
+/// （父节点在范围外时该节点按顶级返回，详情范围外 404）；新增/编辑/删除用
+/// <see cref="IDataScopeService.CanManageOrganizationAsync"/> 校验，越权 403。
+/// 新增根机构与 legacy 一致，不做范围拦截。
 /// </para>
 /// <para>
 /// 业务校验/导入解析全部在 Core <see cref="IOrganizationService"/>；本层只做权限、数据范围、上传落盘与错误映射。
@@ -28,14 +30,16 @@ public static class OrganizationEndpoints
     /// <summary>组织导入单文件上限 20MB（与任务约定一致）。</summary>
     private const long MaxImportFileBytes = 20L * 1024 * 1024;
 
+    /// <summary>导入结果最多返回的错误明细条数（ErrorCount 仍为全量）。</summary>
+    private const int MaxImportErrorDetails = 200;
+
     /// <summary>
     /// Core <see cref="DictionaryTypeCodes"/> 目前只有 InstitutionCategory / InstitutionType，
     /// 没有 InstitutionNature 常量；此处按字典分类键字面量读取，缺失时返回空数组。
     /// </summary>
     private const string InstitutionNatureCategory = "InstitutionNature";
 
-    private static readonly string[] AllowedImportExtensions =
-        [".xlsx", ".xls", ".csv", ".txt", ".tsv"];
+    private static readonly string[] AllowedImportExtensions = [".xlsx", ".xls", ".csv"];
 
     public static IEndpointRouteBuilder MapOrganizationEndpoints(this IEndpointRouteBuilder app)
     {
@@ -115,7 +119,8 @@ public static class OrganizationEndpoints
             filtered.Count,
             (int)totalUsers,
             parentIds.Count,
-            rootCount);
+            rootCount,
+            filtered.Count(org => org.IsSpecialCareInstitution));
 
         return Results.Json(new OrganizationTreeResponse(nodes, stats));
     }
@@ -184,7 +189,7 @@ public static class OrganizationEndpoints
             MapDictionaryKeys(categoriesResult.Value)));
     }
 
-    /// <summary>GET /api/system/organizations/{id} — 组织详情（越权 404）。</summary>
+    /// <summary>GET /api/system/organizations/{id} — 组织详情（范围外 404，含 userCount）。</summary>
     private static async Task<IResult> GetDetailAsync(
         int id,
         HttpContext context,
@@ -225,7 +230,13 @@ public static class OrganizationEndpoints
             return NotFound(context, "组织不存在");
         }
 
-        return Results.Json(MapDetail(result.Value));
+        var userCountResult = await organizations.GetUserCountAsync(id, ct);
+        if (userCountResult.IsFailure)
+        {
+            return ApiErrors.FromResult(context, userCountResult);
+        }
+
+        return Results.Json(MapDetail(result.Value, userCountResult.Value));
     }
 
     // ───────────────────────────── 写入 ─────────────────────────────
@@ -263,8 +274,9 @@ public static class OrganizationEndpoints
         }
 
         var parentId = NormalizeId(request.ParentId);
-        var scope = await ResolveScopeAsync(userId, dataScope, ct);
 
+        // 与 legacy 一致：无上级（新建根机构）不做数据范围拦截；
+        // 指定上级时，上级必须存在且在当前用户可管理范围内，否则 403。
         if (parentId is { } pid)
         {
             var parentResult = await organizations.GetByIdAsync(pid, ct);
@@ -278,15 +290,10 @@ public static class OrganizationEndpoints
                 return NotFound(context, "上级组织不存在");
             }
 
-            if (!scope.IsUnrestricted && !scope.OrganizationIds.Contains(pid))
+            if (!await dataScope.CanManageOrganizationAsync(userId, pid, ct))
             {
-                return NotFound(context, "上级组织不存在或无权在该组织下创建下级机构");
+                return Forbidden(context, "无权在该组织下创建下级机构");
             }
-        }
-        else if (!scope.IsUnrestricted)
-        {
-            // 非全量范围用户不能创建根机构：只能在自己可管理组织下新增下级。
-            return NotFound(context, "只能在本人可管理的组织下创建下级机构");
         }
 
         var coreRequest = new OrganizationCreateRequest
@@ -318,6 +325,7 @@ public static class OrganizationEndpoints
         }
 
         var newId = createResult.Value;
+        await dataScope.InvalidateAllCacheAsync();
         logger.LogSecurity("创建组织",
             ("Operator", userId),
             ("OrganizationId", newId),
@@ -328,7 +336,7 @@ public static class OrganizationEndpoints
             statusCode: StatusCodes.Status201Created);
     }
 
-    /// <summary>PUT /api/system/organizations/{id} — 编辑组织（越权 404）。</summary>
+    /// <summary>PUT /api/system/organizations/{id} — 编辑组织（无管理权限 403）。</summary>
     private static async Task<IResult> UpdateAsync(
         int id,
         OrganizationSaveInput? request,
@@ -378,51 +386,35 @@ public static class OrganizationEndpoints
         }
 
         var existing = existingResult.Value;
-        var scope = await ResolveScopeAsync(userId, dataScope, ct);
-        if (!scope.IsUnrestricted && !scope.OrganizationIds.Contains(id))
+
+        if (!await dataScope.CanManageOrganizationAsync(userId, id, ct))
         {
-            return NotFound(context, "组织不存在");
+            return Forbidden(context, "没有权限修改该组织");
         }
 
         var parentId = NormalizeId(request.ParentId);
-        if (parentId != NormalizeId(existing.ParentId))
+        if (parentId != NormalizeId(existing.ParentId) && parentId is { } newParentId)
         {
-            if (parentId is null)
+            var parentResult = await organizations.GetByIdAsync(newParentId, ct);
+            if (parentResult.IsFailure)
             {
-                if (!scope.IsUnrestricted)
-                {
-                    return NotFound(context, "无权将组织移动到根层级");
-                }
+                return ApiErrors.FromResult(context, parentResult);
             }
-            else
+
+            if (!parentResult.HasValue)
             {
-                var newParentId = parentId.Value;
-                var parentResult = await organizations.GetByIdAsync(newParentId, ct);
-                if (parentResult.IsFailure)
-                {
-                    return ApiErrors.FromResult(context, parentResult);
-                }
+                return NotFound(context, "上级组织不存在");
+            }
 
-                if (!parentResult.HasValue)
-                {
-                    return NotFound(context, "上级组织不存在");
-                }
+            var allResult = await organizations.GetAllAsync(ct);
+            if (allResult.IsFailure)
+            {
+                return ApiErrors.FromResult(context, allResult);
+            }
 
-                if (!scope.IsUnrestricted && !scope.OrganizationIds.Contains(newParentId))
-                {
-                    return NotFound(context, "上级组织不存在或无权操作");
-                }
-
-                var allResult = await organizations.GetAllAsync(ct);
-                if (allResult.IsFailure)
-                {
-                    return ApiErrors.FromResult(context, allResult);
-                }
-
-                if (CreatesCycle(allResult.Value, id, newParentId))
-                {
-                    return Invalid(context, "不能将组织设置为自身或自身下级机构");
-                }
+            if (CreatesCycle(allResult.Value, id, newParentId))
+            {
+                return Invalid(context, "不能将组织设置为自身或自身下级机构");
             }
         }
 
@@ -457,6 +449,7 @@ public static class OrganizationEndpoints
             return WriteFailure(context, updateResult.ErrorCode, updateResult.Message);
         }
 
+        await dataScope.InvalidateAllCacheAsync();
         logger.LogSecurity("修改组织",
             ("Operator", userId),
             ("OrganizationId", id),
@@ -502,9 +495,9 @@ public static class OrganizationEndpoints
             return NotFound(context, "组织不存在");
         }
 
-        if (!await IsInScopeAsync(userId, id, dataScope, ct))
+        if (!await dataScope.CanManageOrganizationAsync(userId, id, ct))
         {
-            return NotFound(context, "组织不存在");
+            return Forbidden(context, "没有权限删除该组织");
         }
 
         var deleteResult = await organizations.DeleteAsync(id, ct);
@@ -513,6 +506,7 @@ public static class OrganizationEndpoints
             return WriteFailure(context, deleteResult.ErrorCode, deleteResult.Message);
         }
 
+        await dataScope.InvalidateAllCacheAsync();
         logger.LogSecurity("删除组织",
             ("Operator", userId),
             ("OrganizationId", id),
@@ -551,7 +545,7 @@ public static class OrganizationEndpoints
         string? tempPath = null;
         try
         {
-            tempPath = await SaveUploadToTempAsync(file!, logger, ct);
+            tempPath = await SaveUploadToTempAsync(file!, ct);
             var preview = organizations.PreviewImport(tempPath, 5);
 
             var rows = (preview.PreviewRows ?? new List<OrganizationPreviewRow>())
@@ -585,13 +579,12 @@ public static class OrganizationEndpoints
         }
     }
 
-    /// <summary>POST /api/system/organizations/import — 从 Excel / CSV / TSV 导入组织。</summary>
+    /// <summary>POST /api/system/organizations/import — 从 Excel / CSV 导入组织。</summary>
     private static async Task<IResult> ImportAsync(
         IFormFile? file,
         HttpContext context,
         INewPermissionService permissions,
         IOrganizationService organizations,
-        IDataScopeService dataScope,
         ILoggerService logger,
         CancellationToken ct)
     {
@@ -611,18 +604,10 @@ public static class OrganizationEndpoints
             return invalid;
         }
 
-        // Core 组织导入不带上级机构列，导入结果一律落在根层级；
-        // 受限数据范围用户执行会把组织建到自己可管理子树之外，因此只允许全量范围管理员。
-        var scope = await ResolveScopeAsync(userId, dataScope, ct);
-        if (!scope.IsUnrestricted)
-        {
-            return NotFound(context, "批量导入会创建顶级机构，仅全量数据范围管理员可执行");
-        }
-
         string? tempPath = null;
         try
         {
-            tempPath = await SaveUploadToTempAsync(file!, logger, ct);
+            tempPath = await SaveUploadToTempAsync(file!, ct);
             var result = await organizations.ImportFromFileAsync(tempPath, progress: null, ct: ct);
 
             logger.LogSecurity("导入组织",
@@ -630,11 +615,16 @@ public static class OrganizationEndpoints
                 ("Imported", result.ImportedCount),
                 ("Failed", result.ErrorCount));
 
+            var errors = result.Errors ?? new List<string>();
+            var errorDetails = errors.Count > MaxImportErrorDetails
+                ? errors.Take(MaxImportErrorDetails).ToList()
+                : errors;
+
             return Results.Json(new OrganizationImportResponse(
                 result.Success,
                 result.ImportedCount,
                 result.ErrorCount,
-                result.Errors ?? new List<string>(),
+                errorDetails,
                 result.Warnings ?? new List<string>(),
                 Normalize(result.Message)));
         }
@@ -714,7 +704,7 @@ public static class OrganizationEndpoints
         return false;
     }
 
-    private static OrganizationDetailDto MapDetail(Organization org) => new(
+    private static OrganizationDetailDto MapDetail(Organization org, int userCount) => new(
         org.Id,
         Normalize(org.Name),
         Normalize(org.Abbreviation),
@@ -738,7 +728,10 @@ public static class OrganizationEndpoints
         Normalize(org.CityName),
         Normalize(org.CountyName),
         Normalize(org.TownName),
-        Normalize(org.VillageName));
+        Normalize(org.VillageName),
+        userCount,
+        org.CreatedAt,
+        org.UpdatedAt);
 
     private static List<OrganizationTreeNodeDto> MapNodes(IEnumerable<OrganizationTreeNode> nodes)
         => nodes
@@ -787,30 +780,27 @@ public static class OrganizationEndpoints
         if (string.IsNullOrWhiteSpace(extension)
             || !AllowedImportExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
         {
-            return Invalid(context, "仅支持 .xlsx / .xls / .csv / .txt / .tsv 文件");
+            return Invalid(context, "仅支持 .xlsx / .xls / .csv 文件");
         }
 
         return null;
     }
 
-    /// <summary>落盘到独立临时目录；失败时自行清理，成功返回文件路径（由调用方 finally 删除目录）。</summary>
+    /// <summary>
+    /// 落盘到系统临时目录：<c>nc-org-{guid}{扩展名}</c>。
+    /// 失败时自行清理，成功返回文件路径（由调用方 finally 删除）。
+    /// </summary>
     private static async Task<string> SaveUploadToTempAsync(
         IFormFile file,
-        ILoggerService logger,
         CancellationToken ct)
     {
-        var directory = Path.Combine(
+        var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
+        var target = Path.Combine(
             Path.GetTempPath(),
-            "newcosmos-org-import",
-            Guid.NewGuid().ToString("N"));
+            "nc-org-" + Guid.NewGuid().ToString("N") + extension);
 
         try
         {
-            Directory.CreateDirectory(directory);
-
-            var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
-            var target = Path.Combine(directory, "import" + extension);
-
             await using var stream = new FileStream(
                 target,
                 FileMode.CreateNew,
@@ -824,33 +814,27 @@ public static class OrganizationEndpoints
         }
         catch
         {
-            TryDeleteDirectory(directory, logger);
+            TryDeleteFile(target);
             throw;
         }
     }
 
     private static void DeleteTempFile(string filePath, ILoggerService logger)
-    {
-        var directory = Path.GetDirectoryName(filePath);
-        if (!string.IsNullOrEmpty(directory))
-        {
-            TryDeleteDirectory(directory, logger);
-        }
-    }
+        => TryDeleteFile(filePath, logger);
 
-    private static void TryDeleteDirectory(string directory, ILoggerService logger)
+    private static void TryDeleteFile(string filePath, ILoggerService? logger = null)
     {
         try
         {
-            if (Directory.Exists(directory))
+            if (File.Exists(filePath))
             {
-                Directory.Delete(directory, true);
+                File.Delete(filePath);
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // 临时文件清理失败不影响业务结果，但要留痕便于运维排查。
-            logger.Warn($"清理组织导入临时目录失败: {directory}, {ex.Message}");
+            logger?.Warn($"清理组织导入临时文件失败: {filePath}, {ex.Message}");
         }
     }
 
@@ -892,6 +876,13 @@ public static class OrganizationEndpoints
             ApiErrorCodes.NotFound,
             message);
 
+    private static IResult Forbidden(HttpContext context, string message)
+        => ApiErrors.Write(
+            context,
+            StatusCodes.Status403Forbidden,
+            ApiErrorCodes.Forbidden,
+            message);
+
     private static IResult Conflict(HttpContext context, string message)
         => ApiErrors.Write(
             context,
@@ -930,3 +921,5 @@ public static class OrganizationEndpoints
         };
     }
 }
+
+

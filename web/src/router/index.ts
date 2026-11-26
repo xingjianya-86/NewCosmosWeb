@@ -346,6 +346,18 @@ const router = createRouter({
           meta: { title: '银行流水核对' },
         },
         {
+          path: 'system/organizations',
+          name: 'system-organizations',
+          component: () => import('@/views/system/organizations/OrganizationView.vue'),
+          meta: { title: '经办机构管理' },
+        },
+        {
+          path: 'system/organizations/import',
+          name: 'system-organizations-import',
+          component: () => import('@/views/system/organizations/OrganizationImportView.vue'),
+          meta: { title: '组织数据导入' },
+        },
+        {
           path: 'system/users',
           name: 'system-users',
           component: () => import('@/views/system/users/UserManagementView.vue'),
@@ -356,12 +368,6 @@ const router = createRouter({
           name: 'system-users-online',
           component: () => import('@/views/system/users/OnlineSessionsView.vue'),
           meta: { title: '在线会话' },
-        },
-        {
-          path: 'system/organizations',
-          name: 'system-organizations',
-          component: () => import('@/views/system/organizations/OrganizationManageView.vue'),
-          meta: { title: '经办机构管理' },
         },
         {
           path: 'archives/publicity',
@@ -418,8 +424,40 @@ const router = createRouter({
           meta: { title: '节假日维护' },
         },
         {
+          path: 'lottery',
+          name: 'lottery',
+          component: () => import('@/views/lottery/LotteryHomeView.vue'),
+          meta: { title: '彩票助手' },
+        },
+        {
+          path: 'lottery/prediction',
+          name: 'lottery-prediction',
+          component: () => import('@/views/lottery/LotteryPredictionView.vue'),
+          meta: { title: '智能预测' },
+        },
+        {
+          path: 'lottery/history',
+          name: 'lottery-history',
+          component: () => import('@/views/lottery/LotteryHistoryView.vue'),
+          meta: { title: '历史开奖' },
+        },
+        {
+          path: 'lottery/result',
+          name: 'lottery-result',
+          component: () => import('@/views/lottery/LotteryResultView.vue'),
+          meta: { title: '中奖结果' },
+        },
+        {
           path: 'coming-soon/reprint',
           redirect: '/reprint',
+        },
+        {
+          path: 'coming-soon/organizations',
+          redirect: '/system/organizations',
+        },
+        {
+          path: 'coming-soon/lottery',
+          redirect: '/lottery',
         },
         {
           path: 'coming-soon/duty',
