@@ -15,7 +15,7 @@
 
 #define AppVersion GetEnv("NC_APP_VERSION")
 #if AppVersion == ""
-  #define AppVersion "2.0.20261127"
+  #define AppVersion "2.0.20261128"
 #endif
 
 #define NumericVersion GetEnv("NC_APP_NUMERIC_VERSION")

@@ -1,10 +1,10 @@
 <Project>
   <PropertyGroup>
     <!-- 全栈统一版本：.NET 项目唯一来源；Web 侧见 web/package.json -->
-    <Version>2.0.20261127</Version>
+    <Version>2.0.20261128</Version>
     <AssemblyVersion>2.0.0.0</AssemblyVersion>
     <FileVersion>2.0.0.0</FileVersion>
-    <InformationalVersion>2.0.20261127</InformationalVersion>
+    <InformationalVersion>2.0.20261128</InformationalVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
