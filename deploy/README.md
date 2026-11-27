@@ -16,6 +16,37 @@
 
 ---
 
+## 0. 一键发布（统一入口）
+
+自 2026-11-27 起，NewCosmosCode / NewCosmosWeb 的发布统一走仓库外的一个文件：
+
+```powershell
+C:\Projects\publish-all.ps1
+```
+
+```powershell
+# 完整发布 Web（API + 页面 + 安装包 + APK）
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Projects\publish-all.ps1 -Project Web -All
+
+# 预览
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Projects\publish-all.ps1 -Project Web -All -DryRun
+
+# 只发 Web 页面与 API
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Projects\publish-all.ps1 -Project Web -Only Server,Web
+
+# 清理（默认不执行）
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Projects\publish-all.ps1 -Project All -Cleanup -CleanupMode Full
+```
+
+- 文件自带配置区（服务器地址、SSH 密钥、签名证书、清理保留数），不再依赖本仓库的 `deploy.local.ps1`；
+- `.1` 与 `.2` 可使用不同密钥：配置区的 `Web.EdgeSshKey` / `Web.AppSshKey`（留空则回退 `Web.SshKey`）；
+- `.1` 首次接入：把发布公钥（默认 `%USERPROFILE%\.ssh\id_ed25519_newcosmos.pub`）追加到 `.1` 的 `/root/.ssh/authorized_keys`，否则预检会报 `Permission denied`；
+- 所有功能都是选项：`-Only` / `-Skip` 控制步骤，`-Cleanup` 控制清理，`-NoSign` 关闭签名，`-SkipGit` / `-SkipPush` 控制提交；
+- **数据库 SQL 不再由发布工具执行**。Schema 在开发期随 `src/NewCosmos.Server/Migrations` 与 `Resources/Schema` 维护；
+- 本目录下的 `deploy-server.ps1`、`deploy-web-split.ps1`、`build-installers.ps1`、`build-apk.ps1` 仍作为底层执行器保留，可单独使用。
+
+---
+
 ## 1. 文件清单
 
 ```text

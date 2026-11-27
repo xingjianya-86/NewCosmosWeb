@@ -44,6 +44,9 @@ param(
 
     [string]$BaseUrl = 'https://cosmos-static.sua17.cn:20000/downloads/android',
 
+    # Repository root (defaults to script location). Pass the physical path when C:\Projects is a junction.
+    [string]$RepoRoot = '',
+
     [switch]$SkipNpmInstall,
     [switch]$SkipSync,
     [switch]$SkipSigning,
@@ -71,7 +74,37 @@ function Invoke-Checked([string]$Command, [string[]]$Arguments, [string]$WorkDir
     }
 }
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+# Resolve a junction / symlink to the physical path.
+function Resolve-PhysicalPath([string]$Path) {
+    try {
+        $full = (Resolve-Path -LiteralPath $Path).Path
+    }
+    catch {
+        return $Path
+    }
+    $current = $full
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        try {
+            $item = Get-Item -LiteralPath $current -ErrorAction Stop
+            if ($null -ne $item.Target -and -not [string]::IsNullOrWhiteSpace([string]$item.Target)) {
+                $target = [string](@($item.Target)[0])
+                return $target + $full.Substring($current.Length)
+            }
+        }
+        catch { }
+        $parent = Split-Path -Parent $current
+        if ($parent -eq $current -or [string]::IsNullOrWhiteSpace($parent)) { break }
+        $current = $parent
+    }
+    return $full
+}
+
+if (-not [string]::IsNullOrWhiteSpace($RepoRoot)) {
+    $repoRoot = Resolve-PhysicalPath $RepoRoot
+}
+else {
+    $repoRoot = Resolve-PhysicalPath (Join-Path $PSScriptRoot '..\..')
+}
 $mobileDir = Join-Path $repoRoot 'mobile'
 $androidDir = Join-Path $mobileDir 'android'
 $publishDir = Join-Path $repoRoot 'publish\android'

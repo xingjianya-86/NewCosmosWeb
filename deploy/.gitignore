@@ -23,6 +23,8 @@ installer/cache/*
 # 生成的更新清单（只提交 .example）
 update/latest.json
 update/latest.json.sig
+update/latest-*.json
+update/latest-*.json.sig
 android/latest.json
 android/latest.json.sig
 android/latest.debug.json

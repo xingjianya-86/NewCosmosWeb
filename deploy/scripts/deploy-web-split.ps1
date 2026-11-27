@@ -23,7 +23,13 @@
     构建 web（npm ci / npm install + npm run build）。不传则直接使用 web\dist。
 
 .PARAMETER SshKeyPath
-    占位参数：改成实际部署私钥路径。默认值不可用，必须显式覆盖。
+    默认部署私钥；.1/.2 未单独指定时使用它。
+
+.PARAMETER EdgeSshKeyPath
+    .1（edge）专用私钥；留空回退 -SshKeyPath。
+
+.PARAMETER AppSshKeyPath
+    .2（app）专用私钥；留空回退 -SshKeyPath。
 
 .EXAMPLE
     .\deploy-web-split.ps1 -Build -SshKeyPath C:\keys\newcosmos_deploy_ed25519
@@ -48,6 +54,8 @@ param(
     [string]$WebUser = "www-data",
     [string]$SshPort = "22",
     [string]$SshKeyPath = "C:\path\to\newcosmos_deploy_ed25519",
+    [string]$EdgeSshKeyPath = "",
+    [string]$AppSshKeyPath = "",
 
     [switch]$SkipNpmCi,
     [switch]$SkipUpload
@@ -69,10 +77,22 @@ function Assert-Command {
     }
 }
 
+# .1 与 .2 可用不同部署密钥；未单独指定时回退到 -SshKeyPath
+function Get-KeyForHost {
+    param([string]$TargetHost)
+    if ($TargetHost -eq $EdgeHost -and -not [string]::IsNullOrWhiteSpace($EdgeSshKeyPath)) {
+        return $EdgeSshKeyPath
+    }
+    if ($TargetHost -eq $AppHost -and -not [string]::IsNullOrWhiteSpace($AppSshKeyPath)) {
+        return $AppSshKeyPath
+    }
+    return $SshKeyPath
+}
+
 function Get-SshBaseArgs {
     param([string]$TargetHost)
     return @(
-        "-i", $SshKeyPath,
+        "-i", (Get-KeyForHost -TargetHost $TargetHost),
         "-p", $SshPort,
         "-o", "BatchMode=yes",
         "-o", "IdentitiesOnly=yes",
@@ -88,9 +108,23 @@ function Invoke-Remote {
     )
     $sshArgs = Get-SshBaseArgs -TargetHost $TargetHost
     $sshArgs += $Command
-    & ssh @sshArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "远程命令失败（host=$TargetHost, exit=$LASTEXITCODE）：$Command"
+    $errFile = [IO.Path]::GetTempFileName()
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        $output = & ssh @sshArgs 2> $errFile
+        $code = $LASTEXITCODE
+        $errText = ''
+        if (Test-Path -LiteralPath $errFile) {
+            $errText = [IO.File]::ReadAllText($errFile, [Text.Encoding]::Default).Trim()
+        }
+    }
+    finally {
+        $ErrorActionPreference = $oldEap
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
+    if ($code -ne 0) {
+        throw "远程命令失败（host=$TargetHost, exit=$code）：$Command`n$errText"
     }
 }
 
@@ -101,11 +135,27 @@ function Invoke-RemoteCapture {
     )
     $sshArgs = Get-SshBaseArgs -TargetHost $TargetHost
     $sshArgs += $Command
-    $output = & ssh @sshArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "远程命令失败（host=$TargetHost, exit=$LASTEXITCODE）：$Command`n$output"
+    $errFile = [IO.Path]::GetTempFileName()
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        $output = & ssh @sshArgs 2> $errFile
+        $code = $LASTEXITCODE
+        $text = ($output | Out-String).Trim()
+        $errText = ''
+        if (Test-Path -LiteralPath $errFile) {
+            $errText = [IO.File]::ReadAllText($errFile, [Text.Encoding]::Default).Trim()
+        }
     }
-    return (($output | Out-String).Trim())
+    finally {
+        $ErrorActionPreference = $oldEap
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
+    if ($code -ne 0) {
+        throw "远程命令失败（host=$TargetHost, exit=$code）：$Command`n$errText"
+    }
+    # 成功时只返回 stdout；SSH 登录横幅在 stderr，不能混进哈希/输出。
+    return $text
 }
 
 function Copy-ToRemote {
@@ -116,7 +166,7 @@ function Copy-ToRemote {
         [switch]$Recurse
     )
     $scpArgs = @(
-        "-i", $SshKeyPath,
+        "-i", (Get-KeyForHost -TargetHost $TargetHost),
         "-P", $SshPort,
         "-o", "BatchMode=yes",
         "-o", "IdentitiesOnly=yes",
@@ -254,8 +304,13 @@ if ($SkipUpload) {
 }
 
 Write-Step "检查 SSH 参数"
-if ([string]::IsNullOrWhiteSpace($SshKeyPath) -or -not (Test-Path -LiteralPath $SshKeyPath -PathType Leaf)) {
-    throw "SSH 私钥不存在：$SshKeyPath。请用 -SshKeyPath 指定实际部署私钥（占位默认值不可用）。"
+foreach ($keyInfo in @(
+        @{ Label = '.1'; Path = (Get-KeyForHost -TargetHost $EdgeHost) },
+        @{ Label = '.2'; Path = (Get-KeyForHost -TargetHost $AppHost) }
+    )) {
+    if ([string]::IsNullOrWhiteSpace($keyInfo.Path) -or -not (Test-Path -LiteralPath $keyInfo.Path -PathType Leaf)) {
+        throw "SSH 私钥不存在（$($keyInfo.Label)）：$($keyInfo.Path)。请用 -SshKeyPath / -EdgeSshKeyPath / -AppSshKeyPath 指定实际部署私钥。"
+    }
 }
 Assert-Command "ssh"
 Assert-Command "scp"
@@ -330,5 +385,5 @@ Write-Host "assets: $AppHost`:$AppWebRoot/assets/"
 Write-Host "备份  : $EdgeHost`:$EdgeRoot/index.html.bak.$Stamp"
 Write-Host ""
 Write-Host "回滚 index（示例）：" -ForegroundColor Yellow
-Write-Host "  ssh -i `"$SshKeyPath`" $RemoteUser@$EdgeHost `"cp -a '$EdgeRoot/index.html.bak.$Stamp' '$EdgeRoot/index.html' && nginx -t && systemctl reload nginx`""
+Write-Host "  ssh -i `"$(Get-KeyForHost -TargetHost $EdgeHost)`" $RemoteUser@$EdgeHost `"cp -a '$EdgeRoot/index.html.bak.$Stamp' '$EdgeRoot/index.html' && nginx -t && systemctl reload nginx`""
 Write-Host "本地 staging 保留在：$TempRoot"
