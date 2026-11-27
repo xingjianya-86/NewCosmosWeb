@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Download, Lock, Refresh } from '@element-plus/icons-vue'
+import { Connection, Download, Lock, Refresh } from '@element-plus/icons-vue'
 import NcCard from '@/components/NcCard.vue'
 import NcPageHeader from '@/components/NcPageHeader.vue'
+import FontInstallCard from '@/views/system/FontInstallCard.vue'
 import { useAuthStore } from '@/stores/auth'
 import { APP_NAME, APP_VERSION } from '@/config/app'
 import {
@@ -15,6 +17,7 @@ import {
 import { getErrorMessage } from '@/api/http'
 import type { ClientRelease, SessionPolicy } from '@/api/settings'
 
+const router = useRouter()
 const auth = useAuthStore()
 const user = computed(() => auth.user)
 
@@ -147,6 +150,25 @@ onMounted(() => {
       </p>
     </NcCard>
 
+    <NcCard
+      title="本机维护"
+      subtitle="由目标电脑上的 NewCosmos Agent 执行；需该设备在线并具备对应能力（心跳上报）。"
+    >
+      <div class="maint-grid">
+        <article class="maint-card">
+          <div>
+            <strong>网络接入</strong>
+            <span>ZeroTier 异地组网 · 私有化/公共服务器可选</span>
+          </div>
+          <el-button type="primary" :icon="Connection" @click="router.push('/system/network-access')">
+            打开
+          </el-button>
+        </article>
+      </div>
+    </NcCard>
+
+    <FontInstallCard />
+
     <NcCard title="客户端下载">
       <div class="client-grid">
         <article class="client-card">
@@ -254,6 +276,34 @@ onMounted(() => {
 .client-card div { display: flex; flex-direction: column; gap: 4px; }
 .client-card strong { color: var(--nc-ink); }
 .client-card span, .client-card small { color: var(--nc-muted); font-size: var(--nc-text-xs); }
+
+/* ── 本机维护（网络接入 / 公文字体入口） ─────────────────────── */
+.maint-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.maint-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--nc-line-faint);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-3);
+}
+
+.maint-card div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.maint-card strong { color: var(--nc-ink); }
+.maint-card span { color: var(--nc-muted); font-size: var(--nc-text-xs); line-height: 1.6; }
 
 .release-log {
   display: grid;

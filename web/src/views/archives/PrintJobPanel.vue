@@ -4,6 +4,7 @@ import { Delete, RefreshRight, Refresh, WarningFilled } from '@element-plus/icon
 import NcStatusDot from '@/components/NcStatusDot.vue'
 import { useMediaQuery } from '@/composables/useMediaQuery'
 import { formatDateTime } from '@/views/applications/format'
+import { describePrintJobError } from '@/api/archivePrint'
 import type { PrintJobListItem } from '@/api/archivePrint'
 
 const props = defineProps<{
@@ -65,6 +66,14 @@ function applicantText(job: PrintJobListItem): string {
 function printerText(job: PrintJobListItem): string {
   if (job.printerName) return job.printerName
   return job.mode === 'preview' ? 'PC 端预览' : '默认打印机'
+}
+
+/**
+ * 「错误信息」列展示口径：LocalOp 的完成消息是 `RESULT:` 结构化结果（不是错误），
+ * 按完成消息渲染；其余（含 LocalOp 失败摘要）仍按错误渲染。见 archivePrint.describePrintJobError。
+ */
+function jobError(job: PrintJobListItem): { text: string; isError: boolean } {
+  return describePrintJobError(job)
 }
 </script>
 
@@ -134,16 +143,19 @@ function printerText(job: PrintJobListItem): string {
         <el-table-column label="错误信息" min-width="150">
           <template #default="{ row }">
             <el-tooltip
-              v-if="row.errorMessage"
-              :content="row.errorMessage"
+              v-if="jobError(row as PrintJobListItem).isError"
+              :content="jobError(row as PrintJobListItem).text"
               placement="top"
               effect="dark"
             >
               <span class="job-error">
                 <el-icon><WarningFilled /></el-icon>
-                {{ row.errorMessage }}
+                {{ jobError(row as PrintJobListItem).text }}
               </span>
             </el-tooltip>
+            <span v-else-if="jobError(row as PrintJobListItem).text" class="job-done">{{
+              jobError(row as PrintJobListItem).text
+            }}</span>
             <span v-else class="nc-muted">—</span>
           </template>
         </el-table-column>
@@ -204,9 +216,12 @@ function printerText(job: PrintJobListItem): string {
             </div>
           </dl>
 
-          <p v-if="job.errorMessage" class="job-card__error">
-            <el-icon><WarningFilled /></el-icon>
-            <span>{{ job.errorMessage }}</span>
+          <p
+            v-if="jobError(job).text"
+            :class="jobError(job).isError ? 'job-card__error' : 'job-card__done'"
+          >
+            <el-icon v-if="jobError(job).isError"><WarningFilled /></el-icon>
+            <span>{{ jobError(job).text }}</span>
           </p>
 
           <footer class="job-card__actions">
@@ -366,6 +381,19 @@ function printerText(job: PrintJobListItem): string {
   flex: none;
 }
 
+/* LocalOp 完成消息（RESULT: 结构化结果）：按普通完成信息渲染，不用错误色。 */
+.job-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--nc-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .job-cards {
   display: grid;
   gap: 9px;
@@ -448,6 +476,18 @@ function printerText(job: PrintJobListItem): string {
 .job-card__error .el-icon {
   flex: none;
   margin-top: 2px;
+}
+
+/* LocalOp 完成消息（卡片态）：普通完成信息，不用错误色。 */
+.job-card__done {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--nc-line);
+  background-color: var(--nc-paper-3);
+  color: var(--nc-muted);
+  font-size: 11px;
+  line-height: 1.6;
+  word-break: break-word;
 }
 
 .job-card__actions {

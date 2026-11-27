@@ -41,6 +41,7 @@ public sealed class AgentRegisterResponse
 /// <summary>
 /// POST /api/agent/heartbeat 请求体。
 /// 契约字段为 agentVersion/printers；machineName 为附加诊断字段（服务端可忽略）。
+/// capabilities 为本机操作能力码（LocalOp 通道）：老服务端忽略未知字段，安全。
 /// </summary>
 public sealed class AgentHeartbeatRequest
 {
@@ -52,6 +53,10 @@ public sealed class AgentHeartbeatRequest
 
     [JsonPropertyName("printers")]
     public List<AgentPrinterInfo> Printers { get; set; } = new();
+
+    /// <summary>本机操作能力码（如 font / zerotier），供前端判断该设备支持哪些操作。</summary>
+    [JsonPropertyName("capabilities")]
+    public List<string>? Capabilities { get; set; }
 }
 
 /// <summary>服务端统一错误体（API_CONTRACT §0）。</summary>

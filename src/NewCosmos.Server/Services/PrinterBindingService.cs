@@ -71,7 +71,8 @@ public sealed class PrinterBindingService(
                 device.MachineName,
                 device.Online,
                 device.LastSeenAt,
-                names));
+                names,
+                AgentCapabilityNormalizer.Read(device.CapabilitiesJson)));
         }
 
         return Result.Success(list);

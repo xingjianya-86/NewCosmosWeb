@@ -231,7 +231,10 @@ public static class AgentEndpoints
             agentVersion = agentVersion[..50];
         }
 
-        var result = await devices.HeartbeatAsync(deviceKey, agentVersion, printers, ct);
+        // 能力上报：老 Agent 不传 capabilities，按空处理（保持列默认值）。
+        var capabilities = AgentCapabilityNormalizer.Normalize(request?.Capabilities);
+
+        var result = await devices.HeartbeatAsync(deviceKey, agentVersion, printers, capabilities, ct);
         if (result.IsFailure)
         {
             return ApiErrors.FromResult(context, result);

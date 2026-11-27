@@ -44,7 +44,8 @@ public static class HeartbeatRunner
             {
                 MachineName = settings.MachineName,
                 AgentVersion = AgentRuntime.Version,
-                Printers = printers
+                Printers = printers,
+                Capabilities = ResolveCapabilities(logger).ToList()
             };
 
             try
@@ -117,4 +118,12 @@ public static class HeartbeatRunner
         AgentConsole.Info("心跳已停止");
         return 0;
     }
+
+    /// <summary>
+    /// 本机操作能力（LocalOp 通道）上报清单：真实探测 + 5 分钟缓存
+    /// （font = 随包公文字体目录存在且可写；zerotier = zerotier-cli 存在）。
+    /// 心跳默认 30 秒一轮，重活不能每轮都做；探测失败不上报该能力。
+    /// </summary>
+    private static IReadOnlyList<string> ResolveCapabilities(ILoggerService logger)
+        => LocalOpCapabilityProbe.Resolve(logger);
 }

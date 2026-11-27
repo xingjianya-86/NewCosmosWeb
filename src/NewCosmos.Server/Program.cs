@@ -22,6 +22,7 @@ using NewCosmos.Services.Domain.Recovery;
 using NewCosmos.Services.Domain.DutyManagement;
 using NewCosmos.Services.Domain.Reporting;
 using NewCosmos.Services.Domain.SocialAssistance;
+using NewCosmos.Services.Domain.SevereDisease;
 using NewCosmos.Services.Domain.SpecialApproval;
 using NewCosmos.Services.Domain.TempRelief;
 using NewCosmos.Services.Domain.UserManagement;
@@ -32,6 +33,7 @@ using NewCosmos.Services.Import.OtherDifficulty;
 using NewCosmos.Services.Import.RigidExpenditure;
 using NewCosmos.Services.Import.RuralSubsistence;
 using NewCosmos.Services.Import.UrbanSubsistence;
+using NewCosmos.Services.Platform;
 using NewCosmos.Services.System;
 using NewCosmos.Services.UserManagement;
 using NewCosmos.Services.Utilities;
@@ -149,6 +151,17 @@ builder.Services.AddSingleton<IBusinessTimelineService, BusinessTimelineService>
 builder.Services.AddSingleton<IStatisticsService, StatisticsService>();
 builder.Services.AddSingleton<IGracePeriodService, GracePeriodService>();
 builder.Services.AddSingleton<IElderlyApplicationService, ElderlyApplicationService>();
+// 普惠高龄年度认证：批次/名单/凭证/停发回写与 Excel+ZIP 导入（算法全部在 Core）。
+builder.Services.AddSingleton<IElderlyCertificationService, ElderlyCertificationService>();
+builder.Services.AddSingleton<IElderlyCertificationImportService, ElderlyCertificationImportService>();
+// 高龄年度认证 Web API：查询/写服务 Scoped，导入预览会话 Singleton（临时文件 + 内存会话）。
+builder.Services.AddScoped<ElderlyCertificationQueryService>();
+builder.Services.AddScoped<ElderlyCertificationWriteService>();
+builder.Services.AddScoped<ElderlyCertificationReportQueryService>();
+builder.Services.AddScoped<ElderlyInfoChangeQueryService>();
+builder.Services.AddScoped<ElderlyInfoChangeWriteService>();
+builder.Services.AddSingleton<IElderlyInfoChangeService, ElderlyInfoChangeService>();
+builder.Services.AddSingleton<ElderlyCertificationImportSessionService>();
 builder.Services.AddSingleton<ICollegeStudentService, CollegeStudentService>();
 builder.Services.AddSingleton<IAssetVerificationService, AssetVerificationService>();
 // 低收入人口救助帮扶子页面：字典/组织/人员检索等底层依赖。
@@ -191,6 +204,12 @@ builder.Services.AddSingleton<IApplicationService, ApplicationService>();
 builder.Services.AddSingleton<IImportedArchiveService, ImportedArchiveService>();
 builder.Services.AddSingleton<ISpecialApprovalService, SpecialApprovalService>();
 builder.Services.AddScoped<ApplicationFormService>();
+
+// AI 重病判定（三级管线：确定性 → nc_sys_ai_judgments 缓存 → 服务端 LLM）。
+// 服务地址由 NC_OCR_SERVICE_URL 提供（AI 与 OCR 同服务同地址），未配置时全链路降级为无建议。
+builder.Services.AddSingleton<IAiJudgeClient, RemoteAiJudgeClient>();
+builder.Services.AddSingleton<IAiJudgmentCacheService, AiJudgmentCacheService>();
+builder.Services.AddSingleton<ISevereDiseaseAdviceService, SevereDiseaseAdviceService>();
 
 // Server 侧聚合服务。
 builder.Services.AddScoped<PrinterBindingService>();
@@ -248,6 +267,7 @@ app.MapAuthEndpoints();
 app.MapPrinterEndpoints();
 app.MapAgentEndpoints();
 app.MapPrintJobEndpoints();
+app.MapLocalOpEndpoints();
 app.MapApplicationEndpoints();
 app.MapDashboardEndpoints();
 app.MapSocialAssistanceEndpoints();
@@ -259,6 +279,7 @@ app.MapDutyEndpoints();
 app.MapReprintEndpoints();
 app.MapLotteryEndpoints();
 app.MapIcd10Endpoints();
+app.MapAiJudgeEndpoints();
 app.MapRecoveryEndpoints();
 app.MapArchiveEndpoints();
 app.MapArchivePhotoEndpoints();
@@ -274,6 +295,8 @@ app.MapApplicationWorkflowPhotoEndpoints();
 app.MapApplicationFormEndpoints();
 app.MapSpecialApprovalEndpoints();
 app.MapElderlyEndpoints();
+app.MapElderlyCertificationEndpoints();
+app.MapElderlyInfoChangeEndpoints();
 app.MapAssetVerificationEndpoints();
 app.MapAssetMonthlyAuditEndpoints();
 app.MapAssetMonthlyReportEndpoints();

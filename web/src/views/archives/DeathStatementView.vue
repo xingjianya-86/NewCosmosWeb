@@ -24,7 +24,7 @@ import {
   revokeDeathStatement,
   searchDeathStatements,
 } from '@/api/deathStatement'
-import { listPrintJobs } from '@/api/archivePrint'
+import { describePrintJobError, listPrintJobs } from '@/api/archivePrint'
 import { listPrinters } from '@/api/printers'
 import NcCard from '@/components/NcCard.vue'
 import NcPageHeader from '@/components/NcPageHeader.vue'
@@ -1189,6 +1189,15 @@ const jobStatusTone = computed(() =>
   currentJob.value ? archiveJobStatusTone(currentJob.value.status) : 'default',
 )
 
+/**
+ * 任务消息展示口径：LocalOp 的完成消息是 `RESULT:` 结构化结果（不是错误），
+ * 按完成信息渲染；其余（含失败摘要）仍按错误样式展示。见 archivePrint.describePrintJobError。
+ */
+const jobErrorDisplay = computed(() => {
+  const job = currentJob.value
+  return job ? describePrintJobError(job) : { text: '', isError: true }
+})
+
 async function loadPrinters(): Promise<void> {
   printersLoading.value = true
   printersError.value = ''
@@ -2144,8 +2153,8 @@ onBeforeUnmount(() => {
                 </div>
               </dl>
 
-              <p v-if="currentJob.errorMessage" class="job-error">
-                {{ currentJob.errorMessage }}
+              <p v-if="jobErrorDisplay.text" :class="jobErrorDisplay.isError ? 'job-error' : 'job-desc'">
+                {{ jobErrorDisplay.text }}
               </p>
               <p v-else class="job-desc">
                 {{

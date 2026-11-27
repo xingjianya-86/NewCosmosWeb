@@ -13,10 +13,24 @@
 
 开发期新增表/列时，优先改 Schema YAML；需要一次性数据修正时，在
 `src/NewCosmos.Server/Migrations/` 下按序号新增 SQL，并确认
-`NewCosmos.Server.csproj` 会把它复制到发布目录（当前为通配规则）。
+`NewCosmos.Server.csproj` 会把它复制到发布目录（当前是逐条显式列举，
+新增 .sql 必须同步补一条 `None Update` 条目，否则不会进发布目录）。
 
 `NC_AUTO_MIGRATE=true` 时服务端启动会按文件名顺序执行 `Migrations/*.sql`；
 生产环境迁移完成后请改回 `false`。
+
+当前迁移清单（按执行顺序，均幂等、可重复执行）：
+
+| 序号 | 文件 | 内容 |
+|---|---|---|
+| 001 | `001_printer_binding.sql` | 打印机绑定（按 `user_id + device_id + printer_name` 绑定本机打印机） |
+| 002 | `002_elderly_certification.sql` | 高龄认证（认证记录相关表/列） |
+| 003 | `003_elderly_info_change.sql` | 高龄信息变更（变更记录相关表/列） |
+| 004 | `004_device_capabilities.sql` | 设备能力列（`nc_sys_print_devices.capabilities_json`，Agent 心跳能力上报） |
+| 005 | `005_ai_judgment_cache.sql` | AI 判定缓存表（重病判定结果缓存） |
+
+首次部署沿用 `NC_AUTO_MIGRATE=true` 跑完上述迁移后改回 `false`
+（见仓库根 `deploy/README.md` 第 5 节第 3 步）。
 
 ## 2. 手工执行 SQL
 

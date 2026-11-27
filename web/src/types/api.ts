@@ -43,6 +43,8 @@ export interface PrinterDevice {
   online: boolean
   lastSeenAt?: string | null
   printers: string[]
+  /** 本机操作能力码（font / zerotier …）；老 Agent 未上报时缺省。 */
+  capabilities?: string[]
 }
 
 export interface BindPrinterRequest {

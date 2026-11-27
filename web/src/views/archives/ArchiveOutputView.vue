@@ -19,7 +19,7 @@ import {
 } from '@/api/archiveOutput'
 import { getErrorMessage } from '@/api/http'
 import { listPrinters } from '@/api/printers'
-import { listPrintJobs } from '@/api/archivePrint'
+import { describePrintJobError, listPrintJobs } from '@/api/archivePrint'
 import type { ArchiveOutputMode, ArchiveOutputTemplate, ArchiveProductionInfo } from '@/types/archiveOutput'
 import type { PrinterBinding } from '@/types/api'
 import NcCard from '@/components/NcCard.vue'
@@ -287,6 +287,15 @@ const jobStatusLabel = computed(() => {
 const jobStatusTone = computed(() =>
   currentJob.value ? archiveJobStatusTone(currentJob.value.status) : 'default',
 )
+
+/**
+ * 任务消息展示口径：LocalOp 的完成消息是 `RESULT:` 结构化结果（不是错误），
+ * 按完成信息渲染；其余（含失败摘要）仍按错误告警。见 archivePrint.describePrintJobError。
+ */
+const jobErrorDisplay = computed(() => {
+  const job = currentJob.value
+  return job ? describePrintJobError(job) : { text: '', isError: true }
+})
 
 function modeLabel(mode: ArchiveOutputMode): string {
   return MODE_LABELS[mode]
@@ -796,10 +805,10 @@ onBeforeUnmount(() => {
             </dl>
 
             <el-alert
-              v-if="currentJob.errorMessage"
+              v-if="jobErrorDisplay.text"
               class="panel-error"
-              type="error"
-              :title="currentJob.errorMessage"
+              :type="jobErrorDisplay.isError ? 'error' : 'info'"
+              :title="jobErrorDisplay.text"
               :closable="false"
               show-icon
             />

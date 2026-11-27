@@ -38,3 +38,24 @@ export function setDefaultPrinter(id: number): Promise<PrinterBinding> {
     .post<PrinterBinding>(`/printers/${id}/default`)
     .then((response) => response.data)
 }
+
+/** POST /api/devices/{deviceId}/local-ops 响应：入队后的任务 ID/任务号。 */
+export interface LocalOpCreated {
+  jobId: number
+  jobNo: string
+}
+
+/**
+ * 向指定 Agent 设备下发本机操作指令（LocalOp，复用打印任务队列通道）。
+ * op 为指令名（如 zerotier.join），args 为可选参数对象。
+ * 结果查询复用 GET /print/jobs（status / errorMessage）。
+ */
+export function createLocalOp(
+  deviceId: number,
+  op: string,
+  args?: Record<string, unknown>,
+): Promise<LocalOpCreated> {
+  return apiHttp
+    .post<LocalOpCreated>(`/devices/${deviceId}/local-ops`, { op, args })
+    .then((response) => response.data)
+}

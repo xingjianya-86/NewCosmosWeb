@@ -61,6 +61,42 @@ export interface PrintJobPage {
   totalPages: number
 }
 
+/** LocalOp 任务类型（与 Core `PrintJobConstants.JobKindLocalOp` 一致）。 */
+const LOCAL_OP_JOB_KIND = 'LocalOp'
+
+/** LocalOp 完成消息前缀，与 Agent `LocalOpExecutor.ResultPrefix` 一致。 */
+export const LOCAL_OP_RESULT_PREFIX = 'RESULT:'
+
+export interface PrintJobErrorDisplay {
+  /** 展示文案；空串表示无消息。 */
+  text: string
+  /** true = 按错误（红色警示）渲染；false = 按普通完成消息/信息渲染。 */
+  isError: boolean
+}
+
+/**
+ * 打印任务「错误信息」列的展示口径：
+ * LocalOp 的完成消息是结构化结果（`RESULT:` + JSON），不是错误 —— 按 `jobKind`/`status`
+ * 判定后以普通完成消息展示；其余消息（含 LocalOp 失败摘要）原样按错误展示。
+ *
+ * 只影响展示层：轮询解析仍读原始 `errorMessage`（见 `api/localOps.parseLocalOpResult`）。
+ */
+export function describePrintJobError(
+  job: Pick<PrintJobListItem, 'jobKind' | 'status' | 'errorMessage'>,
+): PrintJobErrorDisplay {
+  const raw = job.errorMessage ?? ''
+  if (!raw) return { text: '', isError: false }
+
+  if (job.jobKind === LOCAL_OP_JOB_KIND && job.status === 'Completed') {
+    // 完成消息：RESULT: 前缀 → 结构化结果；无前缀（老 Agent/被截断）也是回执而非错误。
+    return raw.startsWith(LOCAL_OP_RESULT_PREFIX)
+      ? { text: '已完成（查看结果）', isError: false }
+      : { text: raw, isError: false }
+  }
+
+  return { text: raw, isError: true }
+}
+
 export interface ListPrintJobsParams {
   status?: string
   pageIndex?: number

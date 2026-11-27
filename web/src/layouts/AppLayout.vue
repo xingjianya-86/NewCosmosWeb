@@ -5,6 +5,7 @@ import type { Component } from 'vue'
 import {
   Calendar,
   Coin,
+  Connection,
   DataBoard,
   Document,
   FolderOpened,
@@ -73,6 +74,8 @@ const navGroups: NavGroup[] = [
       { label: '值班管理', icon: Calendar, path: '/duty' },
       // Web 端既有能力：打印机绑定（旧版由桌面端承担，Web 保留入口）
       { label: '打印机绑定', icon: Printer, path: '/printers' },
+      // ZeroTier 异地组网 + 公文字体（本机操作由 Agent 执行，见 /system/network-access）
+      { label: '网络接入', icon: Connection, path: '/system/network-access' },
     ],
   },
   {

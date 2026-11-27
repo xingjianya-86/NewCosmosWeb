@@ -129,11 +129,13 @@ public class PrintJob
     public string PhotoCategoryName =>
         string.IsNullOrEmpty(PhotoCategory) ? string.Empty : PhotoCategoryConstants.GetDisplayName(PhotoCategory);
 
-    /// <summary>列表展示标题：照片任务显示「照片打印·类别」，模板任务显示模板名。</summary>
+    /// <summary>列表展示标题：照片任务显示「照片打印·类别」，本机操作显示「本机操作·op」，模板任务显示模板名。</summary>
     public string DisplayTitle =>
         JobKind == PrintJobConstants.JobKindPhoto
             ? $"照片打印·{PhotoCategoryName}"
-            : (TemplateName ?? "模板文书");
+            : JobKind == PrintJobConstants.JobKindLocalOp
+                ? $"本机操作·{TemplateName ?? "未知指令"}"
+                : (TemplateName ?? "模板文书");
 
     /// <summary>状态中文名（供界面绑定）</summary>
     public string StatusName => PrintJobConstants.GetStatusName(Status);
@@ -169,6 +171,14 @@ public static class PrintJobConstants
     /// </summary>
     public const string JobKindTemplateBatch = "TemplateBatch";
 
+    /// <summary>
+    /// 任务类型：本机操作指令（LocalOp）。复用打印任务队列做「下发 → 认领 → 执行 → 回传」，
+    /// 承载公文字体一键安装、ZeroTier 接入等非打印的本机操作。
+    /// 操作定义放在 fields_json：{ op, args, requestedByUserId }；无模板（TemplateId = null），
+    /// 入队/认领/超时回收/重试均沿用打印队列语义。
+    /// </summary>
+    public const string JobKindLocalOp = "LocalOp";
+
     public static string GetStatusName(string? status) => status switch
     {
         StatusPending => "待打印",
@@ -184,6 +194,7 @@ public static class PrintJobConstants
         JobKindPhoto => "照片",
         JobKindPreview => "预览",
         JobKindTemplateBatch => "批量文书",
+        JobKindLocalOp => "本机操作",
         _ => "模板文书",
     };
 }

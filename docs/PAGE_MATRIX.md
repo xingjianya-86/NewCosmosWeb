@@ -219,8 +219,12 @@ P0 框架/认证 → P1 社会救助核心 → P2 档案/打印 → P3 其他业
 | DatabaseManagementPage | 管理/备份恢复 | — | 高（仅桌面） | `/admin/database` | P5 |
 | SettingsPage | 管理 | Office（输出根/打印设置） | 低 | `/settings` | P5 |
 | ConfigWizardPage | 管理 | — | 低 | 不迁（部署脚本替代） | P5 |
-| NetworkAccessPage | 管理 | — | 低 | 不迁（ZeroTier 在 Agent/桌面） | P5 |
+| NetworkAccessPage | 管理 | — | 中 | 已迁 `/system/network-access`（Web 页面 + Agent 执行器） | P5 |
 | UpdateLogPage | 管理 | — | 低 | `/settings/changelog` | P5 |
+
+> 2026-11-27：`NetworkAccessPage` 已迁（网络接入页 `/system/network-access` + Agent `LocalOp` 执行器，
+> ZeroTier 检测/安装/接入/退出走任务队列）；公文字体检查/一键安装未单独成页，并入 `/settings`
+> 的 `FontInstallCard`（同样由目标设备 Agent 执行）。配置向导 `ConfigWizardPage` 仍不迁（部署脚本替代）。
 
 ## 14. 彩票（P5）
 

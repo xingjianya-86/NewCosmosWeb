@@ -810,6 +810,31 @@ public static class PrintJobEndpoints
 
         if (job.TemplateId is not > 0)
         {
+            // 本机操作（LocalOp）没有模板：op/args 由 fields_json 下发，执行器按 op 分发
+            // （执行逻辑在 Agent 的 LocalOpExecutor），通道层到此为止。
+            if (string.Equals(job.JobKind, PrintJobConstants.JobKindLocalOp, StringComparison.Ordinal))
+            {
+                return Results.Json(new AgentJobPayloadResponse(
+                    null,
+                    string.Empty,
+                    string.Empty,
+                    DeserializeFields(job.FieldsJson),
+                    [],
+                    job.JobKind,
+                    job.PrinterName,
+                    job.Copies,
+                    false,
+                    job.ApplicantName,
+                    job.ApplicantIdCard,
+                    null,
+                    null,
+                    null,
+                    null,
+                    [],
+                    false,
+                    null));
+            }
+
             return InvalidRequest(context, "任务缺少模板 ID");
         }
 

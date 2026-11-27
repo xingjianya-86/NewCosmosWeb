@@ -249,6 +249,18 @@ max_connections = 100          # 应用连接池 20-30
 
 首次部署把 `NC_AUTO_MIGRATE=true`，迁移成功后改回 `false`。
 
+当前随包增量迁移（服务端启动按文件名顺序执行，详见 `deploy/database/README.md`）：
+
+| 序号 | 内容 |
+|---|---|
+| 001 | 打印机绑定（`user_id + device_id + printer_name`） |
+| 002 | 高龄认证 |
+| 003 | 高龄信息变更 |
+| 004 | 设备能力列（`nc_sys_print_devices.capabilities_json`，Agent 心跳能力上报） |
+| 005 | AI 判定缓存表 |
+
+均为幂等脚本，重复执行无副作用；`NewCosmos.Server.csproj` 逐条显式列举，新增 `.sql` 必须同步补 `None Update` 条目。
+
 ### 第 4 步：`.2` 环境文件
 
 ```bash
@@ -265,6 +277,13 @@ sudo vi server.env
 - `NC_AGENT_REGISTER_TOKEN`：`openssl rand -hex 32` 生成；
 - `NC_AUTO_MIGRATE`：首次 `true`，之后 `false`；
 - `TZ=Asia/Shanghai`。
+
+可选：
+
+- `NC_OCR_SERVICE_URL`：OCR 识别与 AI 重病判定**同一服务、同一个地址**（如 `http://127.0.0.1:11434`，
+  走 Ollama 等本机推理服务）。留空则全链路降级：无 AI 判定建议、OCR 转人工录入，
+  **不影响表单保存与其它功能**。模板 `deploy/app-2/server.env.example` 已带注释与示例。
+  （Docker 模式经 `env_file: server.env` 全量传入容器，无需在 compose 里另配 `environment`。）
 
 `server.env`：
 
@@ -303,6 +322,13 @@ systemd：
 - `-InstallCjkFonts`：构建镜像时装 `fonts-noto-cjk`（体积大，仅在服务端需要中文文书/图片时开）。
 
 > 当前仓库若还没有 `src/NewCosmos.Server/NewCosmos.Server.csproj`，脚本会明确报错。不要用空目录糊弄构建。
+
+> **Agent 升级提示**：本机操作指令（LocalOp，如公文字体安装、ZeroTier 入网）与心跳能力上报
+> （`capabilities`）由 **Windows 端 Agent** 执行，服务端升级**不会**自动升级各 PC 的 Agent。
+> 新版本下发后需在各接入 PC 重新安装/覆盖 `NewCosmos.Agent` 并重启托盘，否则：
+> 老 Agent 心跳不带 `capabilities`（前端隐藏对应入口），收到 LocalOp 任务回传
+> `LOCAL_OP_UNKNOWN` 失败（队列不会卡住，但功能不可用）。
+> 升级与静默安装参数见 `src/NewCosmos.Agent/README.md` §12。
 
 ### 第 6 步：部署 Web（拆分）
 

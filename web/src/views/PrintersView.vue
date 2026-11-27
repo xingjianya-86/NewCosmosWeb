@@ -59,6 +59,13 @@ const rules: FormRules<typeof form> = {
 const selectedDevice = computed(() => devices.value.find((device) => device.id === form.deviceId))
 const printerOptions = computed(() => selectedDevice.value?.printers ?? [])
 
+/** 设备下拉标签：附上心跳上报的本机操作能力码（font / zerotier …），便于判断能否下发本机操作。 */
+function deviceLabel(device: PrinterDevice): string {
+  const caps = device.capabilities ?? []
+  const tag = caps.length > 0 ? ` · ${caps.join(' · ')}` : ''
+  return `${device.machineName}${device.online ? '（在线）' : '（离线）'}${tag}`
+}
+
 const onlineCount = computed(() => items.value.filter((item) => item.online).length)
 const defaultPrinter = computed(() => items.value.find((item) => item.isDefault)?.printerName ?? '未设置')
 
@@ -570,7 +577,7 @@ onBeforeUnmount(() => {
             <el-option
               v-for="device in devices"
               :key="device.id"
-              :label="`${device.machineName}${device.online ? '（在线）' : '（离线）'}`"
+              :label="deviceLabel(device)"
               :value="device.id"
             />
           </el-select>

@@ -220,6 +220,42 @@ const router = createRouter({
           meta: { title: '高龄津贴复核' },
         },
         {
+          path: 'elderly/certifications',
+          name: 'elderly-certifications',
+          component: () => import('@/views/elderly/ElderlyCertificationListView.vue'),
+          meta: { title: '年度身份认证' },
+        },
+        {
+          path: 'elderly/certifications/import',
+          name: 'elderly-certifications-import',
+          component: () => import('@/views/elderly/ElderlyCertificationImportView.vue'),
+          meta: { title: '年度认证批量导入' },
+        },
+        {
+          path: 'elderly/certifications/stop-preview',
+          name: 'elderly-certifications-stop-preview',
+          component: () => import('@/views/elderly/ElderlyCertificationStopPreviewView.vue'),
+          meta: { title: '年度认证停发预览' },
+        },
+        {
+          path: 'elderly/certifications/reports',
+          name: 'elderly-certifications-reports',
+          component: () => import('@/views/elderly/ElderlyCertificationReportView.vue'),
+          meta: { title: '年度认证报表' },
+        },
+        {
+          path: 'elderly/certifications/info-changes',
+          name: 'elderly-certifications-info-changes',
+          component: () => import('@/views/elderly/ElderlyInfoChangeListView.vue'),
+          meta: { title: '年度认证信息变更审批' },
+        },
+        {
+          path: 'elderly/certifications/info-changes/new',
+          name: 'elderly-certifications-info-change-new',
+          component: () => import('@/views/elderly/ElderlyInfoChangeFormView.vue'),
+          meta: { title: '年度认证信息变更登记' },
+        },
+        {
           path: 'elderly/reports',
           name: 'elderly-reports',
           component: () => import('@/views/elderly/ElderlyMonthlyReportView.vue'),
@@ -344,6 +380,12 @@ const router = createRouter({
           name: 'data-center-bank-flow',
           component: () => import('@/views/system/data-center/BankFlowView.vue'),
           meta: { title: '银行流水核对' },
+        },
+        {
+          path: 'system/network-access',
+          name: 'network-access',
+          component: () => import('@/views/system/NetworkAccessView.vue'),
+          meta: { title: '网络接入' },
         },
         {
           path: 'system/organizations',

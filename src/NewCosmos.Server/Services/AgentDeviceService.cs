@@ -40,25 +40,29 @@ public sealed class AgentDeviceService(IDatabaseService database)
         Guid deviceKey,
         string agentVersion,
         IReadOnlyCollection<AgentPrinterReport> printers,
+        IReadOnlyCollection<string> capabilities,
         CancellationToken ct = default)
     {
         return await database.ExecuteNonQueryAsync(
             @"UPDATE nc_sys_print_devices
               SET agent_version = $1,
                   printers_json = $2::jsonb,
+                  capabilities_json = $4::jsonb,
                   last_seen_at = now(),
                   updated_at = now()
               WHERE device_key = $3 AND is_active",
             ct,
             agentVersion,
             AgentPrinterNormalizer.Serialize(printers),
-            deviceKey);
+            deviceKey,
+            AgentCapabilityNormalizer.Serialize(capabilities));
     }
 
     public async Task<Result<PrinterDeviceRow>> GetByIdAsync(long deviceId, CancellationToken ct = default)
     {
         return await database.QuerySingleAsync<PrinterDeviceRow>(
-            @"SELECT id, device_key, machine_name, printers_json::text AS printers_json, last_seen_at
+            @"SELECT id, device_key, machine_name, printers_json::text AS printers_json,
+                     capabilities_json::text AS capabilities_json, last_seen_at
               FROM nc_sys_print_devices
               WHERE id = $1 AND is_active",
             ct,
@@ -70,7 +74,8 @@ public sealed class AgentDeviceService(IDatabaseService database)
         CancellationToken ct = default)
     {
         return await database.QueryAsync<PrinterDeviceRow>(
-            @"SELECT id, machine_name, printers_json::text AS printers_json, last_seen_at,
+            @"SELECT id, machine_name, printers_json::text AS printers_json,
+                     capabilities_json::text AS capabilities_json, last_seen_at,
                      (last_seen_at IS NOT NULL
                       AND last_seen_at >= now() - make_interval(secs => $1)) AS online
               FROM nc_sys_print_devices
@@ -89,6 +94,10 @@ public sealed class PrinterDeviceRow
     public Guid DeviceKey { get; set; }
     public string MachineName { get; set; } = string.Empty;
     public string PrintersJson { get; set; } = "[]";
+
+    /// <summary>本机操作能力码数组 JSON（nc_sys_print_devices.capabilities_json）。</summary>
+    public string CapabilitiesJson { get; set; } = "[]";
+
     public DateTime? LastSeenAt { get; set; }
     public bool Online { get; set; }
 }

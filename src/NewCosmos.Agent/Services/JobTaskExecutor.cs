@@ -60,6 +60,11 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
         if (payload == null)
             throw new BusinessException("JOB_PAYLOAD_INVALID", "任务负载为空");
 
+        // 本机操作（LocalOp，通道层）：认领与 payload 下发已通，执行器按 fields.op 分发。
+        // 成功返回 "RESULT:"+JSON（落任务完成消息供前端解析）；失败抛 BusinessException 走 fail 回传。
+        if (IsLocalOp(job.JobKind) || IsLocalOp(payload.JobKind))
+            return await LocalOpExecutor.ExecuteAsync(job, payload, _logger, ct).ConfigureAwait(false);
+
         // 照片任务最优先：没有模板，直接解码图片并按版式打印，不能落到模板/Office 路径。
         if (IsPhoto(job.JobKind) || IsPhoto(payload.JobKind))
             return await ExecutePhoto(job, payload, ct).ConfigureAwait(false);
@@ -385,6 +390,10 @@ public sealed partial class JobTaskExecutor : IJobTaskExecutor
 
     private static bool IsPhoto(string? jobKind)
         => string.Equals(jobKind?.Trim(), PrintJobConstants.JobKindPhoto, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>本机操作任务（LocalOp）判定：命中后交给 <see cref="LocalOpExecutor"/> 按 op 分发。</summary>
+    private static bool IsLocalOp(string? jobKind)
+        => string.Equals(jobKind?.Trim(), PrintJobConstants.JobKindLocalOp, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>照片 Base64 解码；错误摘要不包含原始数据，避免把图片内容写进日志/回写。</summary>
     private static byte[] DecodePhotoBase64(string? base64)

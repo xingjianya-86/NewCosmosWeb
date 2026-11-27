@@ -17,8 +17,25 @@
     <None Update="Migrations\001_printer_binding.sql"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Migrations\002_elderly_certification.sql"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Migrations\003_elderly_info_change.sql"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Migrations\004_device_capabilities.sql"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Migrations\005_ai_judgment_cache.sql"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
     <!-- 数据中心 Schema 状态/修复的权威表定义（来自 PC Resources/Schema）。 -->
     <Content Include="Resources\Schema\**\*.yaml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <!-- 服务端 PDF 直出内置中文字体，避免 Linux 容器漏装 fonts-noto-cjk 时输出乱码。 -->
+    <Content Include="Resources\Fonts\*.ttf">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>

@@ -48,13 +48,18 @@ public sealed record BindPrinterByCodeRequest(
 /// <summary>POST /api/printers/bind-by-code 响应：本次写入/更新的绑定。</summary>
 public sealed record PrinterBindingsResponse(IReadOnlyList<PrinterBindingDto> Bindings);
 
-/// <summary>可选设备：只暴露公开 ID/机器名/上报打印机，不暴露 deviceKey。</summary>
+/// <summary>
+/// 可选设备：只暴露公开 ID/机器名/上报打印机，不暴露 deviceKey。
+/// <c>Capabilities</c> 为该设备心跳上报的本机操作能力码（font / zerotier …），
+/// 老 Agent 未上报时为空数组，前端据此判断是否展示字体安装 / ZeroTier 入口。
+/// </summary>
 public sealed record PrinterDeviceDto(
     long Id,
     string MachineName,
     bool Online,
     DateTime? LastSeenAt,
-    IReadOnlyList<string> Printers);
+    IReadOnlyList<string> Printers,
+    IReadOnlyList<string> Capabilities);
 
 /// <summary>打印机绑定输出模型。属性名保持 PascalCase，Core 的反射映射按列名/蛇形列名匹配。</summary>
 public sealed class PrinterBindingDto
@@ -67,6 +72,16 @@ public sealed class PrinterBindingDto
     public bool Online { get; set; }
     public DateTime? LastSeenAt { get; set; }
 }
+
+#endregion
+
+#region 本机操作（LocalOp）
+
+/// <summary>POST /api/devices/{deviceId}/local-ops 请求体。</summary>
+public sealed record LocalOpRequest(string? Op, object? Args);
+
+/// <summary>POST /api/devices/{deviceId}/local-ops 响应：入队后的任务 ID（结果查询走 GET /api/print/jobs）。</summary>
+public sealed record LocalOpCreatedResponse(long JobId, string JobNo);
 
 #endregion
 
@@ -101,9 +116,15 @@ public sealed record AgentRegisterByCodeResponse(
     int HeartbeatSeconds,
     IReadOnlyList<PrinterBindingDto> Bindings);
 
+/// <summary>
+/// POST /api/agent/heartbeat 请求体。
+/// <c>Capabilities</c> 为新增的本机操作能力码列表（font / zerotier …）：
+/// 老 Agent 不传，服务端按空处理并保持列默认值。
+/// </summary>
 public sealed record AgentHeartbeatRequest(
     string? AgentVersion,
-    List<AgentPrinterReport>? Printers);
+    List<AgentPrinterReport>? Printers,
+    List<string>? Capabilities = null);
 
 #endregion
 
