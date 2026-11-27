@@ -70,11 +70,47 @@ const hasFilters = computed(
   () => Boolean(keyword.value.trim() || town.value || classification.value),
 )
 const hasKeyword = computed(() => Boolean(keyword.value.trim()))
-const importedSubtitle = computed(() => {
-  if (importedError.value) return '历史导入库检索失败'
-  if (importedLoading.value) return '正在检索历史导入库…'
-  return `导入库命中 ${importedItems.value.length} 户（含成员命中）`
+
+/** 列表合并行：当前库在享对象 + 历史导入库记录（同一张表展示，口径同桌面版变更页）。 */
+interface DisplayRow extends ChangeManagementListItem {
+  isImported: boolean
+  imported?: ImportedArchiveItem
+}
+
+const displayRows = computed<DisplayRow[]>(() => {
+  const importedRows: DisplayRow[] = importedItems.value.map((item) => ({
+    applicationId: item.existingApplicationId ?? 0,
+    applicationNo: '',
+    applicantName: item.applicantName,
+    applicantIdCardMasked: item.applicantIdCardMasked,
+    town: '',
+    village: item.address,
+    classification: item.derivedClassificationCode,
+    classificationName: item.derivedClassificationName || item.sourceDisplay,
+    familySize: item.familySize,
+    householdMonthlyGuaranteeAmount: 0,
+    totalGuaranteeAmount: item.totalAmount,
+    perCapitaAnnualIncome: 0,
+    status: item.existingApplicationId ? 'ImportedArchived' : 'ImportedPending',
+    statusText: item.existingApplicationId ? '已建档' : '待建档',
+    gracePeriodEndDate: null,
+    gracePeriodMonths: null,
+    graceDaysLeft: null,
+    isImported: true,
+    imported: item,
+  }))
+
+  return [...items.value.map((row) => ({ ...row, isImported: false })), ...importedRows]
 })
+
+const importedCount = computed(() => importedItems.value.length)
+
+function rowKeyFor(row: DisplayRow): string {
+  return row.isImported && row.imported
+    ? `imported:${row.imported.sourceTable}:${row.imported.sourceId}`
+    : `application:${row.applicationId}`
+}
+
 const displayTotalPages = computed(() => Math.max(totalPages.value, 1))
 const paginationLayout = computed(() =>
   isNarrow.value ? 'prev, pager, next' : 'total, sizes, prev, pager, next, jumper',
@@ -88,19 +124,26 @@ const listSubtitle = computed(() => {
   if (loadError.value) return '数据加载失败'
   if (loading.value && items.value.length === 0) return '正在读取在享保障对象…'
   const suffix = hasFilters.value ? ' · 已应用筛选' : ''
-  return `共 ${totalCount.value} 户在享对象${suffix}`
+  const importedText = importedCount.value > 0 ? ` · 导入库 ${importedCount.value} 户` : ''
+  return `共 ${totalCount.value} 户在享对象${importedText}${suffix}`
 })
 
-const emptyDescription = computed(() =>
-  hasFilters.value ? '没有找到匹配的在享保障对象' : '暂无已审批/已完成的在享保障对象',
-)
+const emptyDescription = computed(() => {
+  if (importedError.value) return '历史导入库检索失败，可点「重新检索」重试'
+  if (importedLoading.value) return '正在检索历史导入库…'
+  return hasFilters.value
+    ? '没有找到匹配的在享保障对象或历史导入库记录'
+    : '暂无已审批/已完成的在享保障对象'
+})
 
 const canOpenMemberDialog = computed(
   () => Boolean(detail.value && filters.value && detail.value.canManage && detail.value.canChangeMember),
 )
 
-function rowClassName({ row }: { row: ChangeManagementListItem }): string {
-  return row.applicationId === selectedId.value ? 'is-selected' : ''
+function rowClassName({ row }: { row: DisplayRow }): string {
+  return !row.isImported && row.applicationId > 0 && row.applicationId === selectedId.value
+    ? 'is-selected'
+    : ''
 }
 
 async function loadFilters(): Promise<void> {
@@ -242,7 +285,31 @@ async function loadHistory(applicationId: number, ticket: number): Promise<void>
   }
 }
 
-function selectRow(row: ChangeManagementListItem): void {
+/** 导入库行点击：已建档 → 看档案；未建档 → 确认后建档并办理。 */
+async function handleImportedRow(item: ImportedArchiveItem): Promise<void> {
+  if (item.existingApplicationId) {
+    await openImportedExisting(item.existingApplicationId)
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `「${item.applicantName}」尚未建档，是否现在建档并办理变更？建档后档案为草稿，需在五步表单补全。`,
+      '导入库建档',
+      { type: 'warning', confirmButtonText: '建档并办理', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  await handleMigrateImported(item)
+}
+
+function selectRow(row: DisplayRow): void {
+  if (row.isImported && row.imported) {
+    void handleImportedRow(row.imported)
+    return
+  }
   if (isNarrow.value) detailDrawerVisible.value = true
   void loadDetail(row.applicationId)
 }
@@ -408,7 +475,7 @@ onMounted(() => {
 
     <div class="summary">
       <NcStat label="在享保障对象" :value="totalCount" tone="ink" compact />
-      <NcStat label="本页户数" :value="items.length" tone="pine" compact />
+      <NcStat label="本页户数" :value="displayRows.length" tone="pine" compact />
       <NcStat label="本页渐退期户" :value="pageGraceCount" tone="amber" compact />
       <NcStat label="当前页" :value="`${page} / ${displayTotalPages}`" tone="seal" compact />
     </div>
@@ -479,14 +546,30 @@ onMounted(() => {
 
     <div class="workspace" :class="{ 'is-narrow': isNarrow }">
       <NcCard title="在享对象" :subtitle="listSubtitle" padding="none" class="list-card">
-        <div v-loading="loading && items.length > 0" class="list-area">
-          <el-skeleton v-if="loading && items.length === 0" :rows="6" animated class="list-skeleton" />
+        <div v-loading="(loading && items.length > 0) || importedLoading" class="list-area">
+          <el-skeleton
+            v-if="(loading || importedLoading) && displayRows.length === 0"
+            :rows="6"
+            animated
+            class="list-skeleton"
+          />
 
-          <template v-else-if="items.length > 0">
+          <template v-else-if="displayRows.length > 0">
+            <el-alert
+              v-if="importedError"
+              class="imported-error"
+              type="warning"
+              :title="importedError"
+              :closable="false"
+              show-icon
+            >
+              <el-button link type="primary" @click="loadImported()">重新检索</el-button>
+            </el-alert>
+
             <el-table
               v-if="!isNarrow"
-              :data="items"
-              row-key="applicationId"
+              :data="displayRows"
+              :row-key="rowKeyFor"
               class="change-table"
               :row-class-name="rowClassName"
               @row-click="selectRow"
@@ -495,7 +578,10 @@ onMounted(() => {
                 <template #default="{ row }">
                   <div class="person-cell">
                     <strong>{{ row.applicantName || '—' }}</strong>
-                    <small>{{ row.applicationNo || '—' }}</small>
+                    <small v-if="row.isImported">
+                      {{ row.imported?.sourceDisplay }} · {{ row.statusText }}
+                    </small>
+                    <small v-else>{{ row.applicationNo || '—' }}</small>
                   </div>
                 </template>
               </el-table-column>
@@ -514,25 +600,44 @@ onMounted(() => {
 
               <el-table-column label="乡镇 / 村" min-width="132">
                 <template #default="{ row }">
-                  <span class="ellipsis" :title="[row.town, row.village].filter(Boolean).join(' / ')">
+                  <span
+                    v-if="row.isImported"
+                    class="ellipsis"
+                    :title="row.imported?.address"
+                  >
+                    {{ row.imported?.address || '—' }}
+                  </span>
+                  <span
+                    v-else
+                    class="ellipsis"
+                    :title="[row.town, row.village].filter(Boolean).join(' / ')"
+                  >
                     {{ [row.town, row.village].filter(Boolean).join(' / ') || '—' }}
                   </span>
                 </template>
               </el-table-column>
 
               <el-table-column label="人数" width="66" align="right">
-                <template #default="{ row }">{{ row.familySize }}</template>
+                <template #default="{ row }">{{ row.familySize || '—' }}</template>
               </el-table-column>
 
               <el-table-column label="保障金（元/月）" width="118" align="right">
                 <template #default="{ row }">
-                  <span class="mono">{{ formatMoney(row.totalGuaranteeAmount) }}</span>
+                  <span class="mono">
+                    {{ row.isImported
+                      ? (row.totalGuaranteeAmount ? formatMoney(row.totalGuaranteeAmount) : '—')
+                      : formatMoney(row.totalGuaranteeAmount) }}
+                  </span>
                 </template>
               </el-table-column>
 
               <el-table-column label="渐退期" width="112">
                 <template #default="{ row }">
-                  <span v-if="row.gracePeriodEndDate" class="grace" :class="{ 'is-expired': (row.graceDaysLeft ?? 0) < 0 }">
+                  <span
+                    v-if="!row.isImported && row.gracePeriodEndDate"
+                    class="grace"
+                    :class="{ 'is-expired': (row.graceDaysLeft ?? 0) < 0 }"
+                  >
                     {{ graceDaysText(row.graceDaysLeft) }}
                   </span>
                   <span v-else class="muted">—</span>
@@ -541,17 +646,27 @@ onMounted(() => {
 
               <el-table-column label="状态" width="82">
                 <template #default="{ row }">
-                  <span class="status">{{ row.statusText || row.status }}</span>
+                  <span
+                    class="status"
+                    :class="{ 'is-pending': row.status === 'ImportedPending' }"
+                  >
+                    {{ row.statusText || row.status }}
+                  </span>
                 </template>
               </el-table-column>
 
-              <el-table-column label="操作" width="76" align="right">
+              <el-table-column label="操作" width="110" align="right">
                 <template #default="{ row }">
                   <el-button
+                    v-if="row.isImported && !row.imported?.existingApplicationId"
                     link
                     type="primary"
-                    @click.stop="selectRow(row as ChangeManagementListItem)"
+                    :loading="importingKey === `${row.imported?.sourceTable}#${row.imported?.sourceId}`"
+                    @click.stop="handleImportedRow(row.imported as ImportedArchiveItem)"
                   >
+                    建档并办理
+                  </el-button>
+                  <el-button v-else link type="primary" @click.stop="selectRow(row as DisplayRow)">
                     查看
                   </el-button>
                 </template>
@@ -560,8 +675,8 @@ onMounted(() => {
 
             <div v-else class="change-cards">
               <article
-                v-for="row in items"
-                :key="row.applicationId"
+                v-for="row in displayRows"
+                :key="rowKeyFor(row)"
                 class="change-card"
                 role="button"
                 tabindex="0"
@@ -571,16 +686,19 @@ onMounted(() => {
                 <header class="change-card__head">
                   <div>
                     <strong>{{ row.applicantName || '—' }}</strong>
-                    <span>{{ row.applicationNo || '—' }}</span>
+                    <span v-if="row.isImported">{{ row.imported?.sourceDisplay }}</span>
+                    <span v-else>{{ row.applicationNo || '—' }}</span>
                   </div>
-                  <span class="status">{{ row.statusText || row.status }}</span>
+                  <span class="status" :class="{ 'is-pending': row.status === 'ImportedPending' }">
+                    {{ row.statusText || row.status }}
+                  </span>
                 </header>
                 <p class="change-card__id">{{ row.applicantIdCardMasked || '—' }}</p>
                 <p class="change-card__class">{{ row.classificationName || '—' }}</p>
                 <div class="change-card__grid">
                   <div>
                     <span>家庭人数</span>
-                    <strong>{{ row.familySize }} 人</strong>
+                    <strong>{{ row.familySize || '—' }} 人</strong>
                   </div>
                   <div>
                     <span>保障金（元/月）</span>
@@ -588,21 +706,38 @@ onMounted(() => {
                   </div>
                   <div>
                     <span>渐退期</span>
-                    <strong v-if="row.gracePeriodEndDate" class="grace">
+                    <strong v-if="!row.isImported && row.gracePeriodEndDate" class="grace">
                       {{ graceDaysText(row.graceDaysLeft) }}
                     </strong>
                     <strong v-else class="muted">—</strong>
                   </div>
                   <div>
-                    <span>乡镇 / 村</span>
-                    <strong class="ellipsis">{{ [row.town, row.village].filter(Boolean).join(' / ') || '—' }}</strong>
+                    <span>{{ row.isImported ? '地址' : '乡镇 / 村' }}</span>
+                    <strong class="ellipsis">
+                      {{ row.isImported
+                        ? (row.imported?.address || '—')
+                        : ([row.town, row.village].filter(Boolean).join(' / ') || '—') }}
+                    </strong>
                   </div>
+                </div>
+                <div
+                  v-if="row.isImported && !row.imported?.existingApplicationId"
+                  class="change-card__action"
+                >
+                  <el-button
+                    size="small"
+                    type="primary"
+                    :loading="importingKey === `${row.imported?.sourceTable}#${row.imported?.sourceId}`"
+                    @click.stop="handleImportedRow(row.imported as ImportedArchiveItem)"
+                  >
+                    建档并办理
+                  </el-button>
                 </div>
               </article>
             </div>
           </template>
 
-          <div v-else-if="!loading && !loadError" class="empty-wrap">
+          <div v-else-if="!loading && !importedLoading && !loadError" class="empty-wrap">
             <el-empty :description="emptyDescription">
               <el-button v-if="hasFilters" :icon="Refresh" @click="handleReset">清除筛选</el-button>
             </el-empty>
@@ -666,111 +801,6 @@ onMounted(() => {
       </div>
     </div>
 
-    <NcCard
-      v-if="hasKeyword"
-      title="历史导入库（待建档）"
-      :subtitle="importedSubtitle"
-      padding="none"
-      class="imported-card"
-    >
-      <div v-loading="importedLoading" class="imported-area">
-        <el-alert
-          v-if="importedError"
-          type="warning"
-          :title="importedError"
-          :closable="false"
-          show-icon
-        >
-          <el-button link type="primary" @click="loadImported()">重新检索</el-button>
-        </el-alert>
-
-        <el-table
-          v-else-if="importedItems.length > 0"
-          :data="importedItems"
-          row-key="sourceId"
-          class="imported-table"
-        >
-          <el-table-column label="姓名" min-width="110">
-            <template #default="{ row }">
-              <div class="person-cell">
-                <strong>{{ row.applicantName || '—' }}</strong>
-                <small v-if="row.matchedPersonInfo">{{ row.matchedPersonInfo }}</small>
-              </div>
-            </template>
-          </el-table-column>
-
-          <el-table-column label="身份证（脱敏）" min-width="138">
-            <template #default="{ row }">
-              <span class="mono">{{ row.applicantIdCardMasked || '—' }}</span>
-            </template>
-          </el-table-column>
-
-          <el-table-column label="来源" min-width="132">
-            <template #default="{ row }">
-              <span>{{ row.sourceDisplay || '导入库' }}</span>
-              <small v-if="row.derivedClassificationName" class="muted">
-                {{ row.derivedClassificationName }}
-              </small>
-            </template>
-          </el-table-column>
-
-          <el-table-column label="地址" min-width="180">
-            <template #default="{ row }">
-              <span class="ellipsis" :title="row.address">{{ row.address || '—' }}</span>
-            </template>
-          </el-table-column>
-
-          <el-table-column label="人数" width="66" align="right">
-            <template #default="{ row }">{{ row.familySize || '—' }}</template>
-          </el-table-column>
-
-          <el-table-column label="保障金（元/月）" width="118" align="right">
-            <template #default="{ row }">
-              <span class="mono">{{ row.totalAmount ? formatMoney(row.totalAmount) : '—' }}</span>
-            </template>
-          </el-table-column>
-
-          <el-table-column label="建档状态" width="94">
-            <template #default="{ row }">
-              <span class="status" :class="{ 'is-pending': !row.existingApplicationId }">
-                {{ row.existingApplicationId ? '已建档' : '待建档' }}
-              </span>
-            </template>
-          </el-table-column>
-
-          <el-table-column label="操作" width="128" align="right">
-            <template #default="{ row }">
-              <el-button
-                v-if="row.existingApplicationId"
-                link
-                type="primary"
-                @click="openImportedExisting(row.existingApplicationId)"
-              >
-                查看档案
-              </el-button>
-              <el-button
-                v-else
-                link
-                type="primary"
-                :loading="importingKey === `${row.sourceTable}#${row.sourceId}`"
-                @click="handleMigrateImported(row as ImportedArchiveItem)"
-              >
-                建档并办理
-              </el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-
-        <div v-else class="imported-empty">
-          <p>历史导入库中未找到「{{ keyword.trim() }}」。</p>
-          <p class="muted">
-            导入库为农村低保 / 城市低保 / 低保边缘 / 特困供养 / 刚性支出 / 其他困难 6 类历史在保档案；
-            如仍未找到，请到「数据中心 → 数据导入」核对该批数据是否已导入。
-          </p>
-        </div>
-      </div>
-    </NcCard>
-
     <el-drawer
       v-model="detailDrawerVisible"
       title="选中户详情"
@@ -832,34 +862,18 @@ onMounted(() => {
   overflow: hidden;
 }
 
-.imported-card {
-  margin-top: 2px;
-}
-
-.imported-area {
-  padding: 14px 16px;
-}
-
-.imported-table {
-  width: 100%;
-}
-
-.imported-empty {
-  padding: 8px 2px;
-  line-height: 1.7;
-}
-
-.imported-empty p {
-  margin: 0;
-}
-
-.imported-empty .muted {
-  margin-top: 4px;
-  font-size: 12px;
+.imported-error {
+  margin-bottom: 10px;
 }
 
 .status.is-pending {
   color: var(--nc-amber, #9a6b00);
+}
+
+.change-card__action {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .filter-bar {
