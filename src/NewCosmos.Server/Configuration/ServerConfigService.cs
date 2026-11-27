@@ -54,7 +54,11 @@ public sealed class ServerConfigService(
         }
     }
 
-    public NetworkOptions GetNetworkOptions() => new();
+    /// <summary>
+    /// OCR/AI 判定服务地址来自 <c>NC_OCR_SERVICE_URL</c>（见 <see cref="ServerEnvironmentOptions.OcrServiceUrl"/>）。
+    /// 为空 = 未配置：OCR 识别与 AI 重病判定均降级为人工，不影响表单保存。
+    /// </summary>
+    public NetworkOptions GetNetworkOptions() => new() { OcrServiceUrl = options.OcrServiceUrl };
 
     public UpdateOptions GetUpdateOptions() => new() { Enabled = false };
 

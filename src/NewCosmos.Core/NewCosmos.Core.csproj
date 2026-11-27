@@ -17,6 +17,8 @@
 
   <ItemGroup>
     <None Update="Resources\Icd10\icd10_common.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- 重病判定随包清单：与服务端 deploy/ocr/severe_disease_catalog.json 必须字节一致。 -->
+    <None Update="Resources\Icd10\severe_disease_catalog.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

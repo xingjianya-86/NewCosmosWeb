@@ -64,6 +64,7 @@
 | `nc_sys_print_devices` | `id/device_key uuid/machine_name/agent_version/printers_json/last_seen_at/...` | **未创建** | **必须合并** | 来源 `src/NewCosmos.Server/Migrations/001_printer_binding.sql`。P0 打印绑定依赖，上线前必须执行。 |
 | `nc_sys_printer_bindings` | `id/user_id/device_id/printer_name/is_default/...` | **未创建** | **必须合并** | 唯一键 `(user_id, device_id, printer_name)`；每账号最多一个默认打印机。Web AGENTS 铁律 6 的落点。 |
 | `nc_sys_print_devices.is_active` | 无 | — | **可忽略（后续）** | Web README 已注明缺 `is_active`，当前心跳只能判断“存在”。 |
+| `nc_sys_ai_judgments` | `input_key varchar(300) PK/verdict/matched_item/confidence real/reason text/source/policy_version varchar(16)/model/created_at/updated_at` | **未创建** | **必须合并** | 来源 `src/NewCosmos.Server/Migrations/005_ai_judgment_cache.sql`（抄桌面 `docs/migrations/20261112_ai_judgment_cache.sql`，幂等）。AI 重病判定 LLM 结果缓存，`AiJudgmentCacheService` 读写；缺表时判定降级走服务端 LLM，不阻断业务。 |
 
 > 这两张表应补进 YAML（建议放 `Resources/Schema/printing/`），否则 YAML 无法作为完整权威。
 
@@ -157,6 +158,7 @@
 | P0 | 权限 8 表 | 齐全 | 列一致；拆分 YAML 才含 `nc_perm_user_permissions`/`nc_perm_cache_version` 的 PK | 以实际库约束为准，补 YAML |
 | P0 | `nc_sys_user_sessions` | 齐全 | 16 列一致；无缺列 | 无需改 |
 | P0 | `nc_sys_print_devices` / `nc_sys_printer_bindings` | **表不存在** | 备份库未执行 001 | 上线前执行 `001_printer_binding.sql` |
+| P1 | `nc_sys_ai_judgments` | **表不存在** | 备份库未执行 005（AI 重病判定缓存） | 上线前执行 `005_ai_judgment_cache.sql`；缺表只降级为每次走服务端 LLM |
 | P0/P2 | `nc_biz_print_jobs` | 结构齐全 | 状态值/认领协议冲突；`PrintRelay` 枚举 Web 不识别 | 统一 `Processing` + 定向认领；补 Web 常量 |
 | P1 | `nc_biz_applications` | **YAML 不齐全 / 库齐全** | 4 列只在库/YAML 之外：`chain_type`、`medical_self_paid_12m`、`total_annual_income`、`per_capita_annual_income` | 回写 YAML；库用 `IF NOT EXISTS` 兜底 |
 | P1 | `nc_biz_family_members` | **YAML 不齐全 / 库齐全** | 3 列：`person_type`、`monthly_income_capacity`、`medical_self_paid_12m` | 回写 YAML；库用 `IF NOT EXISTS` 兜底 |

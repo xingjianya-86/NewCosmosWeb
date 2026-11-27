@@ -5,6 +5,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { changeApplicationDate } from '@/api/applicationForm'
 import { getErrorMessage } from '@/api/http'
 import { getIcd10 } from '@/api/icd10'
+import { judgeSeverity, judgeSeverityByCost } from '@/api/aiJudge'
+import type { AiSeverityResult } from '@/api/aiJudge'
 import AddressCascader from '@/components/AddressCascader.vue'
 import NcCard from '@/components/NcCard.vue'
 import {
@@ -75,8 +77,96 @@ async function handleDiseaseCodeChange(): Promise<void> {
     if (!diseaseCategory.value && result.category) {
       diseaseCategory.value = result.category
     }
+    // 名称为空 = ICD-10 字典未命中：名称不可信，不判定（对齐桌面 RequestApplicantAiJudgment）。
+    if (!result.name?.trim() || isLocked.value) return
+    void requestAiJudgment(code, result.name)
   } catch {
     // 字典查询失败不阻断手工录入。
+  }
+}
+
+// ── AI 重病判定接线（P0，2026-11-27）────────────────────────────
+// 口径唯一权威在 Core：建议文案由服务端 AiJudgeConstants.FormatSuggestion 拼装，
+// 自动勾选闸门由服务端 ISevereDiseaseAdviceService.ShouldAutoCheck 判定；
+// 前端只负责触发、竞态丢弃与「只勾不取消」。
+
+/** 用户本会话内已人工取消过「是否重病」（true→false 只能来自用户）：此后 AI 只出建议、不再自动勾。 */
+const applicantRejected = ref(false)
+
+/** AI/费用口径建议条文案（仅 severe 时非空）。 */
+const aiSuggestion = ref('')
+
+/** 建议条可见性：@close 只隐藏、不动勾选。 */
+const showAiSuggestion = ref(false)
+
+function dismissAiSuggestion(): void {
+  showAiSuggestion.value = false
+}
+
+/**
+ * 「是否重病」人工取消跟踪：Element Plus 的 change 只在用户点击时触发，
+ * 程序化赋值（AI 自动勾选）不会触发，因此无需加载抑制标志。
+ */
+function handleSevereChange(value: boolean | string | number): void {
+  if (value === false) applicantRejected.value = true
+}
+
+/** 病种口径判定：失败=无建议，静默降级（不弹提示、不阻塞保存）。 */
+async function requestAiJudgment(code: string, name: string): Promise<void> {
+  const sentCode = code.toLowerCase()
+  const sentRejected = applicantRejected.value
+  // 换输入即失效旧建议。
+  aiSuggestion.value = ''
+  showAiSuggestion.value = false
+
+  try {
+    const result = await judgeSeverity({ name, code, userRejected: sentRejected })
+    // 过期响应丢弃：编码已变，或用户在此期间取消过勾选。
+    if (diseaseCode.value.trim().toLowerCase() !== sentCode) return
+    if (applicantRejected.value !== sentRejected) return
+    applyAiJudgment(result)
+  } catch {
+    // 失败=无建议（断网/未配置地址/超时）：静默，不影响表单保存。
+  }
+}
+
+function applyAiJudgment(result: AiSeverityResult): void {
+  if (result.verdict !== 'severe') {
+    showAiSuggestion.value = false
+    return
+  }
+  // 只勾不取消：AI 永不把勾选改为 false。
+  if (result.autoChecked && !isSevereDisease.value) {
+    isSevereDisease.value = true
+  }
+  aiSuggestion.value = result.suggestion
+  showAiSuggestion.value = Boolean(result.suggestion)
+}
+
+/** 费用口径判定（自付字段失焦/回车触发）；阈值缺失由服务端静默降级为不判定。 */
+async function handleSelfPaidChange(): Promise<void> {
+  if (isLocked.value) return
+  const paid = basic.value.medicalSelfPaid12m
+  if (paid === null || paid === undefined || paid <= 0) return
+
+  const sentRejected = applicantRejected.value
+  // 城乡档与表单其它判定同口径：HukouType 非 Urban 即农村档。
+  const isRural = basic.value.hukouType !== 'Urban'
+  try {
+    const result = await judgeSeverityByCost({
+      selfPaid12m: paid,
+      isRural,
+      userRejected: sentRejected,
+    })
+    if (applicantRejected.value !== sentRejected) return // 用户已否决，丢弃过期结果
+    if (!result.severe || !result.suggestion) return
+    if (result.autoChecked && !isSevereDisease.value) {
+      isSevereDisease.value = true // 只勾不取消
+    }
+    aiSuggestion.value = result.suggestion
+    showAiSuggestion.value = true
+  } catch {
+    // 失败=无建议：静默降级，不阻塞保存。
   }
 }
 
@@ -224,10 +314,9 @@ watch(
   },
 )
 
-/** 疾病编码变化：不造假数据回填；仅在已有疾病名时联动“是否重病”（只勾不取消）。 */
-watch(diseaseCode, () => {
-  if (basic.value.diseaseName?.trim()) isSevereDisease.value = true
-})
+// 注：原 `watch(diseaseCode)` 在编码变化时直接置 IsSevereDisease=true，绕过
+// ISevereDiseaseAdviceService.ShouldAutoCheck 闸门（目录外编码也会被勾上），
+// 是 Web 侧最大的语义 bug，已删除。自动勾选只允许来自 AI 判定/费用口径两条通道。
 
 async function validate(): Promise<boolean> {
   if (!formRef.value) return isBasicValid(basic.value)
@@ -486,7 +575,12 @@ defineExpose({ validate })
         <div class="disease-row disease-row--four">
           <div class="field">
             <span class="field__label">是否重病</span>
-            <el-checkbox v-model="isSevereDisease" :disabled="isLocked" aria-label="是否重病" />
+            <el-checkbox
+              v-model="isSevereDisease"
+              :disabled="isLocked"
+              aria-label="是否重病"
+              @change="handleSevereChange"
+            />
           </div>
 
           <label class="field">
@@ -544,9 +638,21 @@ defineExpose({ validate })
               placeholder="住院+门诊慢特病+高值药品累计自付；超上年度人均可支配收入按费用口径认定重病"
               :disabled="isLocked"
               @update:model-value="basic.medicalSelfPaid12m = $event ?? null"
+              @change="handleSelfPaidChange"
             />
           </label>
         </div>
+
+        <!-- AI 重病建议条：仅 severe 时显示；关闭只隐藏，不动勾选。 -->
+        <el-alert
+          v-if="!isLocked && showAiSuggestion && aiSuggestion"
+          :title="aiSuggestion"
+          type="warning"
+          show-icon
+          :closable="true"
+          class="ai-suggestion"
+          @close="dismissAiSuggestion"
+        />
       </div>
     </NcCard>
 
@@ -644,6 +750,10 @@ defineExpose({ validate })
 
 .disease-row--full {
   grid-template-columns: minmax(0, 1fr);
+}
+
+.ai-suggestion {
+  width: 100%;
 }
 
 .address-detail {

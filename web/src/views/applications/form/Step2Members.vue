@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted, reactive, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Plus } from '@element-plus/icons-vue'
 import NcCard from '@/components/NcCard.vue'
 import AddressCascader from '@/components/AddressCascader.vue'
 import { getIcd10 } from '@/api/icd10'
+import { judgeSeverity, judgeSeverityByCost } from '@/api/aiJudge'
+import type { AiSeverityResult } from '@/api/aiJudge'
 import { formatMoney } from '../format'
 import { createMember, createSupporter } from './formModel'
 import {
@@ -143,6 +145,9 @@ async function handleMemberDiseaseCodeChange(member: MemberRow): Promise<void> {
     if (member.diseaseCode.trim().toLowerCase() !== code.toLowerCase()) return
     if (!member.diseaseName?.trim() && result.name) member.diseaseName = result.name
     if (!member.diseaseCategory && result.category) member.diseaseCategory = result.category
+    // 名称为空 = ICD-10 字典未命中：名称不可信，不判定。
+    if (!result.name?.trim() || isReadonly.value) return
+    void requestRowAiJudgment(member, code, result.name, () => member.diseaseCode)
   } catch {
     // 字典查询失败不阻断手工录入。
   }
@@ -158,6 +163,8 @@ async function handleSupporterDiseaseCodeChange(supporter: SupporterRow): Promis
       supporter.secondaryDiseaseName = result.name
     }
     if (!supporter.diseaseCategory && result.category) supporter.diseaseCategory = result.category
+    if (!result.name?.trim() || isReadonly.value) return
+    void requestRowAiJudgment(supporter, code, result.name, () => supporter.diseaseCode)
   } catch {
     // 字典查询失败不阻断手工录入。
   }
@@ -258,6 +265,104 @@ const visibleMembers = computed<MemberRow[]>(() =>
 
 /** 非草稿（已提交/审批中/已通过等）或查看/复核模式只读，禁用全部输入。 */
 const isReadonly = computed(() => props.form.status !== 'Draft' || Boolean(props.readonly))
+
+// ── AI 重病判定接线（P0，2026-11-27）────────────────────────────
+// 成员卡与赡养卡共用一套逻辑；口径唯一权威在 Core（ShouldAutoCheck 闸门 /
+// AiJudgeConstants.FormatSuggestion / SevereDiseaseByCostRule），前端只负责触发与竞态丢弃。
+
+/** 具备「是否重病」勾选的行（成员与赡养人同构）。 */
+type SevereRow = { isSevereDisease: boolean }
+
+/**
+ * 行级人工否决态：true→false 只能来自用户点击，否决后本会话内 AI 只出建议、不再自动勾。
+ * 按行对象弱引用（同 supportFeeBackup 先例），行删除后自动回收，不落库。
+ */
+const severeRejected = new WeakSet<object>()
+
+/** 行级 AI 建议文案（组件内展示用，不落库）。 */
+const aiSuggestions = reactive(new Map<object, string>())
+
+function handleMemberSevereChange(member: MemberRow, value: boolean | string | number): void {
+  if (value === false) severeRejected.add(member)
+}
+
+function handleSupporterSevereChange(supporter: SupporterRow, value: boolean | string | number): void {
+  if (value === false) severeRejected.add(supporter)
+}
+
+function suggestionOf(row: object): string {
+  return aiSuggestions.get(row) ?? ''
+}
+
+/** 建议条可见性：只读模式不展示；@close 只隐藏、不动勾选。 */
+function dismissSuggestion(row: object): void {
+  aiSuggestions.delete(row)
+}
+
+/** 病种口径判定：失败=无建议，静默降级（不弹提示、不阻塞保存）。 */
+async function requestRowAiJudgment(
+  row: SevereRow,
+  code: string,
+  name: string,
+  readCode: () => string,
+): Promise<void> {
+  const sentCode = code.trim().toLowerCase()
+  const sentRejected = severeRejected.has(row)
+  aiSuggestions.delete(row) // 换输入即失效旧建议
+
+  try {
+    const result = await judgeSeverity({ name, code, userRejected: sentRejected })
+    // 竞态丢弃（apply 时再读一次）：编码已变，或用户在此期间取消过勾选。
+    if (readCode().trim().toLowerCase() !== sentCode) return
+    if (severeRejected.has(row) !== sentRejected) return
+    applyRowAiJudgment(row, result)
+  } catch {
+    // 失败=无建议（断网/未配置地址/超时）：静默，不影响表单保存。
+  }
+}
+
+function applyRowAiJudgment(row: SevereRow, result: AiSeverityResult): void {
+  if (result.verdict !== 'severe') {
+    aiSuggestions.delete(row)
+    return
+  }
+  // 只勾不取消：AI 永不把勾选改为 false。
+  if (result.autoChecked && !row.isSevereDisease) {
+    row.isSevereDisease = true
+  }
+  if (result.suggestion) aiSuggestions.set(row, result.suggestion)
+  else aiSuggestions.delete(row)
+}
+
+/** 费用口径判定（自付字段失焦/回车触发）；阈值缺失由服务端静默降级为不判定。 */
+async function evaluateRowCost(row: SevereRow, readPaid: () => number | null): Promise<void> {
+  if (isReadonly.value) return
+  const paid = readPaid()
+  if (paid === null || paid === undefined || paid <= 0) return
+
+  const sentRejected = severeRejected.has(row)
+  // 城乡档与表单其它判定同口径：HukouType 非 Urban 即农村档。
+  const isRural = props.form.basic.hukouType !== 'Urban'
+  try {
+    const result = await judgeSeverityByCost({ selfPaid12m: paid, isRural, userRejected: sentRejected })
+    if (severeRejected.has(row) !== sentRejected) return // 用户已否决，丢弃过期结果
+    if (!result.severe || !result.suggestion) return
+    if (result.autoChecked && !row.isSevereDisease) {
+      row.isSevereDisease = true // 只勾不取消
+    }
+    aiSuggestions.set(row, result.suggestion)
+  } catch {
+    // 失败=无建议：静默降级，不阻塞保存。
+  }
+}
+
+function handleMemberSelfPaidChange(member: MemberRow): void {
+  void evaluateRowCost(member, () => member.medicalSelfPaid12m)
+}
+
+function handleSupporterSelfPaidChange(supporter: SupporterRow): void {
+  void evaluateRowCost(supporter, () => supporter.medicalSelfPaid12m)
+}
 
 /** 只读展示值：空值统一显示“—”。 */
 function displayText(value: string | null | undefined): string {
@@ -515,6 +620,17 @@ onMounted(() => {
               </el-button>
             </div>
           </header>
+
+          <!-- AI 重病建议条：仅 severe 时显示；关闭只隐藏，不动勾选。 -->
+          <el-alert
+            v-if="!isReadonly && suggestionOf(member)"
+            :title="suggestionOf(member)"
+            type="warning"
+            show-icon
+            :closable="true"
+            class="ai-suggestion"
+            @close="dismissSuggestion(member)"
+          />
 
           <section class="member-section">
             <h4 class="member-section__title">个人信息</h4>
@@ -801,7 +917,11 @@ onMounted(() => {
 
               <label class="field field--switch">
                 <span class="field__label">是否重病</span>
-                <el-checkbox v-model="member.isSevereDisease" :disabled="isReadonly" />
+                <el-checkbox
+                  v-model="member.isSevereDisease"
+                  :disabled="isReadonly"
+                  @change="handleMemberSevereChange(member, $event)"
+                />
               </label>
 
               <label class="field">
@@ -857,6 +977,7 @@ onMounted(() => {
                   placeholder="0.00"
                   :disabled="isReadonly"
                   @update:model-value="member.medicalSelfPaid12m = $event ?? null"
+                  @change="handleMemberSelfPaidChange(member)"
                 />
               </label>
 
@@ -964,6 +1085,17 @@ onMounted(() => {
               删除
             </el-button>
           </header>
+
+          <!-- AI 重病建议条：仅 severe 时显示；关闭只隐藏，不动勾选。 -->
+          <el-alert
+            v-if="!isReadonly && suggestionOf(supporter)"
+            :title="suggestionOf(supporter)"
+            type="warning"
+            show-icon
+            :closable="true"
+            class="ai-suggestion"
+            @close="dismissSuggestion(supporter)"
+          />
 
           <section class="member-section">
             <h4 class="member-section__title">个人信息</h4>
@@ -1243,7 +1375,11 @@ onMounted(() => {
 
               <label class="field field--switch">
                 <span class="field__label">是否重病</span>
-                <el-checkbox v-model="supporter.isSevereDisease" :disabled="isReadonly" />
+                <el-checkbox
+                  v-model="supporter.isSevereDisease"
+                  :disabled="isReadonly"
+                  @change="handleSupporterSevereChange(supporter, $event)"
+                />
               </label>
 
               <label class="field">
@@ -1299,6 +1435,7 @@ onMounted(() => {
                   placeholder="0.00"
                   :disabled="isReadonly"
                   @update:model-value="supporter.medicalSelfPaid12m = $event ?? null"
+                  @change="handleSupporterSelfPaidChange(supporter)"
                 />
               </label>
             </div>
@@ -1492,6 +1629,11 @@ onMounted(() => {
   gap: 12px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--nc-line-faint);
+}
+
+.ai-suggestion {
+  width: 100%;
+  margin-top: 10px;
 }
 
 .member-card__title {

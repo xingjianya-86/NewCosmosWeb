@@ -22,4 +22,11 @@
     <ProjectReference Include="..\..\src\NewCosmos.Core\NewCosmos.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 随包重病清单复制到测试输出目录，恢复“真实清单可加载且含关键业务裁定”防回归用例。 -->
+    <None Update="..\..\src\NewCosmos.Core\Resources\Icd10\severe_disease_catalog.json"
+          Link="Resources\Icd10\severe_disease_catalog.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

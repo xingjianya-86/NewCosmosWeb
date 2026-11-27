@@ -29,6 +29,8 @@ export NC_DB_NAME=newcosmos
 export NC_DB_USER=newcosmos
 export NC_DB_PASS='<数据库密码>'
 # 兼容别名：NC_DB_PASSWORD
+# OCR 识别与 AI 重病判定共用同一服务地址（留空=未启用，两者均降级为人工）
+export NC_OCR_SERVICE_URL='http://127.0.0.1:11434'
 export NC_AGENT_REGISTER_TOKEN='<一次性注册密钥>'
 export NC_AUTO_MIGRATE=1
 export NC_MAX_BODY_MB=128
@@ -48,6 +50,7 @@ export ASPNETCORE_URLS=http://0.0.0.0:8787
 | `NC_DB_TRUST_CERT` | 否 | `true` | 内网自签证书 |
 | `NC_DB_MAX_POOL` / `NC_DB_MIN_POOL` | 否 | `30` / `2` | 连接池 |
 | `NC_CORS_ORIGIN` | 否 | `https://cosmos.sua17.cn` | 多个用逗号分隔；`*` 会被忽略 |
+| `NC_OCR_SERVICE_URL` | 否 | 空 | OCR 识别与 AI 重病判定服务地址（**同一服务两条路由，同一个地址**，如 `http://127.0.0.1:11434`）；为空时两者均降级为人工/无建议，不影响表单保存 |
 | `NC_AGENT_REGISTER_TOKEN` | 建议 | 空 | Agent 注册头 `X-NC-Agent-Register`；为空时注册返回 503 |
 | `NC_AUTO_MIGRATE` | 否 | `false` | `1/true/yes/on` 时启动执行 `Migrations/*.sql` |
 | `NC_MAX_BODY_MB` | 否 | `4` | 请求体上限；上传场景建议 `128` |

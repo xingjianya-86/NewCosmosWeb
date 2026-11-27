@@ -178,10 +178,43 @@ public class SevereDiseaseJudgeTests
         Assert.NotEqual(v, SevereDiseaseJudge.FromJson(TestCatalogJson + " ").PolicyVersion); // 内容变→版本变
     }
 
-    // 跳过（MIGRATION_NOTES.md §文件系统/宿主资源）：
-    // · 真实清单文件_可加载且含关键业务裁定 —— 需从输出目录向上查找 Resources\Icd10\severe_disease_catalog.json。
+    /// <summary>
+    /// 真实随包清单必须可加载，且三条业务裁定（脑梗不算/未分型糖尿病不算/癌症待查算）落档。
+    /// 资源由测试工程 <c>Resources\Icd10\severe_disease_catalog.json</c> 复制到输出目录。
+    /// </summary>
+    [Xunit.Fact]
+    public void 真实清单文件_可加载且含关键业务裁定()
+    {
+        var path = FindRepoFile(Path.Combine("Resources", "Icd10", "severe_disease_catalog.json"));
+        Assert.NotNull(path);
+        var judge = SevereDiseaseJudge.FromJson(File.ReadAllText(path!));
+        Assert.True(judge.HasCatalog);
+        Assert.True(judge.Items.Count >= 80, $"清单条目 {judge.Items.Count} < 80");
+        Assert.Equal(16, judge.PolicyVersion.Length);
+
+        // 业务裁定落档核对（防清单被误改）：
+        Assert.Contains("脑出血", judge.Items);
+        Assert.Contains("恶性肿瘤", judge.Items);                          // 裁定3：癌症待查算
+        Assert.False(judge.TryJudgeDeterministic("脑梗死", "I63.9", out _)); // 裁定1：I63 不入表
+        Assert.False(judge.TryJudgeDeterministic("糖尿病", "E11.9", out _)); // 裁定2：未分型不算
+        Assert.True(judge.TryJudgeDeterministic("癌症待查", "", out var j)); // 裁定3：别名
+        Assert.Equal("恶性肿瘤", j.MatchedItem);
+    }
 
     [Xunit.Fact]
     public void 默认实例_加载失败降级为空清单不抛()
         => Assert.NotNull(SevereDiseaseJudge.Default);
+
+    /// <summary>从测试输出目录向上找文件（清单已随测试输出复制，向上遍历兼容仓库根布局）</summary>
+    private static string? FindRepoFile(string relative)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null)
+        {
+            var p = Path.Combine(dir.FullName, relative);
+            if (File.Exists(p)) return p;
+            dir = dir.Parent;
+        }
+        return null;
+    }
 }

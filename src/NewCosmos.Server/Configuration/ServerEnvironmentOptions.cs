@@ -24,6 +24,12 @@ public sealed class ServerEnvironmentOptions
     public required int AgentHeartbeatSeconds { get; init; }
     public required long MaxRequestBodyBytes { get; init; }
 
+    /// <summary>
+    /// OCR/AI 判定服务地址（AI 与 OCR 是同一服务的两条路由，共用一个地址）。
+    /// 空串 = 未配置：RemoteOcrRecognizeClient / RemoteAiJudgeClient 降级为人工，不阻断业务。
+    /// </summary>
+    public required string OcrServiceUrl { get; init; }
+
     public static ServerEnvironmentOptions Load()
     {
         var mode = GetString("NC_MODE", string.Empty).Trim().ToLowerInvariant();
@@ -119,7 +125,8 @@ public sealed class ServerEnvironmentOptions
             AutoMigrate = GetBool("NC_AUTO_MIGRATE", false),
             Mode = mode,
             AgentHeartbeatSeconds = Math.Clamp(GetInt("NC_AGENT_HEARTBEAT_SECONDS", 30), 5, 3600),
-            MaxRequestBodyBytes = bodyLimitMb * 1024L * 1024L
+            MaxRequestBodyBytes = bodyLimitMb * 1024L * 1024L,
+            OcrServiceUrl = GetString("NC_OCR_SERVICE_URL", string.Empty).Trim()
         };
     }
 

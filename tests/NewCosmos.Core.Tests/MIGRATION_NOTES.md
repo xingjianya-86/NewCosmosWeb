@@ -41,7 +41,7 @@
 | 同上 |  | `随包内置CHANGELOG资源_存在且可解析` | 依赖 Desktop 宿主程序集 `UpdateHistoryService` 及嵌入资源 `NewCosmos.CHANGELOG.md`，Core 无该类型/资源。 |
 | `Helpers/FontFamilyReaderTests.cs` | 5 个方法 / 8 个用例 | `ReadFamilyNames_坏文件_回退文件名不抛异常` | 写入并删除临时字体文件。 |
 | 同上 |  | `ReadFamilyNames_真实字体文件_能解析族名` | 读取系统字体目录 `simsun.ttc`。 |
-| `Helpers/SevereDiseaseJudgeTests.cs` | 其余全部 | `真实清单文件_可加载且含关键业务裁定` | 从输出目录向上查找 `Resources/Icd10/severe_disease_catalog.json`，Core 测试输出未复制该资源。 |
+| `Helpers/SevereDiseaseJudgeTests.cs` | 其余全部 + `真实清单文件_可加载且含关键业务裁定`（2026-11-27 恢复） | 0 | 已恢复：测试工程以 `None ... Link="Resources\Icd10\severe_disease_catalog.json" CopyToOutputDirectory` 复制随包清单到输出目录（见下方第 4 条）。 |
 
 ## 未迁移原因分类说明
 
@@ -55,6 +55,6 @@
 1. **迁移 `ConfigService.MergeMissingIniKeys`**（Desktop `Services/Core/ConfigService.cs`）到 Core，或抽成独立纯静态辅助类；补齐后可直接启用 `ConfigServiceIniMergeTests` 的 8 个用例。
 2. **迁移 `DeathDeclareValidator`**（含 `Input` 模型）到 `Services/Domain/ArchiveManagement`；这是 24 个申报前置校验用例无法迁移的唯一原因。
 3. **`ChangelogMarkdownParser` 资源宿主**：Core 只有解析器，`UpdateHistoryService` 与随包 `CHANGELOG.md` 嵌入资源仍在 Desktop。若希望覆盖“随包资源可解析”，需要在 Core 侧明确资源归属（或把资源复制逻辑放到测试项目并由测试工程显式链接）。
-4. **重病清单测试资源**：建议在测试项目中以 `Content`/`None CopyToOutputDirectory` 方式复制 `Resources/Icd10/severe_disease_catalog.json`，即可恢复“真实清单 ≥80 条 + 业务裁定”防回归用例，无需改 Core。
+4. **重病清单测试资源**：✅ 已完成（2026-11-27）——测试项目以 `None`/`Link` + `CopyToOutputDirectory` 方式复制 `Resources/Icd10/severe_disease_catalog.json` 到输出目录，“真实清单 ≥80 条 + 业务裁定”防回归用例已恢复，Core 未改。
 5. **`OutputPathHelper` 可测性**：当前静态类直接 `Directory.CreateDirectory`。若要覆盖目录 API，建议抽出纯路径组合函数（输入输出根参数化），磁盘断言留在集成测试。
 6. **`FontFamilyReader` 文件重载**：文件回退与系统字体用例属于文件系统/环境依赖，建议保留为 Desktop 集成测试，或在 Core 侧提供可注入的文件读取抽象。
