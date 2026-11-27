@@ -850,6 +850,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 15px;
+  min-height: 100%;
 }
 
 .summary {
@@ -911,8 +912,11 @@ onMounted(() => {
 .workspace {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(360px, 1fr);
-  align-items: start;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
   gap: 15px;
+  flex: 1;
+  min-height: 0;
 }
 
 .workspace.is-narrow {
@@ -921,6 +925,16 @@ onMounted(() => {
 
 .list-card {
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.list-card :deep(.nc-card__body) {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .list-card :deep(.nc-card__foot) {
@@ -931,6 +945,8 @@ onMounted(() => {
 
 .list-area {
   min-height: 220px;
+  flex: 1;
+  min-width: 0;
 }
 
 .list-skeleton {
@@ -1115,6 +1131,7 @@ onMounted(() => {
 
 .detail-column {
   min-width: 0;
+  min-height: 0;
 }
 
 .detail-card {
