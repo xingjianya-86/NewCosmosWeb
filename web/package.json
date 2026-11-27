@@ -1,6 +1,6 @@
 {
   "name": "newcosmos-web",
-  "version": "2.0.20261124",
+  "version": "2.0.20261127",
   "private": true,
   "type": "module",
   "description": "NewCosmos Web - Vue 3 + Element Plus front-end",
