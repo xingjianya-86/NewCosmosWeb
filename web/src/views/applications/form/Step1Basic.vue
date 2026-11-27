@@ -350,7 +350,7 @@ defineExpose({ validate })
         v-model:district="basic.hukouDistrict"
         v-model:town="basic.hukouTown"
         v-model:village="basic.hukouVillage"
-        province-readonly
+        :province-readonly="Boolean(basic.hukouProvince)"
         :disabled="isLocked"
       />
     </NcCard>

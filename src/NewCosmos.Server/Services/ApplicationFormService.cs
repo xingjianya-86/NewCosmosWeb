@@ -2844,6 +2844,27 @@ public sealed class ApplicationFormService(
             app.Address,
             ct);
 
+        // 历史导入库建档只落了居住地址文本，户籍没有 hukou_*_id / hukou_address，
+        // 补全模式下户籍会整段空白且省份只读无法选择。这里仅在户籍完全为空时
+        // 按「户籍=居住」回填展示；用户保存后会经 ResolveRegionIdsAsync 落成正式户籍 ID。
+        var hukouEmpty = string.IsNullOrWhiteSpace(hukou.Province)
+            && string.IsNullOrWhiteSpace(hukou.City)
+            && string.IsNullOrWhiteSpace(hukou.District)
+            && string.IsNullOrWhiteSpace(hukou.Town)
+            && string.IsNullOrWhiteSpace(hukou.Village)
+            && string.IsNullOrWhiteSpace(app.HukouAddress)
+            && app.HukouCityId is null
+            && app.HukouCountyId is null
+            && app.HukouTownId is null
+            && app.HukouVillageId is null;
+
+        if (hukouEmpty
+            && string.Equals(app.SourceType, "ImportedArchive", StringComparison.OrdinalIgnoreCase))
+        {
+            hukou = new ResolvedFormAddress(
+                home.Province, home.City, home.District, home.Town, home.Village, home.Detail);
+        }
+
         // disease_name=一级分类、secondary_disease_name=二级疾病（与 Core 主表快照一致）。
         var diseaseCategory = app.DiseaseName ?? string.Empty;
         var secondaryDisease = app.SecondaryDiseaseName ?? string.Empty;
