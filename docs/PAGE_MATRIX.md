@@ -187,6 +187,12 @@ P0 框架/认证 → P1 社会救助核心 → P2 档案/打印 → P3 其他业
 | GracePeriodConfirmPage | 表单 | — | 低 | `/changes/grace/:id` | P3 |
 | MemberChangeReasonPopup | 弹窗 | — | 低 | 成员变更原因组件 | P3 |
 
+> 2026-11-27：补齐桌面版变更页的**双源搜索**——当前库在享对象之外，新增
+> `GET /api/social-assistance/change-management/imported-search`（6 个历史导入库检索，CHANGE_VIEW）
+> 与 `POST .../imported/{sourceTable}/{sourceId}/migrate`（建档迁移，CHANGE_MANAGE，数据范围校验后调
+> Core `IImportedArchiveService.MigrateToCurrentAsync`）。Web 页面在关键词搜索时同时展示"历史导入库（待建档）"，
+> 可一键建档并进入五步表单补全，与桌面版"点变更时自动建档"对齐。
+
 ## 11. 银行流水 / 值班（P3/P5）
 
 | 页面 | 类型 | Office/打印 | 手机 | 建议路由 | 优先级 |

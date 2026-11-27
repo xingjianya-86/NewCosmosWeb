@@ -8,6 +8,8 @@ import {
   getChangeManagementFilters,
   getChangeManagementHistory,
   listChangeManagement,
+  migrateImportedArchive,
+  searchImportedArchives,
   submitVerifyStop,
 } from '@/api/changeManagement'
 import { getErrorMessage } from '@/api/http'
@@ -20,6 +22,7 @@ import type {
   ChangeManagementDetail,
   ChangeManagementFilters,
   ChangeManagementListItem,
+  ImportedArchiveItem,
 } from '@/types/changeManagement'
 import ChangeDetailPanel from './ChangeDetailPanel.vue'
 import MemberChangeDialog from './MemberChangeDialog.vue'
@@ -45,6 +48,11 @@ const loadError = ref('')
 const filters = ref<ChangeManagementFilters | null>(null)
 const filtersError = ref('')
 
+const importedItems = ref<ImportedArchiveItem[]>([])
+const importedLoading = ref(false)
+const importedError = ref('')
+const importingKey = ref('')
+
 const selectedId = ref<number | null>(null)
 const detail = ref<ChangeManagementDetail | null>(null)
 const detailLoading = ref(false)
@@ -61,6 +69,12 @@ let detailTicket = 0
 const hasFilters = computed(
   () => Boolean(keyword.value.trim() || town.value || classification.value),
 )
+const hasKeyword = computed(() => Boolean(keyword.value.trim()))
+const importedSubtitle = computed(() => {
+  if (importedError.value) return '历史导入库检索失败'
+  if (importedLoading.value) return '正在检索历史导入库…'
+  return `导入库命中 ${importedItems.value.length} 户（含成员命中）`
+})
 const displayTotalPages = computed(() => Math.max(totalPages.value, 1))
 const paginationLayout = computed(() =>
   isNarrow.value ? 'prev, pager, next' : 'total, sizes, prev, pager, next, jumper',
@@ -135,6 +149,64 @@ async function load(): Promise<void> {
   }
 }
 
+async function loadImported(): Promise<void> {
+  if (!hasKeyword.value) {
+    importedItems.value = []
+    importedError.value = ''
+    return
+  }
+
+  importedLoading.value = true
+  importedError.value = ''
+  try {
+    const response = await searchImportedArchives(keyword.value.trim())
+    importedItems.value = response.items ?? []
+  } catch (error) {
+    importedItems.value = []
+    importedError.value = getErrorMessage(error, '历史导入库检索失败')
+  } finally {
+    importedLoading.value = false
+  }
+}
+
+/** 导入库建档并进入变更流程：未建档 → 建档后去五步表单补全；已建档 → 直接打开详情。 */
+async function handleMigrateImported(item: ImportedArchiveItem): Promise<void> {
+  const key = `${item.sourceTable}#${item.sourceId}`
+  importingKey.value = key
+  try {
+    const result = await migrateImportedArchive(
+      item.sourceTable,
+      item.sourceId,
+      item.derivedClassificationCode || undefined,
+    )
+    importedItems.value = importedItems.value.map((row) =>
+      row.sourceTable === item.sourceTable && row.sourceId === item.sourceId
+        ? { ...row, existingApplicationId: result.applicationId }
+        : row,
+    )
+
+    if (result.alreadyExisted) {
+      ElMessage.success('该导入库档案此前已建档，已打开档案详情')
+      await load()
+      await loadDetail(result.applicationId)
+      if (isNarrow.value) detailDrawerVisible.value = true
+    } else {
+      ElMessage.success('建档成功，请补全档案信息后办理变更')
+      void router.push({ path: `/applications/${result.applicationId}/edit` })
+    }
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '建档失败'))
+  } finally {
+    importingKey.value = ''
+  }
+}
+
+/** 已建档的导入库来源行：直接加载当前库档案详情。 */
+async function openImportedExisting(applicationId: number): Promise<void> {
+  await loadDetail(applicationId)
+  if (isNarrow.value) detailDrawerVisible.value = true
+}
+
 async function loadDetail(applicationId: number): Promise<void> {
   const ticket = ++detailTicket
   selectedId.value = applicationId
@@ -178,6 +250,7 @@ function selectRow(row: ChangeManagementListItem): void {
 function handleSearch(): void {
   page.value = 1
   void load()
+  void loadImported()
 }
 
 function handleReset(): void {
@@ -185,6 +258,8 @@ function handleReset(): void {
   town.value = ''
   classification.value = ''
   page.value = 1
+  importedItems.value = []
+  importedError.value = ''
   void load()
 }
 
@@ -591,6 +666,111 @@ onMounted(() => {
       </div>
     </div>
 
+    <NcCard
+      v-if="hasKeyword"
+      title="历史导入库（待建档）"
+      :subtitle="importedSubtitle"
+      padding="none"
+      class="imported-card"
+    >
+      <div v-loading="importedLoading" class="imported-area">
+        <el-alert
+          v-if="importedError"
+          type="warning"
+          :title="importedError"
+          :closable="false"
+          show-icon
+        >
+          <el-button link type="primary" @click="loadImported()">重新检索</el-button>
+        </el-alert>
+
+        <el-table
+          v-else-if="importedItems.length > 0"
+          :data="importedItems"
+          row-key="sourceId"
+          class="imported-table"
+        >
+          <el-table-column label="姓名" min-width="110">
+            <template #default="{ row }">
+              <div class="person-cell">
+                <strong>{{ row.applicantName || '—' }}</strong>
+                <small v-if="row.matchedPersonInfo">{{ row.matchedPersonInfo }}</small>
+              </div>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="身份证（脱敏）" min-width="138">
+            <template #default="{ row }">
+              <span class="mono">{{ row.applicantIdCardMasked || '—' }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="来源" min-width="132">
+            <template #default="{ row }">
+              <span>{{ row.sourceDisplay || '导入库' }}</span>
+              <small v-if="row.derivedClassificationName" class="muted">
+                {{ row.derivedClassificationName }}
+              </small>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="地址" min-width="180">
+            <template #default="{ row }">
+              <span class="ellipsis" :title="row.address">{{ row.address || '—' }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="人数" width="66" align="right">
+            <template #default="{ row }">{{ row.familySize || '—' }}</template>
+          </el-table-column>
+
+          <el-table-column label="保障金（元/月）" width="118" align="right">
+            <template #default="{ row }">
+              <span class="mono">{{ row.totalAmount ? formatMoney(row.totalAmount) : '—' }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="建档状态" width="94">
+            <template #default="{ row }">
+              <span class="status" :class="{ 'is-pending': !row.existingApplicationId }">
+                {{ row.existingApplicationId ? '已建档' : '待建档' }}
+              </span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="操作" width="128" align="right">
+            <template #default="{ row }">
+              <el-button
+                v-if="row.existingApplicationId"
+                link
+                type="primary"
+                @click="openImportedExisting(row.existingApplicationId)"
+              >
+                查看档案
+              </el-button>
+              <el-button
+                v-else
+                link
+                type="primary"
+                :loading="importingKey === `${row.sourceTable}#${row.sourceId}`"
+                @click="handleMigrateImported(row as ImportedArchiveItem)"
+              >
+                建档并办理
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <div v-else class="imported-empty">
+          <p>历史导入库中未找到「{{ keyword.trim() }}」。</p>
+          <p class="muted">
+            导入库为农村低保 / 城市低保 / 低保边缘 / 特困供养 / 刚性支出 / 其他困难 6 类历史在保档案；
+            如仍未找到，请到「数据中心 → 数据导入」核对该批数据是否已导入。
+          </p>
+        </div>
+      </div>
+    </NcCard>
+
     <el-drawer
       v-model="detailDrawerVisible"
       title="选中户详情"
@@ -650,6 +830,36 @@ onMounted(() => {
 
 .filter-card {
   overflow: hidden;
+}
+
+.imported-card {
+  margin-top: 2px;
+}
+
+.imported-area {
+  padding: 14px 16px;
+}
+
+.imported-table {
+  width: 100%;
+}
+
+.imported-empty {
+  padding: 8px 2px;
+  line-height: 1.7;
+}
+
+.imported-empty p {
+  margin: 0;
+}
+
+.imported-empty .muted {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.status.is-pending {
+  color: var(--nc-amber, #9a6b00);
 }
 
 .filter-bar {

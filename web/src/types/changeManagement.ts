@@ -173,6 +173,35 @@ export interface ChangeHistoryResponse {
   items: ChangeHistoryItem[]
 }
 
+/** 历史导入库待建档项（变更页双源搜索的导入库半边）。 */
+export interface ImportedArchiveItem {
+  source: number
+  sourceDisplay: string
+  sourceTable: string
+  sourceId: number
+  applicantName: string
+  applicantIdCardMasked: string
+  address: string
+  familySize: number
+  totalAmount: number
+  hukouType: string
+  matchedPersonInfo: string
+  derivedClassificationCode: string
+  derivedClassificationName: string
+  /** 已建档则为当前库档案 ID。 */
+  existingApplicationId: number | null
+}
+
+export interface ImportedArchiveSearchResponse {
+  items: ImportedArchiveItem[]
+}
+
+export interface MigrateImportedArchiveResponse {
+  applicationId: number
+  alreadyExisted: boolean
+  migratedMemberCount: number
+}
+
 export interface HeadChangeRequest {
   newHeadMemberId: number
   changeReason: string

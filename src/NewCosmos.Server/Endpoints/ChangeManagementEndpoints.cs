@@ -24,6 +24,7 @@ public static class ChangeManagementEndpoints
     {
         app.MapGet("/api/social-assistance/change-management", ListAsync);
         app.MapGet("/api/social-assistance/change-management/filters", GetFiltersAsync);
+        app.MapGet("/api/social-assistance/change-management/imported-search", SearchImportedAsync);
         app.MapGet("/api/social-assistance/change-management/{applicationId:long}", GetDetailAsync);
         app.MapGet("/api/social-assistance/change-management/{applicationId:long}/history", GetHistoryAsync);
 
@@ -32,8 +33,27 @@ public static class ChangeManagementEndpoints
         app.MapPost("/api/social-assistance/change-management/{applicationId:long}/household-death", HouseholdDeathAsync);
         app.MapPost("/api/social-assistance/change-management/{applicationId:long}/grace-confirm", GraceConfirmAsync);
         app.MapPost("/api/social-assistance/change-management/{applicationId:long}/verify-stop", VerifyStopAsync);
+        // 导入库待建档 → 建档迁移（双源搜索的写入口，对齐桌面版"点变更时自动建档"）。
+        app.MapPost(
+            "/api/social-assistance/change-management/imported/{sourceTable}/{sourceId:long}/migrate",
+            MigrateImportedAsync);
         return app;
     }
+
+    /// <summary>
+    /// 导入库来源表 → ArchiveSearchSource 白名单。只接受这 6 张导入库家庭表，
+    /// 其余表名一律 400（Core 的 MigrateToCurrentAsync 也会再校验一次）。
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, ArchiveSearchSource> ImportedSourceTables =
+        new Dictionary<string, ArchiveSearchSource>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["nc_biz_rural_subsistence_families"] = ArchiveSearchSource.RuralSubsistence,
+            ["nc_biz_urban_subsistence_families"] = ArchiveSearchSource.UrbanSubsistence,
+            ["nc_biz_low_income_edge_families"] = ArchiveSearchSource.LowIncomeEdge,
+            ["nc_biz_destitute_families"] = ArchiveSearchSource.Destitute,
+            ["nc_biz_rigid_expenditure_families"] = ArchiveSearchSource.RigidExpenditure,
+            ["nc_biz_other_difficulty_families"] = ArchiveSearchSource.OtherDifficulty
+        };
 
     // ───────────────────────────── 读 ─────────────────────────────
 
@@ -405,6 +425,118 @@ public static class ChangeManagementEndpoints
         return result.IsFailure
             ? MapResult(context, result)
             : Results.Json(result.Value);
+    }
+
+    // ───────────────────────────── 导入库待建档 ─────────────────────────────
+
+    /// <summary>
+    /// 导入库待建档检索：按姓名/身份证搜 6 个历史导入库，返回脱敏列表 +
+    /// 是否已建档（ExistingApplicationId）。只读，权限 CHANGE_VIEW；
+    /// 与「档案查询」一致不做数据范围过滤，范围校验在建档迁移时执行。
+    /// </summary>
+    private static async Task<IResult> SearchImportedAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        IDatabaseService database,
+        IImportedArchiveService importedArchives,
+        ILoggerService logger,
+        CancellationToken ct,
+        string? keyword)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.CHANGE_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        var result = await ChangeManagementQueryService.SearchImportedAsync(
+            database, importedArchives, logger, keyword, ct);
+
+        return result.IsFailure
+            ? MapResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// 导入库建档迁移：校验来源表白名单 → 数据范围（按乡镇/村文本套用与列表
+    /// 相同的数据范围条件）→ 调 Core MigrateToCurrentAsync（幂等，已建档直接返回）。
+    /// 权限 CHANGE_MANAGE；迁移后的档案为草稿，前端引导到五步表单补全。
+    /// </summary>
+    private static async Task<IResult> MigrateImportedAsync(
+        string sourceTable,
+        long sourceId,
+        MigrateImportedArchiveRequest? request,
+        HttpContext context,
+        INewPermissionService permissions,
+        IDatabaseService database,
+        DataScopeFilterBuilder dataScope,
+        IImportedArchiveService importedArchives,
+        ILoggerService logger,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.CHANGE_MANAGE, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetUserId() is not { } userId)
+        {
+            return Unauthorized(context);
+        }
+
+        var table = (sourceTable ?? string.Empty).Trim();
+        if (sourceId <= 0 || !ImportedSourceTables.TryGetValue(table, out var source))
+        {
+            return InvalidRequest(context, "不支持的导入库来源");
+        }
+
+        var item = new ArchiveSearchResultItem
+        {
+            Source = source,
+            SourceTable = table,
+            SourceId = sourceId
+        };
+
+        var detailResult = await importedArchives.GetImportedFamilyDetailAsync(item, ct);
+        if (detailResult.IsFailure)
+        {
+            return MapResult(context, detailResult);
+        }
+
+        var inScope = await ChangeManagementQueryService.IsImportedRecordInScopeAsync(
+            database, dataScope, logger, userId,
+            detailResult.Value?.Town, detailResult.Value?.Community, ct);
+        if (!inScope)
+        {
+            return ApiErrors.Write(
+                context,
+                StatusCodes.Status404NotFound,
+                ApiErrorCodes.NotFound,
+                "该导入库档案不在当前账号数据范围内");
+        }
+
+        var classification = string.IsNullOrWhiteSpace(request?.ClassificationCode)
+            ? detailResult.Value?.DerivedClassificationCode ?? string.Empty
+            : request!.ClassificationCode!.Trim();
+
+        var migrateResult = await importedArchives.MigrateToCurrentAsync(item, classification, ct);
+        if (migrateResult.IsFailure)
+        {
+            return MapResult(context, migrateResult);
+        }
+
+        var migrated = migrateResult.Value!;
+        logger.Info(
+            $"动态管理导入库建档: {table}#{sourceId} → ApplicationId={migrated.ApplicationId}, " +
+            $"AlreadyExisted={migrated.AlreadyExisted}, UserId={userId}");
+
+        return Results.Json(new MigrateImportedArchiveResponse(
+            migrated.ApplicationId,
+            migrated.AlreadyExisted,
+            migrated.MigratedMemberCount));
     }
 
     // ───────────────────────────── 通用 ─────────────────────────────

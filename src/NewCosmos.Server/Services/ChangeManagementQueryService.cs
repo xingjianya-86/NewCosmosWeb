@@ -217,6 +217,160 @@ public static class ChangeManagementQueryService
         }
     }
 
+    // ───────────────────── 导入库待建档检索（双源搜索的导入库半边） ─────────────────────
+
+    /// <summary>
+    /// 按姓名/身份证检索 6 个历史导入库（口径同桌面版变更页双源搜索）。
+    /// 只读；与「救助档案管理 → 档案查询」一致，不做数据范围过滤（范围校验在
+    /// 建档迁移时执行），返回前按来源表+行号批量补出"是否已建档"。
+    /// </summary>
+    public static async Task<Result<ImportedArchiveSearchResponse>> SearchImportedAsync(
+        IDatabaseService database,
+        IImportedArchiveService importedArchives,
+        ILoggerService logger,
+        string? keyword,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var keywordValue = Normalize(keyword);
+            if (keywordValue is null)
+            {
+                return Result.Success(new ImportedArchiveSearchResponse([]));
+            }
+
+            var searchResult = await importedArchives.SearchAsync(keywordValue, ct);
+            if (searchResult.IsFailure)
+            {
+                logger.Warn($"动态管理导入库检索失败: {searchResult.ErrorCode} {searchResult.Message}");
+                return Result.Failure<ImportedArchiveSearchResponse>(
+                    searchResult.ErrorCode!, searchResult.Message!);
+            }
+
+            var items = (searchResult.Value ?? [])
+                .Where(item => item.Source != ArchiveSearchSource.Current)
+                .ToList();
+            if (items.Count == 0)
+            {
+                return Result.Success(new ImportedArchiveSearchResponse([]));
+            }
+
+            var existing = await LoadExistingApplicationIdsAsync(database, items, logger, ct);
+
+            var dtos = items.Select(item => new ImportedArchiveItemDto(
+                    (int)item.Source,
+                    item.SourceDisplay,
+                    item.SourceTable,
+                    item.SourceId,
+                    item.ApplicantName ?? string.Empty,
+                    DataMasker.MaskIdCard(item.ApplicantIdCard ?? string.Empty),
+                    item.Address ?? string.Empty,
+                    item.FamilySize,
+                    item.TotalAmount,
+                    item.HukouType ?? string.Empty,
+                    item.MatchedPersonInfo ?? string.Empty,
+                    item.DerivedClassificationCode ?? string.Empty,
+                    item.DerivedClassificationName ?? string.Empty,
+                    existing.TryGetValue((item.SourceTable, item.SourceId), out var appId) ? appId : null))
+                .ToList();
+
+            return Result.Success(new ImportedArchiveSearchResponse(dtos));
+        }
+        catch (Exception ex)
+        {
+            logger.Error($"检索动态管理导入库异常: {ex.Message}");
+            return Result.Failure<ImportedArchiveSearchResponse>(
+                ErrorCodes.DB_QUERY_ERROR, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 建档前的数据范围校验：把导入库记录所在的乡镇/村文本，用与列表完全相同的
+    /// 数据范围条件（DataScopeTarget.Applications）套一遍，避免越权建档。
+    /// 全部范围直接通过；自助（SELF）范围没有归属人，按拒绝处理。
+    /// </summary>
+    public static async Task<bool> IsImportedRecordInScopeAsync(
+        IDatabaseService database,
+        DataScopeFilterBuilder dataScope,
+        ILoggerService logger,
+        int userId,
+        string? town,
+        string? community,
+        CancellationToken ct = default)
+    {
+        // 参数顺序：$1 town、$2 community，数据范围条件从 $3 开始。
+        var scope = await dataScope.BuildAsync(userId, DataScopeTarget.Applications, "probe", 3, ct);
+        if (scope.IsEmpty)
+        {
+            return true;
+        }
+
+        var parameters = new List<object?>
+        {
+            (town ?? string.Empty).Trim(),
+            (community ?? string.Empty).Trim()
+        };
+        parameters.AddRange(scope.Parameters);
+
+        var sql =
+            "SELECT 1 AS ok FROM (" +
+            "SELECT $1::text AS town, $2::text AS community, " +
+            "NULL::int AS town_id, NULL::int AS village_id, NULL::text AS created_by" +
+            ") probe WHERE " + scope.Sql + " LIMIT 1";
+
+        var result = await database.ExecuteScalarAsync<int?>(sql, ct, parameters.ToArray());
+        if (result.IsFailure)
+        {
+            logger.Warn($"导入库建档数据范围校验失败，按拒绝处理: {result.ErrorCode} {result.Message}");
+            return false;
+        }
+
+        return result.Value is not null;
+    }
+
+    private static async Task<Dictionary<(string Table, long Id), long>> LoadExistingApplicationIdsAsync(
+        IDatabaseService database,
+        IReadOnlyList<ArchiveSearchResultItem> items,
+        ILoggerService logger,
+        CancellationToken ct)
+    {
+        var conditions = new List<string>(items.Count);
+        var parameters = new List<object?>(items.Count * 2);
+        foreach (var item in items)
+        {
+            parameters.Add(item.SourceTable);
+            var tableIndex = parameters.Count;
+            parameters.Add(item.SourceId);
+            var idIndex = parameters.Count;
+            conditions.Add($"(source_table = ${tableIndex} AND source_id = ${idIndex})");
+        }
+
+        var sql =
+            "SELECT source_table, source_id, id AS application_id FROM nc_biz_applications " +
+            "WHERE source_type = 'ImportedArchive' AND deleted_at IS NULL AND (" +
+            string.Join(" OR ", conditions) + ")";
+
+        var result = await database.QueryAsync<ExistingApplicationRow>(sql, ct, parameters.ToArray());
+        if (result.IsFailure)
+        {
+            // 只影响"已建档"角标，不影响检索本身。
+            logger.Warn($"查询导入库建档状态失败（降级为未建档展示）: {result.ErrorCode} {result.Message}");
+            return new Dictionary<(string, long), long>();
+        }
+
+        var map = new Dictionary<(string, long), long>();
+        foreach (var row in result.Value ?? [])
+        {
+            var table = (row.SourceTable ?? string.Empty).Trim();
+            if (table.Length > 0)
+            {
+                map[(table, row.SourceId)] = row.ApplicationId;
+            }
+        }
+
+        return map;
+    }
+
     // ───────────────────────────── 选中户详情 ─────────────────────────────
 
     public static async Task<Result<ChangeManagementDetailDto>> GetDetailAsync(
@@ -840,4 +994,12 @@ public sealed class ChangeDictRow
     public string? ItemKey { get; set; }
     public string? ItemValue { get; set; }
     public int SortOrder { get; set; }
+}
+
+/// <summary>导入库来源行 → 当前库档案 ID（建档状态角标用）。</summary>
+public sealed class ExistingApplicationRow
+{
+    public string? SourceTable { get; set; }
+    public long SourceId { get; set; }
+    public long ApplicationId { get; set; }
 }

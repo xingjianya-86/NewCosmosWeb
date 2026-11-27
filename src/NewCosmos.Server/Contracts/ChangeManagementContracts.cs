@@ -171,6 +171,42 @@ public sealed record ChangeHistoryResponse(IReadOnlyList<ChangeHistoryItemDto> I
 
 #endregion
 
+#region 保障对象动态管理：历史导入库待建档
+
+/// <summary>
+/// 历史导入库检索结果项（变更页双源搜索的"导入库"半边，口径同桌面版
+/// IImportedArchiveService.SearchAsync）。身份证统一脱敏；
+/// 已建档的来源行会返回 ExistingApplicationId，前端可直接跳转。
+/// </summary>
+public sealed record ImportedArchiveItemDto(
+    int Source,
+    string SourceDisplay,
+    string SourceTable,
+    long SourceId,
+    string ApplicantName,
+    string ApplicantIdCardMasked,
+    string Address,
+    int FamilySize,
+    decimal TotalAmount,
+    string HukouType,
+    string MatchedPersonInfo,
+    string DerivedClassificationCode,
+    string DerivedClassificationName,
+    long? ExistingApplicationId);
+
+public sealed record ImportedArchiveSearchResponse(IReadOnlyList<ImportedArchiveItemDto> Items);
+
+/// <summary>导入库建档并进入变更流程的请求（分类码为空时按导入库来源推导）。</summary>
+public sealed record MigrateImportedArchiveRequest(string? ClassificationCode);
+
+/// <summary>建档结果：ApplicationId 为当前库档案 ID；AlreadyExisted 表示此前已建档（幂等）。</summary>
+public sealed record MigrateImportedArchiveResponse(
+    long ApplicationId,
+    bool AlreadyExisted,
+    int MigratedMemberCount);
+
+#endregion
+
 #region 保障对象动态管理：写请求
 
 /// <summary>户主变更：新户主必须是本户非户主共同生活成员。</summary>

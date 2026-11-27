@@ -8,7 +8,9 @@ import type {
   GraceConfirmResult,
   HeadChangeRequest,
   HouseholdDeathRequest,
+  ImportedArchiveSearchResponse,
   MemberChangeRequest,
+  MigrateImportedArchiveResponse,
   VerifyStopRequest,
 } from '@/types/changeManagement'
 import { apiHttp } from './http'
@@ -39,8 +41,30 @@ export function getChangeManagementFilters(): Promise<ChangeManagementFilters> {
     .then((response) => response.data)
 }
 
-/** 选中户详情（成员、分类、保障金、渐退期、本月已办提示）。 */
-export function getChangeManagementDetail(
+/** 历史导入库待建档检索（当前库无结果时的第二来源，权限 CHANGE_VIEW）。 */
+export function searchImportedArchives(keyword: string): Promise<ImportedArchiveSearchResponse> {
+  return apiHttp
+    .get<ImportedArchiveSearchResponse>(`${BASE}/imported-search`, {
+      params: { keyword },
+    })
+    .then((response) => response.data)
+}
+
+/** 导入库建档迁移（幂等；权限 CHANGE_MANAGE）。 */
+export function migrateImportedArchive(
+  sourceTable: string,
+  sourceId: number | string,
+  classificationCode?: string,
+): Promise<MigrateImportedArchiveResponse> {
+  return apiHttp
+    .post<MigrateImportedArchiveResponse>(
+      `${BASE}/imported/${encodeURIComponent(sourceTable)}/${encodeURIComponent(String(sourceId))}/migrate`,
+      { classificationCode: classificationCode ?? null },
+    )
+    .then((response) => response.data)
+}
+
+/** 选中户详情（成员、分类、保障金、渐退期、本月已办提示）。 */export function getChangeManagementDetail(
   applicationId: number | string,
 ): Promise<ChangeManagementDetail> {
   return apiHttp
