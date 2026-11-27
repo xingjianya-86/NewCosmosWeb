@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { useRouter } from 'vue-router'
-import { ArrowRight, Calendar, Document, Plus, Refresh, SwitchButton, Warning } from '@element-plus/icons-vue'
+import { ArrowRight, Calendar, Document, Medal, Plus, Refresh, SwitchButton, Warning } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
 import { getElderlySummary } from '@/api/elderly'
 import NcPageHeader from '@/components/NcPageHeader.vue'
@@ -81,6 +81,13 @@ const featureCards: FeatureCard[] = [
     description: '按月生成、导出发放统计报表',
     icon: Document,
     to: '/elderly/reports',
+  },
+  {
+    key: 'certification',
+    title: '年度身份认证',
+    description: '年度资格认证批次、名单生成与批量导入',
+    icon: Medal,
+    to: '/elderly/certifications',
   },
   {
     key: 'review',
@@ -300,9 +307,15 @@ onMounted(() => {
   gap: 14px;
 }
 
-/* 与旧版 2 列布局一致：月报表占第 2 行左格，复核/下月待办占第 3 行。 */
+/* 与旧版 2 列布局一致：月报表占第 2 行左格，年度认证占第 2 行右格，
+   复核/下月待办占第 3 行。 */
 .feature-card--monthly {
   grid-column: 1;
+  grid-row: 2;
+}
+
+.feature-card--certification {
+  grid-column: 2;
   grid-row: 2;
 }
 
@@ -410,6 +423,7 @@ onMounted(() => {
   }
 
   .feature-card--monthly,
+  .feature-card--certification,
   .feature-card--review,
   .feature-card--pending {
     grid-column: auto;

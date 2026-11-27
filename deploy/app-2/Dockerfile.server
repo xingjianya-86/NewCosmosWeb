@@ -17,7 +17,8 @@
 # 说明：
 #   - 基于 aspnet:10.0（Debian），不要换 Alpine（字体/时区/ICU 兼容性差）。
 #   - 非 root 运行，UID/GID 固定 10001，挂载目录需对应 chown。
-#   - fonts-noto-cjk 体积大（约 100MB+），仅在服务端需要生成/预览中文
+#   - 认证报表 PDF 已内置 Resources/Fonts/notosansregular.ttf，不依赖系统字体包。
+#   - fonts-noto-cjk 体积大（约 100MB+），仅在服务端需要生成/预览其他中文
 #     文书或图片时开启：--build-arg INSTALL_CJK_FONTS=true
 # =============================================================================
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
