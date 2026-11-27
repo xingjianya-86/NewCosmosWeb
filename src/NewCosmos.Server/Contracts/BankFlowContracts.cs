@@ -43,4 +43,35 @@ public sealed record BankFlowRecordListResponse(
     int TotalCount,
     int TotalPages);
 
+/// <summary>
+/// Step3「从核对数据带入」预览（申请表单侧只读带出：申请人 + 共同生活成员身份证
+/// 匹配最新核对批次）。只负责展示与汇总，落库的存款额由前端写入
+/// economicDetails.financialAssets 后随 PUT /form 保存。
+/// </summary>
+public sealed record BankFlowImportPreviewDto(
+    string BatchNo,
+    decimal TotalBalance,
+    decimal MaxFlow,
+    int MatchedCount,
+    int TotalCount,
+    string Summary,
+    string ExceedHint,
+    bool HasMachineryExceed,
+    IReadOnlyList<BankFlowMemberRowDto> Rows);
+
+/// <summary>
+/// 带出的成员核对流水明细行（命中/未命中都返回；未命中标注“核对数据中无此身份证”）。
+/// 金额同时给原始值与展示值，展示口径与 <c>BankFlowRecord</c> 的 *Display 一致。
+/// </summary>
+public sealed record BankFlowMemberRowDto(
+    string Name,
+    string IdCard,
+    bool Matched,
+    decimal TotalBalance,
+    string TotalBalanceDisplay,
+    decimal MaxFlowAmount,
+    string MaxFlowAmountDisplay,
+    string BankSummary,
+    bool IsExceed);
+
 #endregion

@@ -3,8 +3,10 @@ import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Delete, Download, InfoFilled, Plus } from '@element-plus/icons-vue'
 import {
+  getApplicationBankFlowImports,
   getApplicationLandConfirmationImports,
   getApplicationSubsidyImports,
+  type BankFlowImportPreview,
 } from '@/api/applicationImports'
 import { getErrorMessage } from '@/api/http'
 import NcCard from '@/components/NcCard.vue'
@@ -12,6 +14,7 @@ import NcStat from '@/components/NcStat.vue'
 import { formatMoney } from '../format'
 import EconomicLedgerTable from './EconomicLedgerTable.vue'
 import {
+  FINANCIAL_ASSET_LEDGER,
   LAND_STATUS_DECEASED,
   LAND_STATUS_OPTIONS,
   LAND_UNIT_PRICES,
@@ -46,6 +49,14 @@ const groups = LEDGER_GROUPS
 const importingSubsidies = ref(false)
 const importingLand = ref(false)
 const subsidyOpenSignal = ref(0)
+const importingBankFlow = ref(false)
+const bankFlowOpenSignal = ref(0)
+
+/**
+ * 核对数据带入结果（仅展示，不进 ApplicationFormModel）：
+ * 合计余额已写入 economicDetails.financialAssets 的存款额，随 PUT /form 持久化。
+ */
+const bankFlowPreview = ref<BankFlowImportPreview | null>(null)
 
 /** 兼容后端未回填或返回 null 的明细数组；首次访问时补成空数组。 */
 function ledgerRows(key: EditableLedgerKey): Record<string, unknown>[] {
@@ -285,19 +296,27 @@ function groupTone(group: LedgerGroup): 'income' | 'expense' | 'asset' {
 }
 
 function importLabelFor(key: EditableLedgerKey): string {
-  return key === 'subsidies' ? '导入农业补贴' : ''
+  if (key === 'subsidies') return '导入农业补贴'
+  // 与桌面版 Step3 财产信息卡文案一致
+  if (key === 'financialAssets') return '📥 从核对数据带入'
+  return ''
 }
 
 function importingFor(key: EditableLedgerKey): boolean {
-  return key === 'subsidies' ? importingSubsidies.value : false
+  if (key === 'subsidies') return importingSubsidies.value
+  if (key === 'financialAssets') return importingBankFlow.value
+  return false
 }
 
 function openSignalFor(key: EditableLedgerKey): number {
-  return key === 'subsidies' ? subsidyOpenSignal.value : 0
+  if (key === 'subsidies') return subsidyOpenSignal.value
+  if (key === 'financialAssets') return bankFlowOpenSignal.value
+  return 0
 }
 
 function handleImport(key: EditableLedgerKey): void {
   if (key === 'subsidies') void importSubsidies()
+  else if (key === 'financialAssets') void importBankFlow()
 }
 
 /** 旧版导入依赖申请已落库（按申请人/成员查库），未保存时先提示保存草稿。 */
@@ -336,6 +355,47 @@ async function importSubsidies(): Promise<void> {
     ElMessage.error(getErrorMessage(error, '导入农业补贴失败'))
   } finally {
     importingSubsidies.value = false
+  }
+}
+
+/**
+ * 从核对数据带入银行流水：按申请人 + 共同生活成员身份证取最新核对批次。
+ * 合计余额写入金融资产（银行存款）行随表单保存；成员明细、超阈值提示与农机告警
+ * 仅在下方展示区渲染，不进 ApplicationFormModel，也不重算任何金额。
+ */
+async function importBankFlow(): Promise<void> {
+  if (!ensureSaved()) return
+
+  importingBankFlow.value = true
+  try {
+    const preview = await getApplicationBankFlowImports(props.form.id)
+    if (preview.matchedCount <= 0) {
+      bankFlowPreview.value = null
+      ElMessage.warning(
+        '最新核对批次中未找到当前家庭成员的身份证数据，请先在『数据中心 → 数据导入』导入核对表',
+      )
+      return
+    }
+
+    // 合计余额 → 金融资产-银行存款（按户存储：无行则先补一行载体）
+    const rows = ledgerRows('financialAssets')
+    let row = rows[0]
+    if (!row) {
+      row = createLedgerRow(FINANCIAL_ASSET_LEDGER)
+      rows.push(row)
+    }
+    row.hasBankDeposit = preview.totalBalance > 0
+    row.bankDepositAmount = preview.totalBalance
+
+    bankFlowPreview.value = preview
+    bankFlowOpenSignal.value += 1
+    ElMessage.success(
+      `已带入核对数据（命中 ${preview.matchedCount}/${preview.totalCount} 人），存款额已写入金融资产，保存后随表单落库`,
+    )
+  } catch (error) {
+    ElMessage.error(getErrorMessage(error, '从核对数据带入银行流水失败'))
+  } finally {
+    importingBankFlow.value = false
   }
 }
 
@@ -722,25 +782,77 @@ async function importLandConfirmation(): Promise<void> {
           </section>
         </section>
 
-        <EconomicLedgerTable
-          v-for="ledger in group.ledgers"
-          :key="ledger.key"
-          :title="ledger.title"
-          :hint="ledger.hint"
-          :rows="ledgerRows(ledger.key)"
-          :columns="ledger.columns"
-          :members="members"
-          :busy="busy"
-          :default-open="ledger.defaultOpen"
-          :add-label="ledger.addLabel ?? '新增一行'"
-          :tone="groupTone(group)"
-          :import-label="importLabelFor(ledger.key)"
-          :importing="importingFor(ledger.key)"
-          :open-signal="openSignalFor(ledger.key)"
-          @add="addLedgerRow(ledger)"
-          @remove="removeLedgerRow(ledger, $event)"
-          @import="handleImport(ledger.key)"
-        />
+        <template v-for="ledger in group.ledgers" :key="ledger.key">
+          <EconomicLedgerTable
+            :title="ledger.title"
+            :hint="ledger.hint"
+            :rows="ledgerRows(ledger.key)"
+            :columns="ledger.columns"
+            :members="members"
+            :busy="busy"
+            :default-open="ledger.defaultOpen"
+            :add-label="ledger.addLabel ?? '新增一行'"
+            :tone="groupTone(group)"
+            :import-label="importLabelFor(ledger.key)"
+            :importing="importingFor(ledger.key)"
+            :open-signal="openSignalFor(ledger.key)"
+            @add="addLedgerRow(ledger)"
+            @remove="removeLedgerRow(ledger, $event)"
+            @import="handleImport(ledger.key)"
+          />
+
+          <!-- 核对数据带入结果：仅展示，不进 ApplicationFormModel（存款额已写入上方金融资产行） -->
+          <section
+            v-if="ledger.key === 'financialAssets' && bankFlowPreview"
+            class="bankflow"
+          >
+            <header class="bankflow__head">
+              <h4>核对数据带入结果</h4>
+              <p>{{ bankFlowPreview.summary }}</p>
+            </header>
+
+            <p v-if="bankFlowPreview.exceedHint" class="bankflow__exceed">
+              {{ bankFlowPreview.exceedHint }}
+            </p>
+
+            <div class="bankflow__scroll">
+              <table class="bankflow-table">
+                <thead>
+                  <tr>
+                    <th>姓名</th>
+                    <th>身份证号</th>
+                    <th>合计余额</th>
+                    <th>12月最高流水</th>
+                    <th>各银行（余额/最高流水）</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="(member, index) in bankFlowPreview.rows"
+                    :key="member.idCard || index"
+                    :class="{
+                      'is-exceed': member.isExceed,
+                      'is-unmatched': !member.matched,
+                    }"
+                  >
+                    <td>{{ member.name }}</td>
+                    <td>{{ member.idCard }}</td>
+                    <td>{{ member.matched ? member.totalBalanceDisplay : '—' }}</td>
+                    <td>{{ member.matched ? member.maxFlowAmountDisplay : '—' }}</td>
+                    <td>{{ member.bankSummary }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p v-if="bankFlowPreview.hasMachineryExceed" class="bankflow__machinery">
+              ⚠️ 核对数据中存在 60 马力以上农业机械，请人工核定
+            </p>
+            <p class="bankflow__note">
+              带入结果仅展示；上方金融资产的存款额已按合计余额写入，保存草稿后随表单落库。
+            </p>
+          </section>
+        </template>
       </div>
     </NcCard>
 
@@ -1223,6 +1335,120 @@ async function importLandConfirmation(): Promise<void> {
   font-family: var(--nc-font-serif);
   font-size: var(--nc-text-md);
   font-weight: 700;
+}
+
+/* ── 核对数据带入（银行流水）结果区：仅展示，不落库 ── */
+
+.bankflow {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px 13px 13px;
+  border: 1px solid var(--nc-line);
+  border-left: 3px solid var(--nc-seal);
+  border-radius: var(--nc-radius-sm);
+  background-color: var(--nc-paper-soft);
+}
+
+.bankflow__head h4 {
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-sm);
+  font-weight: 700;
+}
+
+.bankflow__head p {
+  margin: 4px 0 0;
+  color: var(--nc-muted-2);
+  font-size: var(--nc-text-xs);
+  line-height: 1.65;
+}
+
+.bankflow__exceed {
+  margin: 0;
+  color: var(--nc-seal);
+  font-size: var(--nc-text-sm);
+  font-weight: 700;
+  line-height: 1.65;
+}
+
+.bankflow__scroll {
+  overflow-x: auto;
+  border: 1px solid var(--nc-line-faint);
+  background-color: var(--nc-paper-2);
+  scrollbar-width: thin;
+}
+
+.bankflow-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+}
+
+.bankflow-table th,
+.bankflow-table td {
+  padding: 6px 8px;
+  border-right: 1px solid var(--nc-line-faint);
+  border-bottom: 1px solid var(--nc-line-faint);
+  vertical-align: middle;
+  text-align: left;
+}
+
+.bankflow-table th:last-child,
+.bankflow-table td:last-child {
+  border-right: 0;
+}
+
+.bankflow-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.bankflow-table thead th {
+  background-color: var(--nc-paper-3);
+  color: var(--nc-ink-2);
+  font-size: var(--nc-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.bankflow-table tbody td {
+  color: var(--nc-ink-2);
+  font-size: var(--nc-text-sm);
+}
+
+.bankflow-table tbody td:nth-child(2),
+.bankflow-table tbody td:nth-child(3),
+.bankflow-table tbody td:nth-child(4) {
+  font-family: var(--nc-font-mono);
+  white-space: nowrap;
+}
+
+/* 超阈值成员：合计余额红字（仅提示，不自动决策） */
+.bankflow-table tbody tr.is-exceed td:nth-child(3) {
+  color: var(--nc-seal);
+  font-weight: 700;
+}
+
+/* 未命中成员：核对数据中无此身份证 */
+.bankflow-table tbody tr.is-unmatched td {
+  color: var(--nc-muted);
+}
+
+.bankflow__machinery {
+  margin: 0;
+  color: var(--nc-seal);
+  font-size: var(--nc-text-sm);
+  font-weight: 700;
+  line-height: 1.65;
+}
+
+.bankflow__note {
+  margin: 0;
+  color: var(--nc-muted);
+  font-size: var(--nc-text-xs);
+  line-height: 1.65;
 }
 
 

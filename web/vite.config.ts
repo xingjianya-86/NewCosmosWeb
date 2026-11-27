@@ -134,7 +134,12 @@ function ElementPlusApiResolver() {
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
+  // root 固定为配置文件所在目录（真实路径）：C:\Projects 是指向 D:\Projects 的 junction，
+  // 用 cwd 作 root 时 root=C:\... 而模块 id 被 realpath 成 D:\...，
+  // path.relative 跨盘符返回绝对路径 → vite:build-html 发射 index.html 报错。
+  const root = fileURLToPath(new URL('.', import.meta.url))
   return {
+  root,
   // 生产页面在 .1，静态资源在 .2；必须用绝对 base，否则 .1 会 404 /assets。
   define: {
     __APP_VERSION__: JSON.stringify(packageJson.version),

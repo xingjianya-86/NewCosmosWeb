@@ -29,6 +29,7 @@ public static class ApplicationFormEndpoints
         app.MapPost("/api/applications/{id}/visits", AddVisitAsync);
         app.MapGet("/api/applications/{id}/imports/subsidies", GetSubsidyImportsAsync);
         app.MapGet("/api/applications/{id}/imports/land-confirmation", GetLandConfirmationImportsAsync);
+        app.MapGet("/api/applications/{id}/imports/bank-flow", GetBankFlowImportsAsync);
         app.MapDelete("/api/applications/{id}", DeleteAsync);
         return app;
     }
@@ -423,6 +424,41 @@ public static class ApplicationFormEndpoints
         }
 
         var result = await forms.GetLandConfirmationImportsAsync(applicationId, userId, ct);
+        return result.IsFailure
+            ? MapResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// 银行流水核对带入：按申请人 + 共同生活成员身份证从最新核对批次带出成员流水明细、
+    /// 汇总与超阈值提示。只读；身份证清单由服务端按主表/成员行收集，**不接受前端传入身份证**
+    /// （数据范围越权与不存在统一 404）。前端把合计余额写入金融资产存款额后随 PUT /form 保存。
+    /// </summary>
+    private static async Task<IResult> GetBankFlowImportsAsync(
+        string id,
+        HttpContext context,
+        ApplicationFormService forms,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.INCOME_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetUserId() is not { } userId)
+        {
+            return Unauthorized(context);
+        }
+
+        if (ParseId(id) is not { } applicationId)
+        {
+            return InvalidId(context);
+        }
+
+        var result = await forms.GetBankFlowImportsAsync(applicationId, userId, ct);
         return result.IsFailure
             ? MapResult(context, result)
             : Results.Json(result.Value);

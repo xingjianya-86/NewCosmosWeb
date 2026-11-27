@@ -3,6 +3,7 @@ using NewCosmos.Models.Entities;
 using NewCosmos.Models.Results;
 using NewCosmos.Services.Core;
 using NewCosmos.Services.Database;
+using NewCosmos.Services.System;
 using OfficeOpenXml;
 
 namespace NewCosmos.Services.Domain.BankFlow;
@@ -16,10 +17,15 @@ public class BankFlowQueryService : BaseService, IBankFlowQueryService
     protected override string ServiceName => "BankFlowQueryService";
 
     private readonly IDatabaseService _db;
+    private readonly IStandardConfigService _standardConfig;
 
-    public BankFlowQueryService(IDatabaseService db, ILoggerService logger) : base(logger)
+    public BankFlowQueryService(
+        IDatabaseService db,
+        IStandardConfigService standardConfig,
+        ILoggerService logger) : base(logger)
     {
         _db = db;
+        _standardConfig = standardConfig;
     }
 
     private const string RecordColumns = @"
@@ -170,6 +176,52 @@ public class BankFlowQueryService : BaseService, IBankFlowQueryService
         {
             LogException(ex, "按身份证查询核对数据失败");
             return Result.Failure<Dictionary<string, BankFlowPersonData>>(ErrorCodes.UNKNOWN_ERROR, $"查询核对数据失败: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 超阈值红字提示（Step3「从核对数据带入」，仅提示不自动决策）。
+    /// 阈值公式单点在 Core <see cref="BankFlowExceedHint"/>：月低保标准 × 分类档位月数 × max(1,家庭人数)。
+    /// 标准缺失/读取失败/未超阈值一律返回空串（不误导，禁止硬编码回退值）。
+    /// </summary>
+    public async Task<string> BuildExceedHintAsync(
+        decimal totalBalance,
+        int familySize,
+        string? classificationCode,
+        string? hukouType,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            // 户口档位：城镇 → UrbanSubsistenceStandard，其余（含空值）按农村从严取 Rural 档。
+            var isUrban = string.Equals(
+                ClassificationConstants.HukouType.Normalize(hukouType),
+                ClassificationConstants.HukouType.URBAN,
+                StringComparison.Ordinal);
+            var standardType = isUrban ? "UrbanSubsistenceStandard" : "RuralSubsistenceStandard";
+            var hukou = isUrban
+                ? ClassificationConstants.HukouType.URBAN
+                : ClassificationConstants.HukouType.RURAL;
+
+            var standard = await _standardConfig.GetStandardValueAsync(
+                standardType, hukou, null, ct);
+            if (!standard.IsSuccess || standard.Value <= 0)
+            {
+                LogWarn($"低保标准读取失败，跳过超阈值提示: {standardType}/{hukou} {standard.Message}");
+                return string.Empty;
+            }
+
+            return BankFlowExceedHint.Build(
+                totalBalance, standard.Value, familySize, classificationCode);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogException(ex, "超阈值提示计算失败");
+            return string.Empty;
         }
     }
 

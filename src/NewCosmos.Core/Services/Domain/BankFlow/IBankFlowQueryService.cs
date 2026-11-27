@@ -20,6 +20,19 @@ public interface IBankFlowQueryService
     Task<Result<Dictionary<string, BankFlowPersonData>>> GetByIdCardsAsync(
         IReadOnlyCollection<string> idCards, CancellationToken ct = default);
 
+    /// <summary>
+    /// 超阈值红字提示（仅提示，不自动决策）：阈值 = 月低保标准（Rural/Urban 两档）
+    /// × <see cref="Constants.BankFlowConstants.MonthsFor"/>（分类档位 30/36）× max(1, 家庭人数)，
+    /// 文案套 <see cref="Constants.BankFlowConstants.BalanceExceedFormat"/>。
+    /// 标准配置缺失或未超阈值返回空串（不误导，禁止硬编码回退值）；公式单点在 Core。
+    /// </summary>
+    Task<string> BuildExceedHintAsync(
+        decimal totalBalance,
+        int familySize,
+        string? classificationCode,
+        string? hukouType,
+        CancellationToken ct = default);
+
     /// <summary>导出当前筛选结果为 xlsx（列与核对表口径一致，含每银行明细摘要）</summary>
     Task<Result<byte[]>> ExportAsync(string? keyword, long? importId, bool exceedOnly, CancellationToken ct = default);
 }

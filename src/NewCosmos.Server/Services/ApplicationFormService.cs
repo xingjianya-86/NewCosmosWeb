@@ -8,6 +8,7 @@ using NewCosmos.Server.Contracts;
 using NewCosmos.Server.Infrastructure;
 using NewCosmos.Services.Core;
 using NewCosmos.Services.Database;
+using NewCosmos.Services.Domain.BankFlow;
 using NewCosmos.Services.Domain.SocialAssistance;
 using NewCosmos.Services.System;
 
@@ -44,6 +45,7 @@ public sealed class ApplicationFormService(
     IEconomicDetailService economicDetails,
     ISubsidyDataService subsidyData,
     ILandContractService landContracts,
+    IBankFlowQueryService bankFlow,
     DataScopeFilterBuilder dataScope,
     IDatabaseService database,
     IRegionService regions,
@@ -833,6 +835,151 @@ public sealed class ApplicationFormService(
         }
 
         return await landContracts.GetRecordsByNamesAsync(names, ct);
+    }
+
+    /// <summary>
+    /// Step3 银行流水核对带入：按主表申请人 + 共同生活成员（排除赡养行）身份证查询最新核对批次，
+    /// 返回命中/未命中成员明细 + 汇总 + 超阈值提示（阈值公式在 Core
+    /// <see cref="IBankFlowQueryService.BuildExceedHintAsync"/>，本服务不重算金额）。
+    /// 只读，不写库；前端把合计余额写入 economicDetails.financialAssets 存款额后随 PUT /form 保存，
+    /// 明细表仅展示。
+    /// </summary>
+    public async Task<Result<BankFlowImportPreviewDto>> GetBankFlowImportsAsync(
+        long applicationId,
+        int userId,
+        CancellationToken ct = default)
+    {
+        var appResult = await LoadInScopeAsync(applicationId, userId, ct);
+        if (appResult.IsFailure)
+        {
+            return Result.Failure<BankFlowImportPreviewDto>(appResult.ErrorCode, appResult.Message);
+        }
+
+        var idCards = new List<string>();
+        var seenIdCards = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddDistinct(idCards, seenIdCards, appResult.Value.ApplicantIdCard);
+
+        var membersResult = await familyMembers.GetByApplicationIdAsync(applicationId, ct);
+        if (membersResult.IsFailure)
+        {
+            return Result.Failure<BankFlowImportPreviewDto>(
+                membersResult.ErrorCode!, membersResult.Message!);
+        }
+
+        var members = (membersResult.Value ?? [])
+            .Where(member => !IsSupportMember(member))
+            .ToList();
+        foreach (var member in members)
+        {
+            AddDistinct(idCards, seenIdCards, member.IdCard);
+        }
+
+        if (idCards.Count == 0)
+        {
+            return Result.Failure<BankFlowImportPreviewDto>(
+                ErrorCodes.VALIDATION_FAILED, "请先填写申请人身份证号或添加家庭成员");
+        }
+
+        var queryResult = await bankFlow.GetByIdCardsAsync(idCards, ct);
+        if (queryResult.IsFailure)
+        {
+            return Result.Failure<BankFlowImportPreviewDto>(
+                queryResult.ErrorCode, queryResult.Message);
+        }
+
+        var data = queryResult.Value ?? new Dictionary<string, BankFlowPersonData>();
+        var applicantIdCard = appResult.Value.ApplicantIdCard?.Trim() ?? string.Empty;
+
+        // 明细行：申请人在前，其余成员按录入顺序；命中/未命中都返回给前端展示。
+        var rows = new List<BankFlowMemberRowDto>(idCards.Count);
+        decimal totalBalance = 0;
+        decimal maxFlow = 0;
+        var hasMachineryExceed = false;
+
+        foreach (var idCard in idCards)
+        {
+            if (data.TryGetValue(idCard.Trim().ToUpperInvariant(), out var person))
+            {
+                var record = person.Record;
+                totalBalance += record.TotalBalance;
+                if (record.MaxFlowAmount > maxFlow)
+                {
+                    maxFlow = record.MaxFlowAmount;
+                }
+
+                hasMachineryExceed |= record.IsMachineryExceed;
+                rows.Add(new BankFlowMemberRowDto(
+                    record.PersonName ?? string.Empty,
+                    record.IdCard ?? string.Empty,
+                    true,
+                    record.TotalBalance,
+                    record.TotalBalanceDisplay,
+                    record.MaxFlowAmount,
+                    record.MaxFlowAmountDisplay,
+                    record.BankSummary ?? string.Empty,
+                    record.IsExceed));
+                continue;
+            }
+
+            var unmatchedName = members
+                .FirstOrDefault(member => string.Equals(
+                    (member.IdCard ?? string.Empty).Trim(),
+                    idCard.Trim(),
+                    StringComparison.OrdinalIgnoreCase))
+                ?.Name
+                ?? (string.Equals(idCard.Trim(), applicantIdCard, StringComparison.OrdinalIgnoreCase)
+                    ? "申请人"
+                    : string.Empty);
+
+            rows.Add(new BankFlowMemberRowDto(
+                unmatchedName, idCard, false, 0m, "—", 0m, "—",
+                "核对数据中无此身份证", false));
+        }
+
+        var matchedCount = rows.Count(row => row.Matched);
+        var batchNo = data.Count > 0 ? data.Values.First().BatchNo : string.Empty;
+        var summary = BuildBankFlowSummary(
+            batchNo, matchedCount, idCards.Count, totalBalance, maxFlow);
+
+        // 家庭人数：主表/成员行现算值与已收集身份证数取大者（与桌面版口径一致，至少 1 人）。
+        var familySize = Math.Max(
+            ResolveApplicationFamilySize(appResult.Value.FamilySize, members),
+            idCards.Count);
+        var exceedHint = await bankFlow.BuildExceedHintAsync(
+            totalBalance,
+            familySize,
+            appResult.Value.ClassificationResult,
+            ClassificationConstants.HukouType.Normalize(appResult.Value.HukouType),
+            ct);
+
+        return Result.Success(new BankFlowImportPreviewDto(
+            batchNo,
+            totalBalance,
+            maxFlow,
+            matchedCount,
+            idCards.Count,
+            summary,
+            exceedHint,
+            hasMachineryExceed,
+            rows));
+    }
+
+    /// <summary>带入摘要文案（与桌面版 ApplicationFormViewModel.BankFlow 一致，金额固定两位小数）。</summary>
+    private static string BuildBankFlowSummary(
+        string batchNo,
+        int matchedCount,
+        int totalCount,
+        decimal totalBalance,
+        decimal maxFlow)
+    {
+        var summary =
+            $"批次 {batchNo}：命中 {matchedCount}/{totalCount} 人，" +
+            $"合计余额 {totalBalance.ToString("N2", CultureInfo.InvariantCulture)} 元，" +
+            $"12月最高流水 {maxFlow.ToString("N2", CultureInfo.InvariantCulture)} 元";
+
+        return matchedCount < totalCount
+            ? summary + $"（{totalCount - matchedCount} 人未在核对数据中，已在明细标注）"
+            : summary;
     }
 
     // ───────────────────────────── 删除草稿 ─────────────────────────────
