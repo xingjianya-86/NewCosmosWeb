@@ -1,6 +1,13 @@
 /** 社会救助申请：字段与 docs/API_CONTRACT_APPLICATIONS.md 保持一致。 */
 
-export type ApplicationStatus = 'Draft' | 'Submitted' | 'Approved' | 'Completed' | 'Stopped'
+export type ApplicationStatus =
+  | 'Draft'
+  | 'Submitted'
+  | 'Approved'
+  | 'Completed'
+  | 'Stopped'
+  | 'RemoteAssistanceDraft'
+  | 'RemoteAssistanceCompleted'
 
 export interface ApplicationListItem {
   id: number
@@ -20,6 +27,10 @@ export interface ApplicationListItem {
   address: string
   createdAt: string
   updatedAt: string
+  /** 异地协助标记（HukouMovedOut=户籍迁出） */
+  remoteMarker?: string | null
+  /** 异地协助标记显示名 */
+  remoteMarkerText?: string | null
 }
 
 export interface ApplicationListResponse {

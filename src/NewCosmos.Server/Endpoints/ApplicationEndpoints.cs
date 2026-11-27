@@ -14,6 +14,7 @@ public static class ApplicationEndpoints
     public static IEndpointRouteBuilder MapApplicationEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapGet("/api/applications", ListAsync);
+        app.MapGet("/api/applications/remote-assistance", ListRemoteAsync);
         app.MapGet("/api/applications/{id}", GetDetailAsync);
         return app;
     }
@@ -51,6 +52,50 @@ public static class ApplicationEndpoints
             ct);
 
         var result = await applications.ListAsync(
+            page ?? 1,
+            pageSize ?? ApplicationQueryService.DefaultPageSize,
+            keyword,
+            status,
+            scope,
+            ct);
+
+        return result.IsFailure
+            ? ApiErrors.FromResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    private static async Task<IResult> ListRemoteAsync(
+        HttpContext context,
+        ApplicationQueryService applications,
+        DataScopeFilterBuilder dataScope,
+        INewPermissionService permissions,
+        CancellationToken ct,
+        int? page,
+        int? pageSize,
+        string? keyword,
+        string? status)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.INCOME_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        var userId = context.GetUserId();
+        if (userId is null)
+        {
+            return Unauthorized(context);
+        }
+
+        var scope = await dataScope.BuildAsync(
+            userId.Value,
+            DataScopeTarget.Applications,
+            "a",
+            ApplicationQueryService.CountFilterParameters(status, keyword) + 1,
+            ct);
+
+        var result = await applications.ListRemoteAsync(
             page ?? 1,
             pageSize ?? ApplicationQueryService.DefaultPageSize,
             keyword,

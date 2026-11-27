@@ -26,6 +26,7 @@ public static class ApplicationFormEndpoints
         app.MapGet("/api/applications/support-institutions", GetSupportInstitutionsAsync);
         app.MapPost("/api/applications/{id}/application-date", ChangeApplicationDateAsync);
         app.MapPost("/api/applications/{id}/complete", CompleteAsync);
+        app.MapPost("/api/applications/{id}/remote-complete", CompleteRemoteAssistanceAsync);
         app.MapPost("/api/applications/{id}/visits", AddVisitAsync);
         app.MapGet("/api/applications/{id}/imports/subsidies", GetSubsidyImportsAsync);
         app.MapGet("/api/applications/{id}/imports/land-confirmation", GetLandConfirmationImportsAsync);
@@ -319,6 +320,36 @@ public static class ApplicationFormEndpoints
         }
 
         var result = await forms.CompleteAsync(applicationId, user.Id, OperatorName(user), ct);
+        return result.IsFailure
+            ? MapResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    private static async Task<IResult> CompleteRemoteAssistanceAsync(
+        string id,
+        HttpContext context,
+        ApplicationFormService forms,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.INCOME_EDIT, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetCurrentUser() is not { } user)
+        {
+            return Unauthorized(context);
+        }
+
+        if (ParseId(id) is not { } applicationId)
+        {
+            return InvalidId(context);
+        }
+
+        var result = await forms.CompleteRemoteAssistanceAsync(applicationId, user.Id, OperatorName(user), ct);
         return result.IsFailure
             ? MapResult(context, result)
             : Results.Json(result.Value);

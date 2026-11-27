@@ -146,7 +146,7 @@ public class StatisticsService : BaseService, IStatisticsService
                                 -- 真·首拒（从未享受）不是退出（app110 实测错例）
                                 {StoppedArchiveFilter.NotFirstRefusalSql("nc_biz_applications")}) AS monthly_exits
                      FROM nc_biz_applications
-                     WHERE deleted_at IS NULL) f
+                     WHERE deleted_at IS NULL AND application_type IS DISTINCT FROM '{ApplicationTypeConstants.REMOTE_ASSISTANCE}') f
                 CROSS JOIN
                     (SELECT COUNT(*) AS new_asset_checks
                      FROM nc_biz_asset_checks
@@ -218,7 +218,7 @@ public class StatisticsService : BaseService, IStatisticsService
                         -- 真·首拒（从未享受）不是退出（app110 实测错例）
                         {StoppedArchiveFilter.NotFirstRefusalSql("nc_biz_applications")}) AS monthly_exits
                 FROM nc_biz_applications
-                WHERE deleted_at IS NULL";
+                WHERE deleted_at IS NULL AND application_type IS DISTINCT FROM '{ApplicationTypeConstants.REMOTE_ASSISTANCE}'";
 
             var result = await _dbService.QuerySingleAsync<SocialAssistanceModuleStats>(sql, ct, bStart, bEnd,
                 ApplicationStatusCodes.APPROVED, ApplicationStatusCodes.STOPPED);

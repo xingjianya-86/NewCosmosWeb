@@ -22,7 +22,9 @@ public sealed record ApplicationListItemDto(
     string Village,
     string Address,
     DateTime CreatedAt,
-    DateTime UpdatedAt);
+    DateTime UpdatedAt,
+    string? RemoteMarker = null,
+    string? RemoteMarkerText = null);
 
 public sealed record ApplicationListResponse(
     IReadOnlyList<ApplicationListItemDto> Items,

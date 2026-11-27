@@ -100,6 +100,15 @@ public sealed class ArchivePrintDataService(ApplicationFormService forms, IDatab
         Put(data.Fields, FieldKeys.CLASSIFICATION_RESULT,
             FirstNonEmpty(classification?.ClassificationText, classification?.ClassificationResult));
 
+        // ── 异地协助：调查走访情况（按入户调查结论生成，不按分类） ──
+        if (string.Equals(form.ApplicationType, ApplicationTypeConstants.REMOTE_ASSISTANCE, StringComparison.OrdinalIgnoreCase))
+        {
+            var conclusion = form.Survey?.SurveyConclusion?.Trim();
+            if (string.IsNullOrEmpty(conclusion)) conclusion = "属实";
+            Put(data.Fields, FieldKeys.SURVEY_VISIT_SITUATION,
+                $"经入户调查和邻里走访，该家庭情况{conclusion}。");
+        }
+
         // ── 保障金 ──
         Put(data.Fields, FieldKeys.GUARANTEE_AMOUNT,
             FormatAmount(classification?.HouseholdMonthlyGuaranteeAmount));

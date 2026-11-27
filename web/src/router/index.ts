@@ -160,6 +160,24 @@ const router = createRouter({
           meta: { title: '救助月报表' },
         },
         {
+          path: 'social-assistance/remote-assistance',
+          name: 'remote-assistance-list',
+          component: () => import('@/views/social-assistance/RemoteAssistanceListView.vue'),
+          meta: { title: '异地协助' },
+        },
+        {
+          path: 'social-assistance/remote-assistance/new',
+          name: 'remote-assistance-new',
+          component: () => import('@/views/social-assistance/RemoteAssistanceFormView.vue'),
+          meta: { title: '新增异地协助' },
+        },
+        {
+          path: 'social-assistance/remote-assistance/:id/edit',
+          name: 'remote-assistance-edit',
+          component: () => import('@/views/social-assistance/RemoteAssistanceFormView.vue'),
+          meta: { title: '异地协助' },
+        },
+        {
           path: 'elderly',
           name: 'elderly-home',
           component: () => import('@/views/elderly/ElderlyHomeView.vue'),

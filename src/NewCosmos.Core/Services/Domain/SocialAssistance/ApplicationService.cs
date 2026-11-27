@@ -146,6 +146,7 @@ public class ApplicationService : BaseService, IApplicationService
 
         var conditions = new SqlConditionBuilder()
             .Add("deleted_at IS NULL")
+            .Add("application_type IS DISTINCT FROM {0}", ApplicationTypeConstants.REMOTE_ASSISTANCE)
             .AddIf(!string.IsNullOrEmpty(status), "status = {0}", status)
             .AddIf(!string.IsNullOrEmpty(keyword),
                 "(applicant_name LIKE {0} OR applicant_id_card = {1}"
@@ -183,6 +184,7 @@ public class ApplicationService : BaseService, IApplicationService
         // first_approved_at 范围比较（走索引），与名单"首次审批/新增"业务时间口径一致
         var conditions = new SqlConditionBuilder()
             .Add("deleted_at IS NULL")
+            .Add("application_type IS DISTINCT FROM {0}", ApplicationTypeConstants.REMOTE_ASSISTANCE)
             .Add("first_approved_at IS NOT NULL")
             .Add("first_approved_at >= {0}", monthStart)
             .Add("first_approved_at < {0}", monthEnd);
@@ -216,11 +218,32 @@ public class ApplicationService : BaseService, IApplicationService
 
         try
         {
-            var existsResult = await CheckIdCardExistsAsync(application.ApplicantIdCard, null, ct);
-            if (existsResult.IsSuccess && existsResult.Value)
+            // 异地协助按方案 A 准入：本地无在享档案才可办理；仅停保允许并标记「户籍迁出」；
+            // 其它本地状态或历史导入库已有该人 → 拒绝，避免绕过本地认定重复建户。
+            var isRemoteAssistance = string.Equals(
+                application.ApplicationType,
+                ApplicationTypeConstants.REMOTE_ASSISTANCE,
+                StringComparison.OrdinalIgnoreCase);
+
+            if (isRemoteAssistance)
             {
-                await tx.RollbackAsync(ct);
-                return Result.Failure<long>(ErrorCodes.DUPLICATE_ID_CARD, "该身份证号已存在");
+                var gateResult = await ResolveRemoteAssistanceMarkerAsync(application.ApplicantIdCard, ct);
+                if (gateResult.IsFailure)
+                {
+                    await tx.RollbackAsync(ct);
+                    return Result.Failure<long>(gateResult.ErrorCode!, gateResult.Message!);
+                }
+
+                application.RemoteMarker = gateResult.Value;
+            }
+            else
+            {
+                var existsResult = await CheckIdCardExistsAsync(application.ApplicantIdCard, null, ct);
+                if (existsResult.IsSuccess && existsResult.Value)
+                {
+                    await tx.RollbackAsync(ct);
+                    return Result.Failure<long>(ErrorCodes.DUPLICATE_ID_CARD, "该身份证号已存在");
+                }
             }
 
             var appNoResult = await GetNextApplicationNoAsync(ct);
@@ -255,8 +278,9 @@ public class ApplicationService : BaseService, IApplicationService
               household_monthly_guarantee_amount, person_category_protection_total_amount,
               caregiver_subsidy_amount, total_guarantee_amount,
               is_special_approval, special_approval_id,
+              application_type,
               status, current_step, created_by, created_at, updated_at, bank_name, bank_account,
-              medical_self_paid_12m)
+              medical_self_paid_12m, remote_marker)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
                     $11,$12,$13,$14,$15,$16,$17,$18,
                     $19,$20,$21,$22,$23,$24,$25,$26,
@@ -265,7 +289,7 @@ public class ApplicationService : BaseService, IApplicationService
                     $44,$45,$46,$47,$48,$49,$50,$51,$52,$53,
                     $54,$55,$56,$57,$58,$59,$60,$61,$62,$63,
                     $64,$65,$66,$67,$68,$69,$70,$71,$72,$73,
-                    $74,$75,$76,$77,$78,$79,$80,$81)
+                    $74,$75,$76,$77,$78,$79,$80,$81,$82,$83)
             RETURNING id";
 
             var insertResult = await _db.ExecuteScalarAsync(sql, ct,
@@ -299,12 +323,14 @@ public class ApplicationService : BaseService, IApplicationService
                 application.HouseholdMonthlyGuaranteeAmount, application.PersonCategoryProtectionTotalAmount,
                 application.CaregiverSubsidyAmount, application.TotalGuaranteeAmount,
                 application.IsSpecialApproval, (object?)application.SpecialApprovalId,
+                application.ApplicationType ?? ApplicationTypeConstants.LOW_INCOME,
                 application.Status ?? "Draft", application.CurrentStep,
                 application.CreatedBy ?? "System",
                 application.CreatedAt == default ? DateTime.Now : application.CreatedAt,
                 DateTime.Now,
                 application.BankName ?? string.Empty, application.BankAccount ?? string.Empty,
-                (object?)application.MedicalSelfPaid12m);
+                (object?)application.MedicalSelfPaid12m,
+                (object?)application.RemoteMarker);
 
             if (insertResult.IsFailure)
             {
@@ -324,6 +350,78 @@ public class ApplicationService : BaseService, IApplicationService
             LogError($"创建申请失败: {ex.Message}");
             return Result.Failure<long>(ErrorCodes.DB_CONNECTION_FAILED, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// 异地协助准入判定（方案 A）：
+    /// 本地在享/其它未闭环状态 → 拒绝；仅停保 → 允许并返回「户籍迁出」标记；
+    /// 本地无档案但历史导入库有该人 → 拒绝（应先建档）。
+    /// </summary>
+    private async Task<Result<string?>> ResolveRemoteAssistanceMarkerAsync(
+        string? idCard, CancellationToken ct = default)
+    {
+        var id = (idCard ?? string.Empty).Trim();
+        if (id.Length == 0)
+        {
+            return Result.Failure<string?>(
+                ErrorCodes.REQUIRED_FIELD_MISSING, "异地协助需要填写申请人身份证号");
+        }
+
+        var statusResult = await _db.QueryAsync<RemoteAssistanceStatusRow>(
+            "SELECT status FROM nc_biz_applications " +
+            "WHERE applicant_id_card = $1 AND deleted_at IS NULL " +
+            "AND COALESCE(application_type, 'LowIncome') <> 'RemoteAssistance'",
+            ct,
+            id);
+        if (statusResult.IsFailure)
+        {
+            return Result.Failure<string?>(statusResult.ErrorCode!, statusResult.Message!);
+        }
+
+        var gate = RemoteAssistanceRules.Resolve(
+            (statusResult.Value ?? []).Select(row => row.Status));
+        switch (gate)
+        {
+            case RemoteAssistanceGate.BlockedActive:
+                return Result.Failure<string?>(
+                    ErrorCodes.DUPLICATE_ID_CARD,
+                    "该身份证在本地已有在享保障档案，请通过『保障对象动态管理』办理；异地协助仅用于本地无在享档案人员");
+            case RemoteAssistanceGate.BlockedLocalArchive:
+                return Result.Failure<string?>(
+                    ErrorCodes.DUPLICATE_ID_CARD,
+                    "该身份证在本地已有未闭环档案（草稿/已提交/不予受理等），请先在本地流程处理后再办理异地协助");
+            case RemoteAssistanceGate.AllowedHukouMovedOut:
+                return Result.Success<string?>(RemoteAssistanceConstants.MarkerHukouMovedOut);
+        }
+
+        // 本地无档案：历史导入库存在该人则要求先建档，避免绕过本地认定。
+        var imported = await _db.ExecuteScalarAsync<string?>(
+            """
+            SELECT src FROM (
+                SELECT '农村低保' AS src FROM nc_biz_rural_subsistence_persons WHERE id_card = $1
+                UNION ALL SELECT '城市低保' FROM nc_biz_urban_subsistence_persons WHERE id_card = $1
+                UNION ALL SELECT '低保边缘' FROM nc_biz_low_income_edge_persons WHERE id_card = $1
+                UNION ALL SELECT '特困供养' FROM nc_biz_destitute_persons WHERE id_card = $1
+                UNION ALL SELECT '刚性支出' FROM nc_biz_rigid_expenditure_persons WHERE id_card = $1
+                UNION ALL SELECT '其他困难' FROM nc_biz_other_difficulty_persons WHERE id_card = $1
+            ) t LIMIT 1
+            """,
+            ct,
+            id);
+        if (imported.IsFailure)
+        {
+            LogWarn($"异地协助导入库查重失败（按未命中继续）: {imported.ErrorCode} {imported.Message}");
+            return Result.Success<string?>(null);
+        }
+
+        if (!string.IsNullOrWhiteSpace(imported.Value))
+        {
+            return Result.Failure<string?>(
+                ErrorCodes.DUPLICATE_ID_CARD,
+                $"该身份证已在历史导入库（{imported.Value}），请先在本地建档后再办理异地协助");
+        }
+
+        return Result.Success<string?>(null);
     }
 
     public async Task<Result> UpdateAsync(ApplicationUpdateRequest request, CancellationToken ct = default, bool allowNonEditable = false)
@@ -1163,6 +1261,19 @@ public class ApplicationService : BaseService, IApplicationService
     /// <inheritdoc />
     public async Task<Result> CompleteArchiveAsync(long applicationId, string operatorName, CancellationToken ct = default)
     {
+        // 异地协助不走正式归档
+        var typeLookup = await _db.QuerySingleAsync<string?>(
+            "SELECT application_type FROM nc_biz_applications WHERE id = $1 AND deleted_at IS NULL",
+            ct, applicationId);
+        if (typeLookup.IsSuccess && string.Equals(
+                typeLookup.Value,
+                ApplicationTypeConstants.REMOTE_ASSISTANCE,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return Result.Failure(ErrorCodes.VALIDATION_FAILED,
+                "异地协助请使用办结操作，不走低收入归档");
+        }
+
         // 归档 = 审批通过 + 已归档完结：current_step 推进到 6 且 status 置 Approved。
         // 状态写入统一走 ApplicationStatusService（§9 状态机单一权威 + §8 审计留痕），
         // 状态机校验、first_approved_at 只写一次、已 Approved/Completed 仅推进步骤均在该服务内处理。
@@ -1211,6 +1322,65 @@ public class ApplicationService : BaseService, IApplicationService
 
         LogInfo($"完成归档（置已审批）: ApplicationId={applicationId}");
         return Result.Success();
+    }
+
+    /// <inheritdoc />
+    public async Task<Result> CompleteRemoteAssistanceAsync(long applicationId, string operatorName, CancellationToken ct = default)
+    {
+        // 异地协助办结：仅改 status，不动 current_step / first_approved_at / 任何统计字段。
+        var sql = @"UPDATE nc_biz_applications
+            SET status = $1, updated_by = $2, updated_at = NOW()
+            WHERE id = $3
+              AND application_type = $4
+              AND status = $5
+              AND deleted_at IS NULL";
+
+        var result = await _db.ExecuteNonQueryAsync(sql, ct,
+            ApplicationStatusCodes.REMOTE_ASSISTANCE_COMPLETED,
+            operatorName,
+            applicationId,
+            ApplicationTypeConstants.REMOTE_ASSISTANCE,
+            ApplicationStatusCodes.REMOTE_ASSISTANCE_DRAFT);
+
+        if (result.IsFailure)
+            return Result.Failure(result.ErrorCode!, result.Message!);
+
+        if (result.Value == 0)
+            return Result.Failure(ErrorCodes.VALIDATION_FAILED,
+                "异地协助办结失败：记录不存在、非异地协助类型或状态不正确");
+
+        // 审计留痕（与 CompleteArchiveAsync 同口径，写 nc_biz_application_logs）
+        var auditSql = @"INSERT INTO nc_biz_application_logs
+                (application_id, action, action_detail, operator_name, operated_at)
+         VALUES ($1, $2, $3, $4, NOW())";
+        var auditResult = await _db.ExecuteNonQueryAsync(auditSql, ct,
+            applicationId, "异地协助办结", "异地协助状态置为已办结（只读终态）", operatorName);
+        if (auditResult.IsFailure)
+            LogWarn($"异地协助办结审计写入失败: ApplicationId={applicationId}, {auditResult.Message}");
+
+        LogInfo($"异地协助办结: ApplicationId={applicationId}, Operator={operatorName}");
+        return Result.Success();
+    }
+
+    public async Task<Result<PagedResult<ApplicationEntity>>> GetRemoteAssistancePagedAsync(
+        string keyword, int pageIndex, int pageSize, string? status = null, CancellationToken ct = default)
+    {
+        LogInfo($"获取异地协助列表（分页）: keywordLength={keyword.Length}, 第{pageIndex}页, status={status ?? "(全部)"}");
+
+        var conditions = new SqlConditionBuilder()
+            .Add("application_type = {0}", ApplicationTypeConstants.REMOTE_ASSISTANCE)
+            .Add("deleted_at IS NULL")
+            .AddIf(!string.IsNullOrWhiteSpace(status), "status = {0}", status)
+            .AddIf(!string.IsNullOrWhiteSpace(keyword) && keyword.Length == 18,
+                "(applicant_name ILIKE {0} OR applicant_id_card = {1})", "%" + keyword + "%", keyword.Trim())
+            .AddIf(!string.IsNullOrWhiteSpace(keyword) && keyword.Length != 18,
+                "(applicant_name ILIKE {0} OR applicant_id_card ILIKE {0})", "%" + keyword + "%");
+
+        return await PagedQueryHelper.RunAsync<ApplicationEntity>(
+            _db,
+            "SELECT COUNT(*) FROM nc_biz_applications{WHERE}",
+            "SELECT " + ApplicationColumns.Full + " FROM nc_biz_applications{WHERE} ORDER BY updated_at DESC{PAGE}",
+            conditions, pageIndex, pageSize, ct);
     }
 
     public async Task<Result<PagedResult<ApplicationEntity>>> GetDraftPagedAsync(string keyword, int pageIndex, int pageSize, CancellationToken ct = default)
@@ -1487,4 +1657,10 @@ public class ApplicationService : BaseService, IApplicationService
             WHERE application_id = $2 AND member_category = 'Support' AND deleted_at IS NULL";
         await ExecOrThrowAsync(_db, supporterSql, ct, targetAppId, sourceAppId);
     }
+}
+
+/// <summary>异地协助准入查询行：本地档案状态。</summary>
+public sealed class RemoteAssistanceStatusRow
+{
+    public string? Status { get; set; }
 }

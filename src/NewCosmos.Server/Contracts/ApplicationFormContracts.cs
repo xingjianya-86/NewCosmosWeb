@@ -447,13 +447,17 @@ public sealed record ApplicationFormDto(
     ApplicationFormClassificationDto Classification,
     ApplicationFormEconomicDetailsDto? EconomicDetails,
     List<Caregiver>? Caregivers,
-    List<VisitRecord> VisitRecords);
+    List<VisitRecord> VisitRecords,
+    string? ApplicationType = null,
+    string? RemoteMarker = null,
+    string? RemoteMarkerText = null);
 
 /// <summary>
 /// 表单保存请求。与响应用同一结构；保存端读取 basic/members/supporters/economy/survey/
 /// economicDetails/caregivers，classification 块忽略（分类只能走 POST /classify，防止前端注入金额）。
 /// visitRecords 只在 GET 返回，补录走 POST /api/applications/{id}/visits。
 /// 各块为 null 表示本次不修改该块（更新时保留原值；新建时按空处理）。
+/// ApplicationType 仅新建时生效（LowIncome / RemoteAssistance），更新时忽略。
 /// </summary>
 public sealed record ApplicationFormSaveRequest(
     long? Id,
@@ -468,7 +472,8 @@ public sealed record ApplicationFormSaveRequest(
     ApplicationFormSurveyDto? Survey,
     ApplicationFormClassificationDto? Classification,
     ApplicationFormEconomicDetailsDto? EconomicDetails,
-    List<Caregiver>? Caregivers);
+    List<Caregiver>? Caregivers,
+    string? ApplicationType = null);
 
 /// <summary>新建/保存草稿返回。</summary>
 public sealed record ApplicationFormSaveResult(long Id, string ApplicationNo);

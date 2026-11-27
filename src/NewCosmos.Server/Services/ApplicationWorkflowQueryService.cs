@@ -124,7 +124,7 @@ public sealed class ApplicationWorkflowQueryService(
                 userId, DataScopeTarget.Applications, "a", parameters.Count + 1, ct);
             var sql =
                 "SELECT COUNT(*) FROM nc_biz_applications a " +
-                "WHERE a.deleted_at IS NULL AND a.status = $1 AND a.current_step < $2";
+                "WHERE a.deleted_at IS NULL AND a.application_type IS DISTINCT FROM '" + ApplicationTypeConstants.REMOTE_ASSISTANCE + "' AND a.status = $1 AND a.current_step < $2";
             if (!scope.IsEmpty)
             {
                 sql += " AND " + scope.Sql;
@@ -154,7 +154,7 @@ public sealed class ApplicationWorkflowQueryService(
                 userId, DataScopeTarget.Applications, "a", parameters.Count + 1, ct);
             var sql =
                 "SELECT COUNT(*) FROM nc_biz_applications a " +
-                "WHERE a.deleted_at IS NULL AND a.status = $1 AND a.current_step = $2";
+                "WHERE a.deleted_at IS NULL AND a.application_type IS DISTINCT FROM '" + ApplicationTypeConstants.REMOTE_ASSISTANCE + "' AND a.status = $1 AND a.current_step = $2";
             if (!scope.IsEmpty)
             {
                 sql += " AND " + scope.Sql;
@@ -184,7 +184,7 @@ public sealed class ApplicationWorkflowQueryService(
                 userId, DataScopeTarget.Applications, "a", parameters.Count + 1, ct);
             var sql =
                 "SELECT COUNT(*) FROM nc_biz_applications a " +
-                "WHERE a.deleted_at IS NULL AND a.current_step = $1 AND a.status = ANY($2)";
+                "WHERE a.deleted_at IS NULL AND a.application_type IS DISTINCT FROM '" + ApplicationTypeConstants.REMOTE_ASSISTANCE + "' AND a.current_step = $1 AND a.status = ANY($2)";
             if (!scope.IsEmpty)
             {
                 sql += " AND " + scope.Sql;
@@ -323,7 +323,11 @@ public sealed class ApplicationWorkflowQueryService(
         string? keyword,
         CancellationToken ct)
     {
-        var conditions = new List<string> { "a.deleted_at IS NULL" };
+        var conditions = new List<string>
+        {
+            "a.deleted_at IS NULL",
+            $"a.application_type IS DISTINCT FROM '{ApplicationTypeConstants.REMOTE_ASSISTANCE}'"
+        };
         var parameters = new List<object?>();
 
         switch (tab)

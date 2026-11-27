@@ -57,7 +57,7 @@ public partial class MonthlyReportService : BaseService, IMonthlyReportService
     public async Task<Result<List<string>>> GetTownOptionsAsync(CancellationToken ct = default)
     {
         var sql = @"SELECT b.town FROM (
-                        SELECT DISTINCT town FROM nc_biz_applications WHERE deleted_at IS NULL AND town IS NOT NULL AND town <> ''
+                        SELECT DISTINCT town FROM nc_biz_applications WHERE deleted_at IS NULL AND application_type IS DISTINCT FROM 'RemoteAssistance' AND town IS NOT NULL AND town <> ''
                         UNION
                         SELECT DISTINCT town FROM nc_biz_monthly_reports WHERE town IS NOT NULL AND town <> ''
                     ) b ORDER BY b.town";
@@ -250,7 +250,7 @@ public partial class MonthlyReportService : BaseService, IMonthlyReportService
                     {StoppedArchiveFilter.NotFirstRefusalSql("nc_biz_applications")}) AS stopped_archives,
                 COALESCE(SUM(total_guarantee_amount) FILTER (WHERE status = $4 AND (stop_date IS NULL OR stop_date >= $3::date)), 0) AS total_amount
             FROM nc_biz_applications
-            WHERE deleted_at IS NULL;
+            WHERE deleted_at IS NULL AND application_type IS DISTINCT FROM 'RemoteAssistance';
 ";
 
         // 查询失败必须作为 Failure 向上传播，绝不允许"吞异常返回空集合"：

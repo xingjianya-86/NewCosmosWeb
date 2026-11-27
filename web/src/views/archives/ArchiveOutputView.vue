@@ -50,21 +50,27 @@ interface OutputContext {
   businessId: number
   classification: string
   operationOverride: string
+  docTypes: string[]
 }
 
 /**
  * 标准入口由档案制作中心携带 businessType + businessId；
  * applicationId 作为兼容回退（FamilyApplication）。
+ * docTypes 参数用于按文档类型过滤模板（如异地协助只出入户调查表和邻里访问调查表）。
  */
 const context = computed<OutputContext | null>(() => {
   const classification = firstQuery('classification')
   const operationOverride = firstQuery('operationOverride')
+  const docTypesText = firstQuery('docTypes')
+  const docTypes = docTypesText
+    ? docTypesText.split(',').map((s) => s.trim()).filter(Boolean)
+    : []
 
   const businessType = firstQuery('businessType')
   const businessIdText = firstQuery('businessId')
   const businessId = Number(businessIdText)
   if (businessType && businessIdText && Number.isFinite(businessId) && businessId > 0) {
-    return { businessType, businessId, classification, operationOverride }
+    return { businessType, businessId, classification, operationOverride, docTypes }
   }
 
   const applicationId = Number(firstQuery('applicationId'))
@@ -74,6 +80,7 @@ const context = computed<OutputContext | null>(() => {
       businessId: applicationId,
       classification,
       operationOverride,
+      docTypes,
     }
   }
 
@@ -118,6 +125,9 @@ const resolvedOperationOverride = computed(
   () => context.value?.operationOverride || info.value?.operationOverride || '',
 )
 
+/** 是否为异地协助模式（docTypes 过滤时隐藏完成归档按钮） */
+const isRemoteMode = computed(() => (context.value?.docTypes.length ?? 0) > 0)
+
 /* ───────────────────────── 模板 ───────────────────────── */
 
 const templates = ref<ArchiveOutputTemplate[]>([])
@@ -158,12 +168,16 @@ async function loadTemplates(): Promise<void> {
       classification: resolvedClassification.value || undefined,
       operationOverride: resolvedOperationOverride.value || undefined,
     })
-    templates.value = list
-    const available = new Set(list.map((template) => template.id))
+    // 按文档类型过滤（如异地协助只出入户调查表和邻里访问调查表）
+    const filtered = current.docTypes.length > 0
+      ? list.filter((t) => current.docTypes.includes(t.docType))
+      : list
+    templates.value = filtered
+    const available = new Set(filtered.map((template) => template.id))
 
     if (!templatesInitialized) {
       // 默认全选；若后端明确 defaultSelected=false 则尊重后端预选。
-      selectedTemplateIds.value = list
+      selectedTemplateIds.value = filtered
         .filter((template) => template.defaultSelected !== false)
         .map((template) => template.id)
       templatesInitialized = true
@@ -855,6 +869,7 @@ onBeforeUnmount(() => {
           预览选中
         </el-button>
         <el-button
+          v-if="!isRemoteMode"
           type="warning"
           :icon="Finished"
           :loading="completing"

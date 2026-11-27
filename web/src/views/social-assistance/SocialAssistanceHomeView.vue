@@ -14,6 +14,7 @@ import {
   Search,
   Star,
   UserFilled,
+  Connection,
 } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
 import { getSocialAssistanceSummary } from '@/api/socialAssistance'
@@ -97,6 +98,12 @@ const featureCards: FeatureCard[] = [
     description: '身份证一键核验土地/补贴/保障身份，收入与标准试算',
     icon: Search,
     to: '/social-assistance/quick-verify',
+  },
+  {
+    title: '异地协助',
+    description: '入户调查与邻里走访，本地留存不纳入月报',
+    icon: Connection,
+    to: '/social-assistance/remote-assistance',
   },
 ]
 

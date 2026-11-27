@@ -122,7 +122,92 @@ public sealed class ApplicationQueryService(IDatabaseService database)
                 row.Community,
                 row.Address,
                 row.CreatedAt,
-                row.UpdatedAt));
+                row.UpdatedAt,
+                row.RemoteMarker,
+                RemoteAssistanceConstants.MarkerDisplay(row.RemoteMarker)));
+        }
+
+        var totalPages = (int)((totalCount + effectivePageSize - 1) / effectivePageSize);
+        return Result.Success(new ApplicationListResponse(
+            items, pageIndex, effectivePageSize, totalCount, totalPages));
+    }
+
+    /// <summary>
+    /// 异地协助列表分页（只查 application_type=RemoteAssistance）。
+    /// </summary>
+    public async Task<Result<ApplicationListResponse>> ListRemoteAsync(
+        int page,
+        int pageSize,
+        string? keyword,
+        string? status,
+        DataScopeClause? scope,
+        CancellationToken ct = default)
+    {
+        var pageIndex = Math.Max(page, 1);
+        var effectivePageSize = Math.Clamp(
+            pageSize <= 0 ? DefaultPageSize : pageSize, 1, MaxPageSize);
+        var filter = BuildFilter(Normalize(status), Normalize(keyword), scope, remoteAssistanceOnly: true);
+
+        var countResult = await database.ExecuteScalarAsync<long?>(
+            "SELECT COUNT(*) FROM nc_biz_applications a" + filter.Where,
+            ct,
+            filter.Parameters.ToArray());
+
+        if (countResult.IsFailure)
+        {
+            return Result.Failure<ApplicationListResponse>(
+                countResult.ErrorCode!, countResult.Message!);
+        }
+
+        var totalCount = countResult.Value ?? 0;
+        if (totalCount == 0)
+        {
+            return Result.Success(new ApplicationListResponse(
+                [], pageIndex, effectivePageSize, 0, 0));
+        }
+
+        var listParameters = new List<object?>(filter.Parameters)
+        {
+            effectivePageSize,
+            (long)(pageIndex - 1) * effectivePageSize
+        };
+        var limitIndex = filter.Parameters.Count + 1;
+        var offsetIndex = filter.Parameters.Count + 2;
+
+        var listSql = $"{ListSqlPrefix}{filter.Where} " +
+                      $"ORDER BY a.updated_at DESC, a.id DESC LIMIT ${limitIndex} OFFSET ${offsetIndex}";
+
+        var rowsResult = await database.QueryAsync<Application>(listSql, ct, listParameters.ToArray());
+        if (rowsResult.IsFailure)
+        {
+            return Result.Failure<ApplicationListResponse>(
+                rowsResult.ErrorCode!, rowsResult.Message!);
+        }
+
+        var rows = rowsResult.Value ?? [];
+        var items = new List<ApplicationListItemDto>(rows.Count);
+        foreach (var row in rows)
+        {
+            items.Add(new ApplicationListItemDto(
+                row.Id,
+                row.ApplicationNo,
+                row.ApplicantName,
+                DataMasker.MaskIdCard(row.ApplicantIdCard),
+                DataMasker.MaskPhone(row.ApplicantPhone),
+                row.Status,
+                ToStatusText(row.Status),
+                row.CurrentStep,
+                row.FamilySize,
+                NullIfEmpty(row.ClassificationResult),
+                row.TotalAnnualIncome,
+                row.PerCapitaAnnualIncome,
+                row.Town,
+                row.Community,
+                row.Address,
+                row.CreatedAt,
+                row.UpdatedAt,
+                row.RemoteMarker,
+                RemoteAssistanceConstants.MarkerDisplay(row.RemoteMarker)));
         }
 
         var totalPages = (int)((totalCount + effectivePageSize - 1) / effectivePageSize);
@@ -239,6 +324,8 @@ public sealed class ApplicationQueryService(IDatabaseService database)
             ApplicationStatusCodes.COMPLETED => "已完成",
             ApplicationStatusCodes.STOPPED => "已停保",
             ApplicationStatusCodes.REFUSED => "已驳回",
+            ApplicationStatusCodes.REMOTE_ASSISTANCE_DRAFT => "异地协助办理中",
+            ApplicationStatusCodes.REMOTE_ASSISTANCE_COMPLETED => "异地协助已办结",
             _ => status
         };
     }
@@ -287,10 +374,20 @@ public sealed class ApplicationQueryService(IDatabaseService database)
     private static (string Where, List<object?> Parameters) BuildFilter(
         string? status,
         string? keyword,
-        DataScopeClause? scope)
+        DataScopeClause? scope,
+        bool remoteAssistanceOnly = false)
     {
         var conditions = new List<string> { "a.deleted_at IS NULL" };
         var parameters = new List<object?>();
+
+        if (remoteAssistanceOnly)
+        {
+            conditions.Add($"a.application_type = '{ApplicationTypeConstants.REMOTE_ASSISTANCE}'");
+        }
+        else
+        {
+            conditions.Add($"a.application_type IS DISTINCT FROM '{ApplicationTypeConstants.REMOTE_ASSISTANCE}'");
+        }
 
         if (status is not null)
         {

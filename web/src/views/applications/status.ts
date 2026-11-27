@@ -15,6 +15,8 @@ const STATUS_META: Record<string, ApplicationStatusMeta> = {
   Approved: { label: '已通过', tone: 'pine', dot: 'online' },
   Completed: { label: '已完成', tone: 'pine', dot: 'online' },
   Stopped: { label: '已终止', tone: 'seal', dot: 'default' },
+  RemoteAssistanceDraft: { label: '异地协助办理中', tone: 'ink', dot: 'idle' },
+  RemoteAssistanceCompleted: { label: '异地协助已办结', tone: 'pine', dot: 'online' },
 }
 
 export const APPLICATION_STATUS_OPTIONS: Array<{ label: string; value: ApplicationStatus }> = [

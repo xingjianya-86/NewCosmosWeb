@@ -138,7 +138,10 @@ public sealed class ApplicationFormService(
             await ToClassificationDtoAsync(app, ct),
             ToEconomicDetailsDto(economicDetailsResult.Value),
             caregiverDtos,
-            visitsResult.Value ?? []);
+            visitsResult.Value ?? [],
+            app.ApplicationType,
+            app.RemoteMarker,
+            RemoteAssistanceConstants.MarkerDisplay(app.RemoteMarker));
 
         return Result.Success(dto);
     }
@@ -182,7 +185,18 @@ public sealed class ApplicationFormService(
                 ErrorCodes.VALIDATION_FAILED, "申请人姓名和身份证号不能为空");
         }
 
-        application.Status = ApplicationStatusCodes.DRAFT;
+        // 设置业务类型（仅新建时生效；远程协助强制专用状态）
+        var isRemote = string.Equals(
+            request.ApplicationType,
+            ApplicationTypeConstants.REMOTE_ASSISTANCE,
+            StringComparison.OrdinalIgnoreCase);
+        application.ApplicationType = isRemote
+            ? ApplicationTypeConstants.REMOTE_ASSISTANCE
+            : ApplicationTypeConstants.LOW_INCOME;
+
+        application.Status = isRemote
+            ? ApplicationStatusCodes.REMOTE_ASSISTANCE_DRAFT
+            : ApplicationStatusCodes.DRAFT;
         application.CurrentStep = request.CurrentStep is { } requestedStep
             ? Math.Clamp(requestedStep, WorkflowSteps.ENTRY_START, WorkflowSteps.PENDING_ARCHIVE)
             : WorkflowSteps.ENTRY_START;
@@ -372,6 +386,13 @@ public sealed class ApplicationFormService(
         }
 
         var application = appResult.Value;
+
+        // 异地协助不走分类认定
+        if (string.Equals(application.ApplicationType, ApplicationTypeConstants.REMOTE_ASSISTANCE, StringComparison.OrdinalIgnoreCase))
+        {
+            return Result.Failure<ApplicationFormDto>(
+                ErrorCodes.VALIDATION_FAILED, "异地协助不走分类认定流程");
+        }
 
         // 重新加载成员/赡养人，避免使用前端缓存的旧快照参与判定。
         var membersResult = await familyMembers.GetByApplicationIdAsync(applicationId, ct);
@@ -675,6 +696,13 @@ public sealed class ApplicationFormService(
                 ErrorCodes.VALIDATION_FAILED, "请先完成分类判定再归档");
         }
 
+        // 异地协助不走正式归档
+        if (string.Equals(appResult.Value.ApplicationType, ApplicationTypeConstants.REMOTE_ASSISTANCE, StringComparison.OrdinalIgnoreCase))
+        {
+            return Result.Failure<ApplicationFormCompleteResult>(
+                ErrorCodes.VALIDATION_FAILED, "异地协助请使用办结操作，不走低收入归档");
+        }
+
         var completeResult = await applications.CompleteArchiveAsync(applicationId, operatorName, ct);
         if (completeResult.IsFailure)
         {
@@ -687,6 +715,50 @@ public sealed class ApplicationFormService(
 
         return Result.Success(new ApplicationFormCompleteResult(
             ApplicationStatusCodes.APPROVED, WorkflowSteps.ARCHIVED));
+    }
+
+    /// <summary>
+    /// 异地协助办结：将状态从 RemoteAssistanceDraft 置为 RemoteAssistanceCompleted。
+    /// 已办结后为终态只读，不进入月报/在保/停保口径。
+    /// </summary>
+    public async Task<Result<ApplicationFormCompleteResult>> CompleteRemoteAssistanceAsync(
+        long applicationId,
+        int userId,
+        string operatorName,
+        CancellationToken ct = default)
+    {
+        var appResult = await LoadInScopeAsync(applicationId, userId, ct);
+        if (appResult.IsFailure)
+        {
+            return Result.Failure<ApplicationFormCompleteResult>(appResult.ErrorCode, appResult.Message);
+        }
+
+        // 必须是异地协助类型
+        if (!string.Equals(appResult.Value.ApplicationType, ApplicationTypeConstants.REMOTE_ASSISTANCE, StringComparison.OrdinalIgnoreCase))
+        {
+            return Result.Failure<ApplicationFormCompleteResult>(
+                ErrorCodes.VALIDATION_FAILED, "仅异地协助记录可以使用办结操作");
+        }
+
+        // 必须是办理中状态
+        if (!string.Equals(appResult.Value.Status, ApplicationStatusCodes.REMOTE_ASSISTANCE_DRAFT, StringComparison.OrdinalIgnoreCase))
+        {
+            return Result.Failure<ApplicationFormCompleteResult>(
+                ErrorCodes.VALIDATION_FAILED, "仅异地协助办理中状态可以办结");
+        }
+
+        var completeResult = await applications.CompleteRemoteAssistanceAsync(applicationId, operatorName, ct);
+        if (completeResult.IsFailure)
+        {
+            return Result.Failure<ApplicationFormCompleteResult>(
+                completeResult.ErrorCode!, completeResult.Message!);
+        }
+
+        logger.LogBusiness("异地协助办结",
+            ("ApplicationId", applicationId), ("Operator", operatorName));
+
+        return Result.Success(new ApplicationFormCompleteResult(
+            ApplicationStatusCodes.REMOTE_ASSISTANCE_COMPLETED, appResult.Value.CurrentStep));
     }
 
     // ───────────────────────────── 回访补录 ─────────────────────────────
@@ -3027,7 +3099,8 @@ public sealed class ApplicationFormService(
         decimal ContractedArea);
 
     private static bool IsDraft(string? status)
-        => string.Equals(status, ApplicationStatusCodes.DRAFT, StringComparison.OrdinalIgnoreCase);
+        => string.Equals(status, ApplicationStatusCodes.DRAFT, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(status, ApplicationStatusCodes.REMOTE_ASSISTANCE_DRAFT, StringComparison.OrdinalIgnoreCase);
 
     private static bool IsSupportMember(FamilyMember member)
         => string.Equals(

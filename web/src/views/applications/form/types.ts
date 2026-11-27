@@ -190,6 +190,12 @@ export interface ApplicationFormModel {
   status: string
   statusText: string
   currentStep: number
+  /** 业务类型：LowIncome=低收入认定（默认）/ RemoteAssistance=异地协助 */
+  applicationType?: string
+  /** 异地协助标记（HukouMovedOut=户籍迁出，仅异地协助使用） */
+  remoteMarker?: string | null
+  /** 异地协助标记显示名 */
+  remoteMarkerText?: string | null
   basic: ApplicationFormBasic
   members: ApplicationFormMember[]
   supporters: ApplicationFormSupporter[]
@@ -208,6 +214,7 @@ export function createEmptyForm(): ApplicationFormModel {
     status: 'Draft',
     statusText: '草稿',
     currentStep: 1,
+    applicationType: 'LowIncome',
     basic: {
       hukouType: 'Rural',
       applicantName: '',
