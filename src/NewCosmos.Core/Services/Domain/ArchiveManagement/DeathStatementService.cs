@@ -145,7 +145,8 @@ public partial class DeathStatementService : BaseService, IDeathStatementService
                 DeathTimeText = item.DeathTimeText,
                 DeathReason = item.DeathReason,
                 DeathCertNo = item.DeathCertNo,
-                Relation = item.Relation,
+                // 关系列落库为字典 key（或历史中文），文书展示统一转中文。
+                Relation = DictValueMapper.ToFormRelationship(item.Relation),
                 DeclarationId = item.DeclarationId,
                 DeathRecordId = item.DeathRecordId,
                 ApplicationId = item.ApplicationId,
@@ -347,7 +348,8 @@ public partial class DeathStatementService : BaseService, IDeathStatementService
             context.DeathDateTimeText = FormatDeathDateTime(context.DeathDateText, context.DeathTimeText);
             context.DeathReason = d.DeathReason ?? string.Empty;
             context.DeathCertNo = d.DeathCertNo ?? string.Empty;
-            context.Relation = d.Relation ?? string.Empty;
+            // 关系列落库为字典 key，文书展示统一转中文。
+            context.Relation = DictValueMapper.ToFormRelationship(d.Relation);
             context.ApplicationId = context.ApplicationId ?? d.ApplicationId;
         }
 

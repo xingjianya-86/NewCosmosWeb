@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using NewCosmos.Constants;
+using NewCosmos.Helpers;
 using NewCosmos.Models.Entities;
 using NewCosmos.Models.Results;
 using NewCosmos.Server.Contracts;
@@ -49,10 +50,12 @@ public sealed class ArchivePrintDataService(ApplicationFormService forms, IDatab
         Put(data.Fields, FieldKeys.APPLICANT_NAME, basic.ApplicantName);
         Put(data.Fields, FieldKeys.APPLICANT_ID_CARD, basic.ApplicantIdCard);
         Put(data.Fields, FieldKeys.CONTACT_PHONE, basic.Phone);
-        Put(data.Fields, FieldKeys.APPLICANT_GENDER, basic.Gender);
-        Put(data.Fields, FieldKeys.MARITAL_STATUS, basic.MaritalStatus);
-        Put(data.Fields, FieldKeys.HEALTH_STATUS, basic.HealthStatus);
-        Put(data.Fields, FieldKeys.APPLICATION_REASON, basic.ApplicationReason);
+        // 字典列落库为 Core key，文书是给人看的 → 出口统一转中文（唯一权威 DictValueMapper）。
+        Put(data.Fields, FieldKeys.APPLICANT_GENDER, DictValueMapper.ToFormGender(basic.Gender));
+        Put(data.Fields, FieldKeys.MARITAL_STATUS, DictValueMapper.ToFormMaritalStatus(basic.MaritalStatus));
+        Put(data.Fields, FieldKeys.HEALTH_STATUS, DictValueMapper.ToFormHealthStatus(basic.HealthStatus));
+        Put(data.Fields, FieldKeys.APPLICATION_REASON,
+            DictValueMapper.ToFormApplicationReason(basic.ApplicationReason));
         Put(data.Fields, FieldKeys.APPLICATION_REASON_DETAIL, basic.ApplicationReasonDetail);
         Put(data.Fields, FieldKeys.STATUS, form.StatusText);
 
@@ -135,13 +138,16 @@ public sealed class ArchivePrintDataService(ApplicationFormService forms, IDatab
                 var row = new Dictionary<string, string>(StringComparer.Ordinal);
                 Put(row, FieldKeys.FAMILY_MEMBER_NAME, member.Name);
                 Put(row, FieldKeys.FAMILY_MEMBER_ID_CARD, member.IdCard);
-                Put(row, FieldKeys.FAMILY_MEMBER_RELATION, member.Relation);
+                Put(row, FieldKeys.FAMILY_MEMBER_RELATION,
+                    DictValueMapper.ToFormRelationship(member.Relation));
                 Put(row, FieldKeys.FAMILY_MEMBER_ADDRESS,
                     FirstNonEmpty(member.HukouAddress, member.HomeAddress));
                 Put(row, FieldKeys.FAMILY_MEMBER_AGE,
                     member.Age?.ToString(CultureInfo.InvariantCulture));
-                Put(row, FieldKeys.FAMILY_MEMBER_HUKOU, member.HukouType);
-                Put(row, FieldKeys.FAMILY_MEMBER_EMPLOYMENT, member.EmploymentStatus);
+                Put(row, FieldKeys.FAMILY_MEMBER_HUKOU,
+                    DictValueMapper.ToFormHukouType(member.HukouType));
+                Put(row, FieldKeys.FAMILY_MEMBER_EMPLOYMENT,
+                    DictValueMapper.ToFormEmploymentStatus(member.EmploymentStatus));
                 if (row.Count > 0)
                 {
                     data.TableRows.Add(row);

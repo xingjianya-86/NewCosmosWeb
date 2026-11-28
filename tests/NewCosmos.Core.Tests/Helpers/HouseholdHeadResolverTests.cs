@@ -39,7 +39,9 @@ public class HouseholdHeadResolverTests
         Assert.Equal("231025196005224918", result.Head.IdCard);
         Assert.True(result.Head.IsApplicant);
         Assert.Equal(MemberCategoryConstants.HOUSEHOLD_HEAD, result.Head.MemberCategory);
-        Assert.Equal("本人/户主", result.Head.RelationshipToHead);
+        // 关系列落库为字典 key（nc_dict_items.item_key），合成户主写 Head；
+        // 展示出口统一经 DictValueMapper.ToFormRelationship 转「本人/户主」。
+        Assert.Equal(DictionaryConstants.FamilyRelationship.HEAD, result.Head.RelationshipToHead);
     }
 
     [Fact]

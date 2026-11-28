@@ -125,12 +125,16 @@ public sealed partial class ArchiveProductionDataService(
                 ("申请人姓名", FirstNonEmpty(basic?.ApplicantName, app.ApplicantName)),
                 ("身份证号", FirstNonEmpty(basic?.ApplicantIdCard, app.ApplicantIdCard)),
                 ("联系电话", FirstNonEmpty(basic?.Phone, app.ApplicantPhone)),
-                ("申请原因", FirstNonEmpty(basic?.ApplicationReason, app.ApplicationReason)),
-                ("户籍类型", FirstNonEmpty(basic?.HukouType, app.HukouType)),
-                ("性别", FirstNonEmpty(basic?.Gender, app.Gender)),
-                ("民族", FirstNonEmpty(basic?.Ethnicity, app.Ethnicity)),
-                ("婚姻状况", FirstNonEmpty(basic?.MaritalStatus, app.MaritalStatus)),
-                ("文化程度", FirstNonEmpty(basic?.EducationLevel, app.EducationLevel)),
+                ("申请原因", DictValueMapper.ToFormApplicationReason(
+                    FirstNonEmpty(basic?.ApplicationReason, app.ApplicationReason))),
+                ("户籍类型", DictValueMapper.ToFormHukouType(
+                    FirstNonEmpty(basic?.HukouType, app.HukouType))),
+                ("性别", DictValueMapper.ToFormGender(FirstNonEmpty(basic?.Gender, app.Gender))),
+                ("民族", DictValueMapper.ToFormEthnicity(FirstNonEmpty(basic?.Ethnicity, app.Ethnicity))),
+                ("婚姻状况", DictValueMapper.ToFormMaritalStatus(
+                    FirstNonEmpty(basic?.MaritalStatus, app.MaritalStatus))),
+                ("文化程度", DictValueMapper.ToFormEducationLevel(
+                    FirstNonEmpty(basic?.EducationLevel, app.EducationLevel))),
                 ("申请状态", FirstNonEmpty(form.StatusText, app.Status))),
 
             CreateGroup("地址信息",

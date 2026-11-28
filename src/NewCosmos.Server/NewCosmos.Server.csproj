@@ -32,6 +32,15 @@
     <None Update="Migrations\006_remote_assistance.sql"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Migrations\007_dict_value_cleanup.sql"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Migrations\008_relationship_cleanup.sql"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Update="Migrations\009_other_difficulty_relationship_cleanup.sql"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
     <!-- 数据中心 Schema 状态/修复的权威表定义（来自 PC Resources/Schema）。 -->
     <Content Include="Resources\Schema\**\*.yaml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

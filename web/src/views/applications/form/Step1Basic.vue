@@ -18,7 +18,7 @@ import {
   POLITICAL_STATUS_OPTIONS,
 } from './options'
 import type { ApplicationFormBasic, ApplicationFormModel } from './types'
-import { deriveHealthStatus, parseDisabilityCertificate } from './healthStatus'
+import { deriveHealthStatus, normalizeHealthStatus, parseDisabilityCertificate } from './healthStatus'
 import { getIdCardError, isBasicValid, parseIdCard } from './validation'
 
 const props = defineProps<{
@@ -171,9 +171,9 @@ async function handleSelfPaidChange(): Promise<void> {
   }
 }
 
-/** 健康状态只读展示：勾选“是否重病”时显示重病（当前为重残/重病且重残者保留原值）。 */
+/** 健康状态只读展示：先归一化英文/旧值再显示；勾选“是否重病”时显示重病（当前为重残/重病且重残者保留原值）。 */
 const healthStatusDisplay = computed(() => {
-  const current = basic.value.healthStatus?.trim() ?? ''
+  const current = normalizeHealthStatus(basic.value.healthStatus)
   if (isSevereDisease.value && current !== '重残' && current !== '重病且重残') {
     return '重病'
   }

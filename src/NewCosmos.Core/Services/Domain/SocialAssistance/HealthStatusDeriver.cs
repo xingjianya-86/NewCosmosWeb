@@ -1,4 +1,5 @@
 using NewCosmos.Constants;
+using NewCosmos.Helpers;
 
 namespace NewCosmos.Services.Domain.SocialAssistance;
 
@@ -23,8 +24,9 @@ namespace NewCosmos.Services.Domain.SocialAssistance;
 public static class HealthStatusDeriver
 {
     /// <summary>
-    /// 允许被派生覆盖的“当前值”白名单：空值 + 5 个业务档（Core key 与中文显示值两套，大小写不敏感）。
-    /// 不含 患病/残疾/其他/Other 等历史值。
+    /// 允许被派生覆盖的“当前值”白名单：空值 + 5 个业务档的 Core key。
+    /// 输入先经 <see cref="DictValueMapper.ToCoreHealthStatus"/> 归一（英文 Core key / 旧显示值 /
+    /// 中文历史值都会折算成 key），故这里只需 key；不含 患病/残疾/其他/Other 等历史值。
     /// </summary>
     private static readonly HashSet<string> OverridableValues = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -33,13 +35,7 @@ public static class HealthStatusDeriver
         HealthStatusConstants.FAIR_OR_WEAK,
         HealthStatusConstants.SEVERE_DISEASE,
         HealthStatusConstants.SEVERE_DISABILITY,
-        HealthStatusConstants.SEVERE_DISEASE_AND_DISABILITY,
-        // 表单侧中文档值（与 ToCoreHealthStatus/ToFormHealthStatus 的换算表同源）
-        "健康",
-        "一般",
-        "重病",
-        "重残",
-        "重病且重残"
+        HealthStatusConstants.SEVERE_DISEASE_AND_DISABILITY
     };
 
     /// <summary>
@@ -61,7 +57,9 @@ public static class HealthStatusDeriver
         string? currentValue)
     {
         // 覆盖守卫：当前值非标准档 → 原样保留（不派生、不归一）。
-        var current = currentValue?.Trim() ?? string.Empty;
+        // 先经 DictValueMapper 归一到 Core key：英文 Core key / 旧显示值（健康或良好…）/ 中文历史值
+        // 都会折算成 key；未知历史值（患病/残疾等）归一后仍不在白名单 → 返回原始值。
+        var current = DictValueMapper.ToCoreHealthStatus(currentValue);
         if (!OverridableValues.Contains(current))
         {
             return currentValue ?? string.Empty;

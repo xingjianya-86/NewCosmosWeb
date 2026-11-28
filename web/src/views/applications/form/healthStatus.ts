@@ -19,7 +19,7 @@ import {
 /** 无任何疾病：取 DISEASE_CATEGORY_OPTIONS 首项，不硬编码（改选项即跟随）。 */
 const NO_DISEASE_CATEGORY = DISEASE_CATEGORY_OPTIONS[0].value
 
-/** 输出档位取自 HEALTH_STATUS_OPTIONS（顺序：健康/一般/重病/重残/重病且重残/其他）。 */
+/** 输出档位取自 HEALTH_STATUS_OPTIONS（顺序：健康或良好/一般或较弱/重病/重残/重病且重残/其他）。 */
 const HEALTHY = HEALTH_STATUS_OPTIONS[0].value
 const FAIR = HEALTH_STATUS_OPTIONS[1].value
 const SEVERE_DISEASE = HEALTH_STATUS_OPTIONS[2].value
@@ -31,6 +31,41 @@ const SEVERE_DISABILITY_LEVELS: readonly string[] = [
   DISABILITY_LEVEL_OPTIONS[0].value,
   DISABILITY_LEVEL_OPTIONS[1].value,
 ]
+
+/** 残疾类型 Core key → 表单中文值（与 options.ts 的 value 一致）；key 统一小写比较。 */
+const DISABILITY_TYPE_ALIASES: Readonly<Record<string, string>> = {
+  vision: '视力',
+  hearing: '听力',
+  speech: '言语',
+  physical: '肢体',
+  intellectual: '智力',
+  mental: '精神',
+  multiple: '多重',
+}
+
+/** 残疾等级 Core key → 表单中文值（Level1..Level4 → 一级..四级）。 */
+const DISABILITY_LEVEL_ALIASES: Readonly<Record<string, string>> = {
+  level1: '一级',
+  level2: '二级',
+  level3: '三级',
+  level4: '四级',
+}
+
+/** 残疾类型归一：英文 Core key → 中文；未知值原样保留。 */
+export function normalizeDisabilityType(value: string | null | undefined): string {
+  const raw = (value ?? '').trim()
+  if (!raw) return ''
+  if (DISABILITY_TYPE_OPTIONS.some((item) => item.value === raw)) return raw
+  return DISABILITY_TYPE_ALIASES[raw.toLowerCase()] ?? raw
+}
+
+/** 残疾等级归一：英文 Core key → 中文；未知值原样保留。 */
+export function normalizeDisabilityLevel(value: string | null | undefined): string {
+  const raw = (value ?? '').trim()
+  if (!raw) return ''
+  if (DISABILITY_LEVEL_OPTIONS.some((item) => item.value === raw)) return raw
+  return DISABILITY_LEVEL_ALIASES[raw.toLowerCase()] ?? raw
+}
 
 /**
  * 覆盖守卫：仅当当前值属于这些档位时才允许被派生结果覆盖；
@@ -44,6 +79,45 @@ const OVERWRITABLE_HEALTH_STATUSES: ReadonlySet<string> = new Set([
   SEVERE_DISABILITY,
   SEVERE_DISEASE_AND_DISABILITY,
 ])
+
+/**
+ * 英文 Core key / 旧显示值 / 历史短词 → 表单中文档位。
+ *
+ * 词表以 `nc_dict_items.HealthStatuses.item_value` 为准（健康或良好 / 一般或较弱 / 重病 …），
+ * 与后端 `DictValueMapper.ToFormHealthStatus`、`DefaultValuesConstants.HEALTH_STATUS`、
+ * `PageDefaultValues.HealthOptions`、`DictDisplayHelper.GetHealthStatusDisplay` 同一套。
+ *
+ * 兼容三类来源：① 接口未做映射（旧服务端构建、详情接口）的英文 Core key；
+ * ② 旧字典显示值；③ 历史表单短词「健康 / 一般」。key 统一小写比较。
+ */
+const HEALTH_STATUS_ALIASES: Readonly<Record<string, string>> = {
+  healthy: HEALTHY,
+  // 历史表单短词（旧 HEALTH_STATUS_OPTIONS）→ 字典口径
+  '健康': HEALTHY,
+  '健康或良好': HEALTHY,
+  weak: FAIR,
+  fair: FAIR,
+  '一般': FAIR,
+  '一般或较弱': FAIR,
+  severeillness: SEVERE_DISEASE,
+  severedisease: SEVERE_DISEASE,
+  severedisability: SEVERE_DISABILITY,
+  severeillnessanddisability: SEVERE_DISEASE_AND_DISABILITY,
+  other: '其他',
+}
+
+/**
+ * 归一化身体状况值为表单中文档位（词表 = nc_dict_items.HealthStatuses.item_value）。
+ * - 空值 → ''；已知英文 key / 旧显示值 / 历史短词 → 对应字典口径；
+ * - 其余历史值（患病/残疾等）原样保留，交给覆盖守卫判断。
+ */
+export function normalizeHealthStatus(value: string | null | undefined): string {
+  const raw = (value ?? '').trim()
+  if (!raw) return ''
+  const direct = HEALTH_STATUS_OPTIONS.find((item) => item.value === raw)
+  if (direct) return direct.value
+  return HEALTH_STATUS_ALIASES[raw.toLowerCase()] ?? raw
+}
 
 export interface DisabilityCertificateInfo {
   /** 残疾类型表单值（视力/听力/言语/肢体/智力/精神/多重）；解析失败为空串。 */
@@ -101,19 +175,19 @@ export interface DeriveHealthStatusInput {
  * 派生身体状况（表单值口径）：
  * - hasDisease = diseaseCategory 非空且 ≠ '无任何疾病'；
  * - hasDisability = disabilityType 非空；重残 = 有残疾且等级 ∈ {一级, 二级}；
- * - 病+重残 → '重病且重残'；仅病 → '重病'；仅重残 → '重残'；有残疾非重残 → '一般'；
- *   age ≥ 60 → '一般'；否则 → '健康'；
- * - 地板：isSevereDisease = true 且结果 ∈ {'健康','一般'} → '重病'；
- * - 覆盖守卫：仅当前值 ∈ {'', '健康','一般','重病','重残','重病且重残'} 才写入结果，
- *   其它历史值（患病/残疾/其他等）原样返回。
+ * - 病+重残 → '重病且重残'；仅病 → '重病'；仅重残 → '重残'；
+ *   有残疾非重残 / age ≥ 60 → FAIR（一般或较弱）；否则 → HEALTHY（健康或良好）；
+ * - 地板：isSevereDisease = true 且结果 ∈ {HEALTHY, FAIR} → '重病'；
+ * - 覆盖守卫：仅当前值 ∈ {'', HEALTHY, FAIR, '重病', '重残', '重病且重残'} 才写入结果，
+ *   其它历史值（患病/残疾等）原样返回。
  *
  * ⚠️ 与后端 Core HealthStatusDeriver 同口径，改一处必须同步另一处。
  */
 export function deriveHealthStatus(input: DeriveHealthStatusInput): string {
-  const current = (input.currentHealthStatus ?? '').trim()
+  const current = normalizeHealthStatus(input.currentHealthStatus)
   const diseaseCategory = (input.diseaseCategory ?? '').trim()
-  const disabilityType = (input.disabilityType ?? '').trim()
-  const disabilityLevel = (input.disabilityLevel ?? '').trim()
+  const disabilityType = normalizeDisabilityType(input.disabilityType)
+  const disabilityLevel = normalizeDisabilityLevel(input.disabilityLevel)
   const isSevere = Boolean(input.isSevereDisease)
   const age =
     typeof input.age === 'number' && Number.isFinite(input.age) ? input.age : null

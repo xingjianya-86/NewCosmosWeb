@@ -1898,11 +1898,12 @@ public partial class ChangeService
             });
 
             var entries = context.Entries ?? new List<MemberChangeEntry>();
+            // 审计快照 JSON 是给人看的：关系列落库为字典 key，序列化前转中文。
             var addedDetails = entries
                 .Where(e => string.Equals(e.Direction, DictionaryConstants.ChangeType.MEMBER_ADD, StringComparison.OrdinalIgnoreCase))
                 .Select(e => new
                 {
-                    e.Name, e.IdCard, e.RelationshipToHead, e.MemberCategory,
+                    e.Name, e.IdCard, RelationshipToHead = DictValueMapper.ToFormRelationship(e.RelationshipToHead), e.MemberCategory,
                     e.ReasonCode, e.ReasonName,
                     EventDate = e.EventDate.ToString("yyyy-MM-dd"),
                     e.Remark
@@ -1911,7 +1912,7 @@ public partial class ChangeService
                 .Where(e => string.Equals(e.Direction, DictionaryConstants.ChangeType.MEMBER_REMOVE, StringComparison.OrdinalIgnoreCase))
                 .Select(e => new
                 {
-                    e.Name, e.IdCard, e.RelationshipToHead, e.MemberCategory,
+                    e.Name, e.IdCard, RelationshipToHead = DictValueMapper.ToFormRelationship(e.RelationshipToHead), e.MemberCategory,
                     e.ReasonCode, e.ReasonName,
                     EventDate = e.EventDate.ToString("yyyy-MM-dd"),
                     e.Remark
@@ -1977,7 +1978,7 @@ public partial class ChangeService
                     detailParams.Add(changeId);
                     detailParams.Add(e.Direction);
                     detailParams.Add(e.Name);
-                    detailParams.Add($"{e.Name}({e.IdCard}) {e.MemberCategory} {e.RelationshipToHead}".Trim());
+                    detailParams.Add($"{e.Name}({e.IdCard}) {e.MemberCategory} {DictValueMapper.ToFormRelationship(e.RelationshipToHead)}".Trim());
                     detailParams.Add($"{e.ReasonName}|{e.EventDate:yyyy-MM-dd}|{e.Remark}");
                 }
                 var detailSql = $"INSERT INTO nc_biz_change_details (change_id, field_name, field_label, old_value, new_value) VALUES {detailSb};";
@@ -2013,7 +2014,8 @@ public partial class ChangeService
                         var e = deathEntries[i];
                         return new object?[]
                         {
-                            context.ApplicationId, e.MemberId, e.Name, e.IdCard, e.RelationshipToHead,
+                            context.ApplicationId, e.MemberId, e.Name, e.IdCard,
+                            DictValueMapper.ToCoreRelationship(e.RelationshipToHead),
                             e.EventDate, e.EventTime,
                             string.IsNullOrWhiteSpace(e.Remark) ? "成员变更-人员死亡" : e.Remark,
                             e.Remark, context.OperatorName

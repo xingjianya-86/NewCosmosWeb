@@ -415,6 +415,8 @@ public partial class MonthlyReportService : BaseService, IMonthlyReportService
                             WHERE fh.application_id = {alias}.id AND fh.deleted_at IS NULL
                               AND (fh.is_applicant = true
                                    OR fh.relationship_to_head = 'Head'
+                                   -- 历史中文关系值与字典 key 并存，两套都算户主行
+                                   OR fh.relationship_to_head IN ('本人/户主', '本人', '户主')
                                    OR COALESCE(fh.member_category, '') = ''
                                    OR fh.member_category = 'HouseholdHead')
                         ) THEN 0 ELSE 1 END
@@ -618,8 +620,9 @@ public partial class MonthlyReportService : BaseService, IMonthlyReportService
                 // 一次性舍入到分；新数据一律走年值列（§9 禁止月值反推，此为无年值可用时的唯一兜底）
                 AnnualIncome = item.TotalAnnualIncome ?? Math.Round((item.TotalFamilyIncome ?? 0) * 12, 2),
                 Age = CalcAge(item.ApplicantIdCard ?? ""),
+                // 户主关系落库为字典 key（Head/Son…），月报列是给人看的 → 统一转中文。
                 Relation = relationMap.TryGetValue(appId, out var rel) && !string.IsNullOrWhiteSpace(rel)
-                    ? rel
+                    ? DictValueMapper.ToFormRelationship(rel)
                     : "户主",
                 // 现场重建"家庭情况说明"的数据快照（会议记录每次生成都用最新明细，不用库中旧文本）
                 FamilyContext = new FamilySituationContext

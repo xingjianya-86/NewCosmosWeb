@@ -1,4 +1,5 @@
 using System.Globalization;
+using NewCosmos.Helpers;
 
 namespace NewCosmos.Constants;
 
@@ -238,8 +239,12 @@ public static class TempReliefConstants
     /// <summary>困难类型：其他困难（默认）</summary>
     public const string DifficultyTypeOther = "其他困难";
 
-    /// <summary>与户主关系：户主</summary>
-    public const string RelationHead = "户主";
+    /// <summary>
+    /// 与户主关系显示值（与 <c>DictValueMapper.ToFormRelationship</c> 同词表：Head → 本人/户主）。
+    /// 仅用于**展示**；判断「是不是户主」请用 <c>DictValueMapper.ToCoreRelationship(x) == FamilyRelationship.HEAD</c>，
+    /// 拿显示文本比较会在换词表时静默失效。
+    /// </summary>
+    public const string RelationHead = "本人/户主";
 
     /// <summary>村字段默认值（候选人无村信息时兜底）</summary>
     public const string DefaultVillage = "村委会";
@@ -688,24 +693,19 @@ public static class TempReliefConstants
     };
 
     /// <summary>
-    /// 成员关系字典键（Head/Spouse/...）→ 中文显示（未知值/已是中文时原样返回）。
-    /// 临时救助成员关系在申请库快照、台账人员表、历史落库中均可能以字典键存在，
-    /// 表单/打印/审批表统一经本方法转换，避免输出英文（如 Spouse）。
+    /// 成员关系字典键（Head/Spouse/...）→ 中文显示。
+    /// <para>
+    /// 换算唯一权威在 Core <c>DictValueMapper.ToFormRelationship</c>（与申请表单、月报、
+    /// 死亡证明、档案打印同一套词表：Head→本人/户主、Son→子/婿、Daughter→女/媳…），
+    /// 本方法只做委托，禁止再维护 switch 副本。
+    /// </para>
+    /// <para>
+    /// 临时救助的关系列落库为**显示值**（户主/儿子…），两套值都能识别；
+    /// 未知值原样返回，不会把中文历史值吞掉。
+    /// </para>
     /// </summary>
-    public static string GetRelationshipDisplayName(string? relationship) => relationship?.Trim() switch
-    {
-        null or "" => string.Empty,
-        "Head" => "户主",
-        "Spouse" => "配偶",
-        "Son" => "儿子",
-        "Daughter" => "女儿",
-        "Parent" => "父母",
-        "Grandchild" => "孙子女",
-        "Grandparent" => "祖父母/外祖父母",
-        "Sibling" => "兄弟姐妹",
-        "Other" => "其他",
-        _ => relationship!.Trim()
-    };
+    public static string GetRelationshipDisplayName(string? relationship)
+        => DictValueMapper.ToFormRelationship(relationship);
 
     /// <summary>
     /// 家庭人口统一口径（唯一实现，禁止各处重抄）：

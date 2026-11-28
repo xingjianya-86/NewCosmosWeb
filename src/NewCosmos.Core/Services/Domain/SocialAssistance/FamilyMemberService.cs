@@ -479,7 +479,7 @@ public class FamilyMemberService : BaseService, IFamilyMemberService
             name = TRIM(a.applicant_name),
             id_card = TRIM(a.applicant_id_card),
             is_applicant = TRUE,
-            relationship_to_head = '本人/户主',
+            relationship_to_head = 'Head',
             member_category = 'HouseholdHead',
             gender = COALESCE(NULLIF(a.gender, ''), m.gender),
             birth_date = CASE WHEN a.applicant_id_card ~ '^[0-9]{17}[0-9Xx]$'
@@ -542,7 +542,7 @@ public class FamilyMemberService : BaseService, IFamilyMemberService
             is_disabled, disability_certificate_no, disability_type, disability_level,
             disease_name, secondary_disease, is_severe_disease, family_size,
             created_at, updated_at)
-        SELECT a.id, TRIM(a.applicant_name), TRIM(a.applicant_id_card), TRUE, '本人/户主', 'HouseholdHead',
+        SELECT a.id, TRIM(a.applicant_name), TRIM(a.applicant_id_card), TRUE, 'Head', 'HouseholdHead',
             a.gender,
             CASE WHEN a.applicant_id_card ~ '^[0-9]{17}[0-9Xx]$'
                  THEN to_date(substr(a.applicant_id_card, 7, 8), 'YYYYMMDD') END,

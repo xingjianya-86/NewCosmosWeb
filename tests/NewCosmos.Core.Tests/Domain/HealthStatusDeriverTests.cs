@@ -138,6 +138,22 @@ public class HealthStatusDeriverTests
             HealthStatusConstants.SEVERE_DISABILITY,
             Derive(disabilityType: "视力", disabilityLevel: "一级", age: 45, currentValue: "健康"));
 
+    [Theory]
+    [InlineData("Healthy")]
+    [InlineData("healthy")]
+    [InlineData("健康或良好")]
+    [InlineData("一般或较弱")]
+    public void 当前值为英文Key或旧显示值_视为标准档并被覆盖(string currentValue)
+    {
+        // 英文/旧显示值先经 DictValueMapper 归一到 Core key，不能被当成历史值挡住联动。
+        Assert.Equal(
+            HealthStatusConstants.SEVERE_DISEASE,
+            Derive("高血压", currentValue: currentValue));
+        Assert.Equal(
+            HealthStatusConstants.HEALTHY,
+            Derive(age: 30, currentValue: currentValue));
+    }
+
     // ── 年龄 / 容错 ──
 
     [Xunit.Fact]

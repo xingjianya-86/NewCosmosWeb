@@ -57,7 +57,10 @@ public static class TempReliefPrintDataBuilder
             {
                 if (!seenIdCards.Add(idCard)) continue;
             }
-            else if (TempReliefConstants.GetRelationshipDisplayName(m.Relation) == TempReliefConstants.RelationHead
+            else if (string.Equals(
+                    DictValueMapper.ToCoreRelationship(m.Relation),
+                    DictionaryConstants.FamilyRelationship.HEAD,
+                    StringComparison.Ordinal)
                      && string.Equals(m.MemberName?.Trim(), applicantName, StringComparison.Ordinal))
             {
                 continue;

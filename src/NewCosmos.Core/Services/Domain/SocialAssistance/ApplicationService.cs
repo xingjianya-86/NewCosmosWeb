@@ -1535,7 +1535,7 @@ public class ApplicationService : BaseService, IApplicationService
                 member.Gender ?? "", member.BirthDate, member.Age, member.Ethnicity ?? "", member.Phone ?? "",
                 source.HukouType ?? "", source.HukouAddress ?? "",
                 member.MaritalStatus ?? "", member.EducationLevel ?? "", member.PoliticalStatus ?? "", member.HealthStatus ?? "", member.WorkCapacity ?? "",
-                "本人/户主", "SharedLiving",
+                DictionaryConstants.FamilyRelationship.HEAD, "SharedLiving",
                 member.IsDisabled, member.DisabilityType ?? "", member.DisabilityLevel ?? "", member.IsSevereDisability, member.DisabilityCertificateNo ?? "",
                 member.DiseaseCategory ?? "", member.DiseaseName ?? "", member.SecondaryDisease ?? "", member.DiseaseCode ?? "", member.IsSevereDisease, member.IsLaborExempt,
                 member.HomeProvince ?? "", member.HomeCity ?? "", member.HomeDistrict ?? "", member.HomeTown ?? "", member.HomeVillage ?? "", member.HomeAddress ?? "",

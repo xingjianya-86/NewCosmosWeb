@@ -727,6 +727,11 @@ public class AssetVerificationService : BaseService, IAssetVerificationService
                 var memberResult = await _db.QueryAsync<FamilyMemberResult>(memberSql, ct, applicationId);
                 if (memberResult.HasValue)
                 {
+                    // 关系列落库为字典 key，历史记录展示统一转中文。
+                    foreach (var m in memberResult.Value)
+                    {
+                        m.Relationship = DictValueMapper.ToFormRelationship(m.Relationship);
+                    }
                     history.FamilyMembers = memberResult.Value;
                 }
 

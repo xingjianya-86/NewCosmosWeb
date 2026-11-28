@@ -143,6 +143,9 @@ public partial class DeathStatementService
 
             foreach (var item in items)
             {
+                // 关系列落库为字典 key（导入候选臂已用 SQL 显示映射转中文），出口统一再归一一次。
+                item.Relation = DictValueMapper.ToFormRelationship(item.Relation);
+
                 // 导入库候选：无申报/无登记，角标与副标题走候选口径
                 if (item.IsImportCandidate)
                 {

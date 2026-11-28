@@ -30,7 +30,7 @@ import type {
   ApplicationFormModel,
   ApplicationFormSupporter,
 } from './types'
-import { deriveHealthStatus, parseDisabilityCertificate } from './healthStatus'
+import { deriveHealthStatus, normalizeHealthStatus, parseDisabilityCertificate } from './healthStatus'
 import { ageFromBirthDate, getIdCardError, normalizeIdCard, parseIdCard } from './validation'
 
 const props = defineProps<{
@@ -91,7 +91,7 @@ function createSupporterRow(overrides: Partial<SupporterRow> = {}): SupporterRow
     educationLevel: '',
     politicalStatus: '',
     hukouType: 'Rural',
-    healthStatus: '健康',
+    healthStatus: '健康或良好',
     employmentStatus: '',
     workUnit: '',
     mainIncomeSource: '',
@@ -595,7 +595,11 @@ function ensureHouseholdHead(): void {
   if (members.value.some((item) => item.isHouseholdHead)) return
   const head = members.value.find((item) => item.isApplicant) ?? members.value[0]
   head.isHouseholdHead = true
-  if (!head.relation || head.relation === '其他') head.relation = '户主'
+  // 关系值统一为字典显示值「本人/户主」（与 RELATION_OPTIONS 的 value 一致）；
+  // 空值、'其他' 以及旧词表的 '户主' 都归一，否则下拉选不中、同表单两种写法并存。
+  if (!head.relation || head.relation === '其他' || head.relation === '户主') {
+    head.relation = '本人/户主'
+  }
 }
 
 function addSupporter(): void {
@@ -948,7 +952,7 @@ onMounted(() => {
               <label class="field">
                 <span class="field__label">健康状态</span>
                 <el-input
-                  :model-value="optionText(HEALTH_STATUS_OPTIONS, member.healthStatus)"
+                  :model-value="optionText(HEALTH_STATUS_OPTIONS, normalizeHealthStatus(member.healthStatus))"
                   readonly
                   class="field--readonly"
                   :disabled="isReadonly"
@@ -1406,7 +1410,7 @@ onMounted(() => {
               <label class="field">
                 <span class="field__label">健康状况</span>
                 <el-input
-                  :model-value="optionText(HEALTH_STATUS_OPTIONS, supporter.healthStatus)"
+                  :model-value="optionText(HEALTH_STATUS_OPTIONS, normalizeHealthStatus(supporter.healthStatus))"
                   readonly
                   class="field--readonly"
                   :disabled="isReadonly"

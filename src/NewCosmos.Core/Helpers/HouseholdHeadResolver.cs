@@ -62,7 +62,7 @@ public static class HouseholdHeadResolver
             IsApplicant = true,
             IsHouseholdHead = true,
             MemberCategory = MemberCategoryConstants.HOUSEHOLD_HEAD,
-            RelationshipToHead = "本人/户主",
+            RelationshipToHead = DictionaryConstants.FamilyRelationship.HEAD,
             Gender = string.IsNullOrWhiteSpace(application.Gender)
                 ? (IdCardValidator.ExtractGender(headIdCard) ?? string.Empty)
                 : application.Gender,

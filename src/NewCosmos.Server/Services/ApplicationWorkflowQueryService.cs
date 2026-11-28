@@ -521,17 +521,7 @@ public sealed class ApplicationWorkflowQueryService(
     /// 资产核查关系列存英文代码，旧版通过字典转中文；Web 端补齐常见值，
     /// 未知值回退 Core 字典显示。
     /// </summary>
-    private static string RelationshipText(string? code) => code switch
-    {
-        "Head" => "本人/户主",
-        "Spouse" => "配偶",
-        "Son" => "子",
-        "Daughter" => "女",
-        "Parent" => "父母",
-        "Father" => "父",
-        "Mother" => "母",
-        _ => DictDisplayHelper.GetFamilyRelationshipDisplay(code)
-    };
+    private static string RelationshipText(string? code) => DictValueMapper.ToFormRelationship(code);
 
     private static string? Normalize(string? value)
         => string.IsNullOrWhiteSpace(value) ? null : value.Trim();

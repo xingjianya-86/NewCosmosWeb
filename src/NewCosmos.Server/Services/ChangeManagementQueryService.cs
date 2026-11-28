@@ -762,7 +762,11 @@ public static class ChangeManagementQueryService
         => member.IsHouseholdHead
            || member.IsApplicant
            || string.Equals(member.MemberCategory, MemberCategoryConstants.HOUSEHOLD_HEAD, StringComparison.OrdinalIgnoreCase)
-           || string.Equals((member.RelationshipToHead ?? string.Empty).Trim(), "本人/户主", StringComparison.Ordinal);
+           // 关系列可能是历史中文（本人/户主、本人）也可能是字典 key（Head），统一归一后比较。
+           || string.Equals(
+               DictValueMapper.ToCoreRelationship(member.RelationshipToHead),
+               DictionaryConstants.FamilyRelationship.HEAD,
+               StringComparison.Ordinal);
 
     public static string MemberCategoryText(string? code) => (code ?? string.Empty).Trim() switch
     {

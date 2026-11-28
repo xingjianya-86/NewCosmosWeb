@@ -1807,8 +1807,8 @@ public static class TempReliefEndpoints
                 request.ApplicantIdCard?.Trim(),
                 StringComparison.OrdinalIgnoreCase))
             .Where(m => !(string.Equals(
-                    TempReliefConstants.GetRelationshipDisplayName(m.Relation),
-                    TempReliefConstants.RelationHead,
+                    DictValueMapper.ToCoreRelationship(m.Relation),
+                    DictionaryConstants.FamilyRelationship.HEAD,
                     StringComparison.Ordinal)
                 && string.Equals(
                     m.MemberName?.Trim(),

@@ -58,12 +58,15 @@ export const RELATION_OPTIONS: SelectOption[] = [
 ]
 
 /**
- * 健康状况：按旧字典 HealthStatuses 的 5 个业务档 + 其他（旧字典无“患病/残疾”，已移除；
- * 历史“患病/残疾”值由后端原样保留，不再错误并入“一般”）。
+ * 健康状况：按字典 HealthStatuses 的 item_value（nc_dict_items 权威）——
+ * 健康或良好 / 一般或较弱 / 重病 / 重残 / 重病且重残 / 其他。
+ * 与后端 DictValueMapper.ToFormHealthStatus、DefaultValuesConstants.HEALTH_STATUS、
+ * PageDefaultValues.HealthOptions、DictDisplayHelper.GetHealthStatusDisplay 同词表。
+ * 历史短词「健康 / 一般」由 normalizeHealthStatus 归一，不在选项里重复出现。
  */
 export const HEALTH_STATUS_OPTIONS: SelectOption[] = [
-  { label: '健康', value: '健康' },
-  { label: '一般', value: '一般' },
+  { label: '健康或良好', value: '健康或良好' },
+  { label: '一般或较弱', value: '一般或较弱' },
   { label: '重病', value: '重病' },
   { label: '重残', value: '重残' },
   { label: '重病且重残', value: '重病且重残' },

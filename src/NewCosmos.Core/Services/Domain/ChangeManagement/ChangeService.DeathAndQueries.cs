@@ -89,7 +89,7 @@ public partial class ChangeService
                 }
             }
             var updNew = await _db.ExecuteNonQueryAsync(
-                "UPDATE nc_biz_family_members SET relationship_to_head = '本人/户主', is_applicant = true, updated_at = NOW() WHERE id = $1 AND application_id = $2;",
+                "UPDATE nc_biz_family_members SET relationship_to_head = 'Head', is_applicant = true, updated_at = NOW() WHERE id = $1 AND application_id = $2;",
                 ct, newHeadMemberId, newApplicationId);
             if (updNew.IsFailure)
             {
@@ -599,7 +599,7 @@ public partial class ChangeService
                 CASE WHEN id = $2 THEN true ELSE is_applicant END,
                 gender, birth_date, age, ethnicity, phone,
                 hukou_type, hukou_address, marital_status, education_level, political_status,
-                CASE WHEN id = $2 THEN '本人/户主' ELSE relationship_to_head END,
+                CASE WHEN id = $2 THEN 'Head' ELSE relationship_to_head END,
                 health_status, work_capacity, is_disabled,
                 disability_type, disability_level, is_severe_disability, employment_status, annual_income,
                 member_category, disability_certificate_no, disease_category, disease_name,
@@ -767,7 +767,9 @@ public partial class ChangeService
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,$10,$11,$12,$13,$13,NOW());";
             var deathInsertResult = await _db.ExecuteNonQueryAsync(deathSql, ct,
                 context.ApplicationId, deceasedHead.Id > 0 ? deceasedHead.Id : (long?)null, deceasedHead.Name, deceasedHead.IdCard,
-                string.IsNullOrEmpty(deceasedHead.RelationshipToHead) ? "本人/户主" : deceasedHead.RelationshipToHead,
+                string.IsNullOrEmpty(deceasedHead.RelationshipToHead)
+                    ? DictionaryConstants.FamilyRelationship.HEAD
+                    : DictValueMapper.ToCoreRelationship(deceasedHead.RelationshipToHead),
                 context.DeathDate, context.DeathTime, context.DeathReason, context.DeathCertificateNo,
                 context.NewHeadIdCard, context.NewHeadName, newApplicationId,
                 context.OperatorName);
@@ -1025,7 +1027,9 @@ public partial class ChangeService
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,NULL,NULL,NULL,$10,$10,NOW());";
             var deathInsertResult = await _db.ExecuteNonQueryAsync(deathSql, ct,
                 context.ApplicationId, deceasedHead.Id > 0 ? deceasedHead.Id : (long?)null, deceasedHead.Name, deceasedHead.IdCard,
-                string.IsNullOrEmpty(deceasedHead.RelationshipToHead) ? "本人/户主" : deceasedHead.RelationshipToHead,
+                string.IsNullOrEmpty(deceasedHead.RelationshipToHead)
+                    ? DictionaryConstants.FamilyRelationship.HEAD
+                    : DictValueMapper.ToCoreRelationship(deceasedHead.RelationshipToHead),
                 context.DeathDate, context.DeathTime, context.DeathReason, context.DeathCertificateNo,
                 context.OperatorName);
             if (deathInsertResult.IsFailure)

@@ -263,9 +263,11 @@ public class QuickVerifyService : BaseService, IQuickVerifyService
                 SourceDisplay = p.SourceDisplay,
                 Name = p.Name,
                 // PersonSearchResult 实体未映射 relationship 列：从补查的家庭成员里取该人的关系
-                Relationship = p.FamilyMembers?.FirstOrDefault(m =>
-                        string.Equals(m.IdCard?.Trim(), idCard, StringComparison.OrdinalIgnoreCase))
-                    ?.RelationshipToHead ?? string.Empty,
+                // 关系列落库为字典 key，展示统一转中文。
+                Relationship = DictValueMapper.ToFormRelationship(
+                    p.FamilyMembers?.FirstOrDefault(m =>
+                            string.Equals(m.IdCard?.Trim(), idCard, StringComparison.OrdinalIgnoreCase))
+                        ?.RelationshipToHead),
                 Phone = p.Phone,
                 Address = string.Join("", new[] { p.City, p.District, p.Town, p.Village }
                     .Where(s => !string.IsNullOrWhiteSpace(s))),
@@ -417,7 +419,13 @@ public class QuickVerifyService : BaseService, IQuickVerifyService
         if (result.IsFailure)
             return Result.Failure<List<DeathRow>>(result.ErrorCode ?? ErrorCodes.DB_QUERY_ERROR,
                 $"死亡记录查询失败: {result.Message}");
-        return Result.Success(result.Value ?? new List<DeathRow>());
+        var rows = result.Value ?? new List<DeathRow>();
+        // 关系列落库为字典 key，列表展示统一转中文。
+        foreach (var row in rows)
+        {
+            row.RelationshipToHead = DictValueMapper.ToFormRelationship(row.RelationshipToHead);
+        }
+        return Result.Success(rows);
     }
 
     private async Task<Result<List<TempReliefRow>>> QueryTempReliefsAsync(string idCard, CancellationToken ct)

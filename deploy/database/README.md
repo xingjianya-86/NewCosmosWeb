@@ -28,6 +28,10 @@
 | 003 | `003_elderly_info_change.sql` | 高龄信息变更（变更记录相关表/列） |
 | 004 | `004_device_capabilities.sql` | 设备能力列（`nc_sys_print_devices.capabilities_json`，Agent 心跳能力上报） |
 | 005 | `005_ai_judgment_cache.sql` | AI 判定缓存表（重病判定结果缓存） |
+| 006 | `006_remote_assistance.sql` | 异地协助轻流程分支（`application_type` 列） |
+| 007 | `007_dict_value_cleanup.sql` | 字典字段值统一：历史中文脏值 → `nc_dict_items.item_key`（幂等 UPDATE） |
+| 008 | `008_relationship_cleanup.sql` | 家庭关系列统一：历史中文关系值 → `FamilyRelationships.item_key`（幂等 UPDATE） |
+| 009 | `009_other_difficulty_relationship_cleanup.sql` | 其他困难台账人员表关系列统一 → `FamilyRelationships.item_key`（幂等 UPDATE） |
 
 首次部署沿用 `NC_AUTO_MIGRATE=true` 跑完上述迁移后改回 `false`
 （见仓库根 `deploy/README.md` 第 5 节第 3 步）。

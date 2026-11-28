@@ -631,7 +631,7 @@ const beneficiaryOptions = computed<BeneficiaryOption[]>(() => {
       idCard: applicant.idCard.trim(),
       gender: applicant.gender,
       age: applicant.age ?? calculateAge(applicant.idCard),
-      relation: '户主',
+      relation: '本人/户主',
       isHead: true,
     })
   }
@@ -700,18 +700,24 @@ const modeHint = computed(() => {
   return ''
 })
 
+/**
+ * 户主关系的两种历史显示值：旧词表「户主」/ 统一词表「本人/户主」（DictValueMapper）。
+ * 判断户主一律走这里，拿单一文本比较会在换词表时静默失效。
+ */
+const HEAD_RELATION_LABELS: ReadonlySet<string> = new Set(['户主', '本人/户主'])
+
 function isHeadMemberRow(row: MemberRow): boolean {
   if (row.idCard.trim() && applicant.idCard.trim()) {
     return row.idCard.trim().toLowerCase() === applicant.idCard.trim().toLowerCase()
   }
-  return row.relation.trim() === '户主' && row.memberName.trim() === applicant.name.trim()
+  return HEAD_RELATION_LABELS.has(row.relation.trim()) && row.memberName.trim() === applicant.name.trim()
 }
 
 function isApplicantSnapshot(member: TempReliefMemberSnapshot): boolean {
   if (member.idCard.trim() && applicant.idCard.trim()) {
     return member.idCard.trim().toLowerCase() === applicant.idCard.trim().toLowerCase()
   }
-  return member.relation === '户主' && member.memberName.trim() === applicant.name.trim()
+  return HEAD_RELATION_LABELS.has(member.relation.trim()) && member.memberName.trim() === applicant.name.trim()
 }
 
 function ensureCategoryOption(value: string): void {

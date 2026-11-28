@@ -6,6 +6,7 @@ import {
   type ApplicationFormSupporter,
 } from './types'
 import { normalizeIdCard, parseIdCard } from './validation'
+import { normalizeDisabilityLevel, normalizeDisabilityType, normalizeHealthStatus } from './healthStatus'
 
 /** 克隆表单为普通对象，避免把 Vue 响应式代理直接交给 axios/JSON。 */
 export function cloneForm(form: ApplicationFormModel): ApplicationFormModel {
@@ -36,6 +37,25 @@ export function cloneForm(form: ApplicationFormModel): ApplicationFormModel {
   return copy
 }
 
+/** 载入时把身体状况/残疾类型/等级归一化为中文档位（历史值原样保留），避免英文 key 渗入表单。 */
+function normalizeHealthFields<T>(row: T): T {
+  const target = row as {
+    healthStatus?: string
+    disabilityType?: string
+    disabilityLevel?: string
+  }
+  if (typeof target.healthStatus === 'string') {
+    target.healthStatus = normalizeHealthStatus(target.healthStatus)
+  }
+  if (typeof target.disabilityType === 'string') {
+    target.disabilityType = normalizeDisabilityType(target.disabilityType)
+  }
+  if (typeof target.disabilityLevel === 'string') {
+    target.disabilityLevel = normalizeDisabilityLevel(target.disabilityLevel)
+  }
+  return row
+}
+
 /** 兼容后端缺字段的返回：以 createEmptyForm 为底逐段合并。 */
 export function normalizeForm(
   input: Partial<ApplicationFormModel> | null | undefined,
@@ -51,12 +71,18 @@ export function normalizeForm(
     status: input.status || empty.status,
     statusText: input.statusText || empty.statusText,
     currentStep: Number(input.currentStep ?? empty.currentStep) || 1,
-    basic: { ...empty.basic, ...(input.basic ?? {}) },
-    members: Array.isArray(input.members) ? input.members.map((item) => createMember(item)) : [],
-    supporters: Array.isArray(input.supporters)
-      ? input.supporters.map((item) => createSupporter(item))
+    // 身体状况统一归一化为中文档位（英文 Core key / 旧显示值在加载时即纠正），
+    // 保证第 1 步/第 2 步显示与联动守卫拿到的都是表单值。
+    basic: normalizeHealthFields({ ...empty.basic, ...(input.basic ?? {}) }),
+    members: Array.isArray(input.members)
+      ? input.members.map((item) => normalizeHealthFields(createMember(item)))
       : [],
-    caregivers: Array.isArray(input.caregivers) ? input.caregivers : [],
+    supporters: Array.isArray(input.supporters)
+      ? input.supporters.map((item) => normalizeHealthFields(createSupporter(item)))
+      : [],
+    caregivers: Array.isArray(input.caregivers)
+      ? input.caregivers.map((item) => normalizeHealthFields({ ...item }))
+      : [],
     economy: { ...empty.economy, ...(input.economy ?? {}) },
     economicDetails: {
       ...empty.economicDetails,
@@ -82,7 +108,7 @@ export function createMember(
     ethnicity: 'Han',
     phone: '',
     hukouType: 'Rural',
-    healthStatus: '健康',
+    healthStatus: '健康或良好',
     employmentStatus: '',
     workUnit: '',
     mainIncomeSource: '',
@@ -132,7 +158,7 @@ export function createSupporter(
 /** 新表单默认户主：姓名/身份证/性别/年龄取自第 1 步申请人。 */
 export function createHeadMember(basic: ApplicationFormBasic): ApplicationFormMember {
   const member = createMember({
-    relation: '户主',
+    relation: '本人/户主',
     isHouseholdHead: true,
     isApplicant: true,
     name: basic.applicantName.trim(),

@@ -86,6 +86,8 @@ public class DynamicManagementRecordService : BaseService, IDynamicManagementRec
             var sizeResult = await _db.ExecuteScalarAsync<long>(
                 @"SELECT COUNT(*) + CASE WHEN COUNT(*) FILTER (WHERE is_applicant = TRUE
                                               OR relationship_to_head = 'Head'
+                                              -- 历史中文关系值与字典 key 并存，两套都算户主行
+                                              OR relationship_to_head IN ('本人/户主', '本人', '户主')
                                               OR member_category IS NULL OR member_category = '') > 0
                                           THEN 0 ELSE 1 END
                   FROM nc_biz_family_members

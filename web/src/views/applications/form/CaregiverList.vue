@@ -109,7 +109,7 @@ function createCaregiver(): ApplicationFormCaregiver {
     hukouType: 'Rural',
     educationLevel: '',
     politicalStatus: '',
-    healthStatus: '健康',
+    healthStatus: '健康或良好',
     employmentStatus: '',
     mainIncomeSource: '',
     workUnit: '',

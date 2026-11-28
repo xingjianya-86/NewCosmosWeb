@@ -1,4 +1,5 @@
 using NewCosmos.Constants;
+using NewCosmos.Helpers;
 using NewCosmos.Models.Entities;
 using NewCosmos.Models.Results;
 using NewCosmos.Server.Contracts;
@@ -266,12 +267,13 @@ public sealed class ApplicationQueryService(IDatabaseService database)
                 member.Id,
                 member.Name ?? string.Empty,
                 member.IdCard ?? string.Empty,
-                member.RelationshipToHead ?? string.Empty,
+                DictValueMapper.ToFormRelationship(member.RelationshipToHead),
                 member.Gender ?? string.Empty,
                 birthDate,
                 CalculateAge(birthDate),
-                member.HealthStatus ?? string.Empty,
-                member.EmploymentStatus ?? string.Empty,
+                // 身体状况/就业状况落库为 Core key，详情输出统一转中文，避免回显英文。
+                DictValueMapper.ToFormHealthStatus(member.HealthStatus),
+                DictValueMapper.ToFormEmploymentStatus(member.EmploymentStatus),
                 member.MonthlyIncomeCapacity ?? 0m));
         }
 
