@@ -1,7 +1,7 @@
 {
-    "generatedAt":  "2026-11-28T16:21:04+08:00",
+    "generatedAt":  "2026-11-28T17:13:23+08:00",
     "webVersion":  "2.0.20261129",
-    "codeVersion":  "2.0.20261128",
+    "codeVersion":  "2.0.20261129",
     "pageUrl":  "https://cosmos.sua17.cn/",
     "entries":  [
                     {
@@ -49,8 +49,8 @@
                         "terminal":  "T1",
                         "name":  "天枢 · 御座",
                         "platform":  "Windows",
-                        "version":  "2.0.20261128",
-                        "url":  "https://update.sua17.cn:20000/newcosmos/stable/NewCosmosSetup_2.0.20261128.exe",
+                        "version":  "2.0.20261129",
+                        "url":  "https://update.sua17.cn:20000/newcosmos/stable/NewCosmosSetup_2.0.20261129.exe",
                         "isDownload":  true,
                         "note":  "独立应用端 · 全功能办理 / 打印 / Office"
                     },
@@ -59,8 +59,8 @@
                         "terminal":  "T3",
                         "name":  "天玑 · 行杖",
                         "platform":  "Android",
-                        "version":  "2.0.20261128",
-                        "url":  "https://update.sua17.cn:20000/newcosmos/android/NewCosmosSetup_2.0.20261128.apk",
+                        "version":  "2.0.20261129",
+                        "url":  "https://update.sua17.cn:20000/newcosmos/android/NewCosmosSetup_2.0.20261129.apk",
                         "isDownload":  true,
                         "note":  "独立应用端 · 入户采集 / 现场录入"
                     }
