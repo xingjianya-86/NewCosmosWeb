@@ -109,10 +109,11 @@ function Invoke-Remote {
     $sshArgs = Get-SshBaseArgs -TargetHost $TargetHost
     $sshArgs += $Command
     $oldEap = $ErrorActionPreference
-    $ErrorActionPreference = 'SilentlyContinue'
+    # 必须用 Continue 而不是 SilentlyContinue：SilentlyContinue 会把 stderr 的
+    # ErrorRecord 整个吞掉（实测 errText 恒为空），失败时就看不到服务器报错原因。
+    # Continue + 2>&1 既保留 stderr 文本，又不会刷 NativeCommandError 到控制台。
+    $ErrorActionPreference = 'Continue'
     try {
-        # 2>&1 把 SSH 登录横幅并进输出流：PS5.1 下仅用 2> 时，横幅可能在 EAP 还原后
-        # 仍被当 NativeCommandError 刷到控制台（发布日志里的 "Debian GNU/Linux 13"）。
         $raw = & ssh @sshArgs 2>&1
         $code = $LASTEXITCODE
         $errText = (($raw | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
@@ -134,7 +135,8 @@ function Invoke-RemoteCapture {
     $sshArgs = Get-SshBaseArgs -TargetHost $TargetHost
     $sshArgs += $Command
     $oldEap = $ErrorActionPreference
-    $ErrorActionPreference = 'SilentlyContinue'
+    # 同 Invoke-Remote：Continue 才能拿到 stderr 文本，SilentlyContinue 会吞掉。
+    $ErrorActionPreference = 'Continue'
     try {
         $raw = & ssh @sshArgs 2>&1
         $code = $LASTEXITCODE
@@ -168,10 +170,10 @@ function Copy-ToRemote {
     )
     if ($Recurse) { $scpArgs += "-r" }
     $scpArgs += @($LocalPath, "$RemoteUser@${TargetHost}:$RemotePath")
-    # SSH/scp 会把服务器横幅写到 stderr；用 2>&1 并进输出流，避免 PS5.1 在 EAP 还原后
-    # 仍把它当 NativeCommandError 刷到控制台。真正的失败由 $LASTEXITCODE 判定。
+    # SSH/scp 会把服务器横幅写到 stderr；用 2>&1 并进输出流 + Continue，
+    # 既不刷 NativeCommandError 到控制台，又能在失败时拿到 scp 的具体报错。
     $oldEap = $ErrorActionPreference
-    $ErrorActionPreference = 'SilentlyContinue'
+    $ErrorActionPreference = 'Continue'
     try {
         $raw = & scp @scpArgs 2>&1
         $exitCode = $LASTEXITCODE
