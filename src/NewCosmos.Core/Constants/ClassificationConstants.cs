@@ -440,6 +440,36 @@ public static class ClassificationConstants
         };
 
         /// <summary>
+        /// 重度等级集合（key 或中文显示值都认，大小写不敏感）。
+        /// 历史行 disability_level 里 Level1 与“一级”并存，派生/落库口径两套都要吃。
+        /// </summary>
+        private static readonly HashSet<string> SevereLevelKeys = new(
+            [DisabilityConstants.LEVEL1, DisabilityConstants.LEVEL2],
+            StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// 等级归一为 key：中文显示值（一级…四级）转 Level1…Level4，其余（含未知值）原样返回。
+        /// </summary>
+        public static string NormalizeLevelKey(string? level) => level?.Trim() switch
+        {
+            "一级" => DisabilityConstants.LEVEL1,
+            "二级" => DisabilityConstants.LEVEL2,
+            "三级" => DisabilityConstants.LEVEL3,
+            "四级" => DisabilityConstants.LEVEL4,
+            var value => value ?? string.Empty
+        };
+
+        /// <summary>
+        /// 等级是否为重度（一级/二级）——key 与中文显示值两套都认、大小写不敏感。
+        /// 身体状况派生（HealthStatusDeriver）与 is_severe_disability 落库共用此口径。
+        /// </summary>
+        public static bool IsSevereLevel(string? level)
+        {
+            var key = NormalizeLevelKey(level);
+            return key.Length > 0 && SevereLevelKeys.Contains(key);
+        }
+
+        /// <summary>
         /// 残疾等级 key 是否为重度（一级或二级）
         /// </summary>
         public static bool IsSevere(string levelKey) =>

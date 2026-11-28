@@ -151,7 +151,7 @@ tables:
         type: VARCHAR(20)
         comment: 劳动能力
       - name: health_status
-        type: VARCHAR(20)
+        type: VARCHAR(50)
         comment: 健康状况
       - name: hukou_type
         type: VARCHAR(20)

@@ -154,7 +154,7 @@ tables:
         nullable: true
         comment: 残疾等级
       - name: health_status
-        type: VARCHAR(20)
+        type: VARCHAR(50)
         nullable: true
         comment: 健康状况
       

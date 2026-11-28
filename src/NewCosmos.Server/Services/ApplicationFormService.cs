@@ -1633,9 +1633,7 @@ public sealed class ApplicationFormService(
             supporter.PoliticalStatus = dto.PoliticalStatus is null
                 ? existing?.PoliticalStatus ?? string.Empty
                 : ToCorePoliticalStatus(dto.PoliticalStatus);
-            supporter.HealthStatus = dto.HealthStatus is null
-                ? existing?.HealthStatus ?? string.Empty
-                : ToCoreHealthStatus(dto.HealthStatus);
+            // 健康状况的派生放到下方疾病/残疾字段算完之后（与共同生活成员同表同规则）。
             supporter.EmploymentStatus = dto.EmploymentStatus is null
                 ? existing?.EmploymentStatus ?? string.Empty
                 : ToCoreEmploymentStatus(dto.EmploymentStatus);
@@ -1704,6 +1702,17 @@ public sealed class ApplicationFormService(
                 ?? existingHealth?.DisabilityCertificateNo
                 ?? string.Empty;
 
+            // 身体状况派生（写侧·赡养行，与成员同表同规则）：一级疾病=diseaseCategory、
+            // 年龄取自赡养人身份证；dto.HealthStatus 为 null 时沿用旧值作“当前值”
+            // （历史非标准值仍由派生守卫原样保留）。
+            supporter.HealthStatus = ToCoreHealthStatus(HealthStatusDeriver.Derive(
+                diseaseCategory,
+                disabilityType,
+                disabilityLevel,
+                IdCardValidator.ExtractAgeBasic(idCard),
+                isSevereDisease,
+                dto.HealthStatus ?? existing?.HealthStatus ?? string.Empty));
+
             // 户籍文本列：SUPPORTER 表没有 hukou_address 明细字段，按四级名称拼接；
             // 本次未传户籍（旧客户端）时沿用旧文本，避免清空历史地址。
             var hukouAddress = ComposeRegionAddress(
@@ -1724,8 +1733,10 @@ public sealed class ApplicationFormService(
                 disabilityType,
                 disabilityLevel,
                 disabilityCertificateNo,
-                disabilityType.Length > 0 || disabilityLevel.Length > 0,
-                ClassificationConstants.DisabilityLevel.IsSevereForAssistance(disabilityLevel, disabilityType),
+                // is_disabled / is_severe_disability 与成员创建路径同口径：
+                // 类型非空 / 等级 ∈ {Level1, Level2, 一级, 二级}（不再走 IsSevereForAssistance 的三级智/精口径）
+                disabilityType.Length > 0,
+                ClassificationConstants.DisabilityLevel.IsSevereLevel(disabilityLevel),
                 hukouAddress));
 
             // 年费最后赋值：避免 ObservableObject 的月费/月数/人数联动覆盖本次公式结果。
@@ -1986,7 +1997,15 @@ public sealed class ApplicationFormService(
         application.EducationLevel = ToCoreEducationLevel(basic.EducationLevel);
         application.MaritalStatus = ToCoreMaritalStatus(basic.MaritalStatus);
         application.PoliticalStatus = ToCorePoliticalStatus(basic.PoliticalStatus);
-        application.HealthStatus = ToCoreHealthStatus(basic.HealthStatus);
+        // 身体状况派生（写侧）：一级疾病=diseaseCategory、残疾类型/等级=中文表单值，
+        // 年龄取自身份证（解析失败视为未满 60），派生后再归一为 Core key。
+        application.HealthStatus = ToCoreHealthStatus(HealthStatusDeriver.Derive(
+            basic.DiseaseCategory,
+            basic.DisabilityType,
+            basic.DisabilityLevel,
+            IdCardValidator.ExtractAgeBasic(application.ApplicantIdCard),
+            basic.IsSevereDisease,
+            basic.HealthStatus));
         // 疾病口径（与 Core ClassificationService 的主表快照一致）：
         // disease_name = 一级分类 DiseaseCategory，secondary_disease_name = 二级疾病。
         // DiseaseName 仍兼容旧前端（只传 diseaseName 表示二级疾病）。
@@ -2033,7 +2052,8 @@ public sealed class ApplicationFormService(
             return;
         }
 
-        application.HealthStatus = ToCoreHealthStatus(head.HealthStatus);
+        // 健康状况派生放到疾病/残疾/重病三项回写之后：派生输入取主表最终值
+        // （Step1 权威、户主卡补空），当前值仍取户主卡原值（历史非标准值原样保留）。
         application.DisabilityType = ToCoreDisabilityType(head.DisabilityType);
         application.DisabilityLevel = ToCoreDisabilityLevel(head.DisabilityLevel);
         // 户主卡疾病与 Step1 同源：一级→disease_name，二级→secondary_disease_name。
@@ -2059,6 +2079,17 @@ public sealed class ApplicationFormService(
         {
             application.IsSevereDisease = head.IsSevereDisease;
         }
+
+        // 身体状况派生（写侧·户主卡）：输入用主表最终的疾病/残疾/重病值，
+        // 年龄按户主身份证（缺失时回落申请人身份证），当前值=户主卡传来的健康状况。
+        application.HealthStatus = ToCoreHealthStatus(HealthStatusDeriver.Derive(
+            application.DiseaseName,
+            application.DisabilityType,
+            application.DisabilityLevel,
+            IdCardValidator.ExtractAgeBasic(
+                FirstNonEmpty(head.IdCard, application.ApplicantIdCard)),
+            application.IsSevereDisease,
+            head.HealthStatus));
 
         // Step2 户主卡与 Step1 共用同一人：户主卡有值的新增字段回写主表，
         // 避免“只在成员卡修改”时因户主行不参与全删全插而丢失。
@@ -2437,7 +2468,15 @@ public sealed class ApplicationFormService(
             ToFormEthnicity(member.Ethnicity),
             member.Phone ?? string.Empty,
             member.HukouType ?? string.Empty,
-            ToFormHealthStatus(member.HealthStatus),
+            // 身体状况（读侧）：与写侧同规则派生；一级疾病取 NormalizeDiseaseFields 归一后的
+            // category，年龄按身份证解析（与 ToMemberCreateRequest 写侧同源）。
+            HealthStatusDeriver.Derive(
+                category,
+                member.DisabilityType,
+                member.DisabilityLevel,
+                IdCardValidator.ExtractAgeBasic(member.IdCard ?? string.Empty),
+                member.IsSevereDisease,
+                ToFormHealthStatus(member.HealthStatus)),
             ToFormEmploymentStatus(member.EmploymentStatus),
             member.WorkUnit ?? string.Empty,
             member.MainIncomeSource ?? string.Empty,
@@ -2520,7 +2559,14 @@ public sealed class ApplicationFormService(
             ToFormEducationLevel(member.EducationLevel),
             ToFormPoliticalStatus(member.PoliticalStatus),
             member.HukouType ?? string.Empty,
-            ToFormHealthStatus(member.HealthStatus),
+            // 身体状况（读侧）：赡养行与成员同表同规则派生。
+            HealthStatusDeriver.Derive(
+                diseaseCategory,
+                member.DisabilityType,
+                member.DisabilityLevel,
+                IdCardValidator.ExtractAgeBasic(member.IdCard ?? string.Empty),
+                member.IsSevereDisease,
+                ToFormHealthStatus(member.HealthStatus)),
             ToFormEmploymentStatus(member.EmploymentStatus),
             member.WorkUnit ?? string.Empty,
             member.MainIncomeSource ?? string.Empty,
@@ -2581,6 +2627,8 @@ public sealed class ApplicationFormService(
             ToFormEducationLevel(supporter.EducationLevel),
             ToFormPoliticalStatus(supporter.PoliticalStatus),
             supporter.HukouType ?? string.Empty,
+            // 兜底映射无疾病/残疾列可用（Supporter 实体没有这些字段），无法按规则派生，
+            // 保持原值直出——正常路径走 ToSupporterDto（FamilyMember 行），必然已派生。
             ToFormHealthStatus(supporter.HealthStatus),
             ToFormEmploymentStatus(supporter.EmploymentStatus),
             supporter.WorkUnit ?? string.Empty,
@@ -2611,9 +2659,20 @@ public sealed class ApplicationFormService(
         ApplicationFormMemberDto member,
         ApplicationFormBasicDto? basic)
     {
-        var healthStatus = ToCoreHealthStatus(member.HealthStatus);
         var disabilityType = ToCoreDisabilityType(member.DisabilityType);
         var disabilityLevel = ToCoreDisabilityLevel(member.DisabilityLevel);
+        // 残疾标记按类型/等级派生后覆盖写入（与 FamilyMember.UpdateHealthStatus 同口径）：
+        // is_disabled = 残疾类型非空；is_severe_disability = 等级 ∈ {Level1, Level2, 一级, 二级}。
+        var isDisabled = disabilityType.Length > 0;
+        var isSevereDisability = ClassificationConstants.DisabilityLevel.IsSevereLevel(disabilityLevel);
+        // 身体状况派生（写侧·共同生活成员）：一级疾病 = diseaseCategory，年龄取自身份证。
+        var healthStatus = ToCoreHealthStatus(HealthStatusDeriver.Derive(
+            member.DiseaseCategory,
+            disabilityType,
+            disabilityLevel,
+            IdCardValidator.ExtractAgeBasic(member.IdCard),
+            member.IsSevereDisease,
+            member.HealthStatus));
 
         var createRequest = new FamilyMemberCreateRequest
         {
@@ -2629,11 +2688,8 @@ public sealed class ApplicationFormService(
             HukouType = member.HukouType ?? string.Empty,
             HealthStatus = healthStatus,
             // is_severe_disability 列（CreateRequest 字段历史命名为 HasSevereIllness）
-            HasSevereIllness = ClassificationConstants.DisabilityLevel.IsSevereForAssistance(
-                disabilityLevel, disabilityType),
-            HasDisability = member.HasDisability
-                || disabilityType.Length > 0
-                || disabilityLevel.Length > 0,
+            HasSevereIllness = isSevereDisability,
+            HasDisability = isDisabled,
             DisabilityType = disabilityType,
             DisabilityLevel = disabilityLevel,
             // 成员表 disease_name=一级分类（DiseaseCategory），secondary_disease=二级疾病；
@@ -2897,7 +2953,15 @@ public sealed class ApplicationFormService(
             ToFormEducationLevel(app.EducationLevel),
             ToFormMaritalStatus(app.MaritalStatus),
             ToFormPoliticalStatus(app.PoliticalStatus),
-            ToFormHealthStatus(app.HealthStatus),
+            // 身体状况（读侧）：Core 值转表单值后按共享规则派生，输出仍是表单值。
+            // 一级疾病取 disease_name（见上方注释），残疾类型/等级可能是 Core key 或历史中文值。
+            HealthStatusDeriver.Derive(
+                diseaseCategory,
+                app.DisabilityType,
+                app.DisabilityLevel,
+                IdCardValidator.ExtractAgeBasic(app.ApplicantIdCard ?? string.Empty),
+                app.IsSevereDisease,
+                ToFormHealthStatus(app.HealthStatus)),
             secondaryDisease,
             ToFormDisabilityType(app.DisabilityType),
             ToFormDisabilityLevel(app.DisabilityLevel),

@@ -75,7 +75,7 @@ tables:
         nullable: true
         comment: 与户主关系：配偶、子女、父母、兄弟姐妹等
       - name: health_status
-        type: character varying(20)
+        type: character varying(50)
         nullable: true
         comment: 健康状况：健康、一般、较差
       - name: work_capacity
