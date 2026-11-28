@@ -30,6 +30,7 @@ import type {
   ApplicationFormModel,
   ApplicationFormSupporter,
 } from './types'
+import { deriveHealthStatus, parseDisabilityCertificate } from './healthStatus'
 import { ageFromBirthDate, getIdCardError, normalizeIdCard, parseIdCard } from './validation'
 
 const props = defineProps<{
@@ -144,7 +145,10 @@ async function handleMemberDiseaseCodeChange(member: MemberRow): Promise<void> {
     const result = await getIcd10(code)
     if (member.diseaseCode.trim().toLowerCase() !== code.toLowerCase()) return
     if (!member.diseaseName?.trim() && result.name) member.diseaseName = result.name
-    if (!member.diseaseCategory && result.category) member.diseaseCategory = result.category
+    if (!member.diseaseCategory && result.category) {
+      member.diseaseCategory = result.category
+      deriveRowHealth(member) // 程序化回填一级疾病：@change 不触发，函数直调派生
+    }
     // 名称为空 = ICD-10 字典未命中：名称不可信，不判定。
     if (!result.name?.trim() || isReadonly.value) return
     void requestRowAiJudgment(member, code, result.name, () => member.diseaseCode)
@@ -162,7 +166,10 @@ async function handleSupporterDiseaseCodeChange(supporter: SupporterRow): Promis
     if (!supporter.secondaryDiseaseName?.trim() && result.name) {
       supporter.secondaryDiseaseName = result.name
     }
-    if (!supporter.diseaseCategory && result.category) supporter.diseaseCategory = result.category
+    if (!supporter.diseaseCategory && result.category) {
+      supporter.diseaseCategory = result.category
+      deriveRowHealth(supporter) // 程序化回填一级疾病：@change 不触发，函数直调派生
+    }
     if (!result.name?.trim() || isReadonly.value) return
     void requestRowAiJudgment(supporter, code, result.name, () => supporter.diseaseCode)
   } catch {
@@ -266,6 +273,62 @@ const visibleMembers = computed<MemberRow[]>(() =>
 /** 非草稿（已提交/审批中/已通过等）或查看/复核模式只读，禁用全部输入。 */
 const isReadonly = computed(() => props.form.status !== 'Draft' || Boolean(props.readonly))
 
+// ── 身体状况即时派生（残疾证号 / 疾病分类 / 重病勾选 / 年龄）────────
+// 成员与赡养人同构：程序化赋值必须函数直调，@change 只覆盖用户手选；
+// 与 Core HealthStatusDeriver 同口径（见 healthStatus.ts）；
+// 只读态不派生（展示后端已派生的值）；历史值由覆盖守卫保留。
+
+/** 行级派生输入：成员/赡养人/AI 判定行结构上都满足（字段均可选，运行时取真实行值）。 */
+type HealthDeriveRow = {
+  diseaseCategory?: string | null
+  disabilityType?: string | null
+  disabilityLevel?: string | null
+  age?: number | null
+  idCard?: string | null
+  isSevereDisease?: boolean | null
+  healthStatus?: string | null
+  hasDisability?: boolean
+}
+
+/** 年龄兜底：优先行上已有 age，为空再从身份证解析（失败按 <60 处理）。 */
+function rowAge(row: HealthDeriveRow): number | null {
+  if (typeof row.age === 'number' && Number.isFinite(row.age)) return row.age
+  return parseIdCard(row.idCard)?.age ?? null
+}
+
+/** 重算本行身体状况并写回 row.healthStatus；成员行同步 hasDisability（徽标用）。 */
+function deriveRowHealth(row: HealthDeriveRow): void {
+  if (isReadonly.value) return
+  row.healthStatus = deriveHealthStatus({
+    diseaseCategory: row.diseaseCategory,
+    disabilityType: row.disabilityType,
+    disabilityLevel: row.disabilityLevel,
+    age: rowAge(row),
+    isSevereDisease: row.isSevereDisease,
+    currentHealthStatus: row.healthStatus,
+  })
+  // 赡养人行没有 hasDisability 字段，不写（避免提交多余字段）。
+  if ('hasDisability' in row) row.hasDisability = Boolean((row.disabilityType ?? '').trim())
+}
+
+/** 成员残疾证号变化：解析类型/等级后重算（清空证号 → 类型等级清空 → 身体状况回落）。 */
+function handleMemberDisabilityCertChange(member: MemberRow): void {
+  if (isReadonly.value) return
+  const parsed = parseDisabilityCertificate(member.disabilityCertificateNo)
+  member.disabilityType = parsed.type
+  member.disabilityLevel = parsed.level
+  deriveRowHealth(member)
+}
+
+/** 赡养人残疾证号变化：同成员（对齐桌面 OnDisabilityCertificateChanged）。 */
+function handleSupporterDisabilityCertChange(supporter: SupporterRow): void {
+  if (isReadonly.value) return
+  const parsed = parseDisabilityCertificate(supporter.disabilityCertificateNo)
+  supporter.disabilityType = parsed.type
+  supporter.disabilityLevel = parsed.level
+  deriveRowHealth(supporter)
+}
+
 // ── AI 重病判定接线（P0，2026-11-27）────────────────────────────
 // 成员卡与赡养卡共用一套逻辑；口径唯一权威在 Core（ShouldAutoCheck 闸门 /
 // AiJudgeConstants.FormatSuggestion / SevereDiseaseByCostRule），前端只负责触发与竞态丢弃。
@@ -284,10 +347,12 @@ const aiSuggestions = reactive(new Map<object, string>())
 
 function handleMemberSevereChange(member: MemberRow, value: boolean | string | number): void {
   if (value === false) severeRejected.add(member)
+  deriveRowHealth(member)
 }
 
 function handleSupporterSevereChange(supporter: SupporterRow, value: boolean | string | number): void {
   if (value === false) severeRejected.add(supporter)
+  deriveRowHealth(supporter)
 }
 
 function suggestionOf(row: object): string {
@@ -329,6 +394,7 @@ function applyRowAiJudgment(row: SevereRow, result: AiSeverityResult): void {
   // 只勾不取消：AI 永不把勾选改为 false。
   if (result.autoChecked && !row.isSevereDisease) {
     row.isSevereDisease = true
+    deriveRowHealth(row) // 程序化勾选：@change 不触发，函数直调派生
   }
   if (result.suggestion) aiSuggestions.set(row, result.suggestion)
   else aiSuggestions.delete(row)
@@ -349,6 +415,7 @@ async function evaluateRowCost(row: SevereRow, readPaid: () => number | null): P
     if (!result.severe || !result.suggestion) return
     if (result.autoChecked && !row.isSevereDisease) {
       row.isSevereDisease = true // 只勾不取消
+      deriveRowHealth(row) // 程序化勾选：@change 不触发，函数直调派生
     }
     aiSuggestions.set(row, result.suggestion)
   } catch {
@@ -398,6 +465,7 @@ function handleSupporterIdBlur(supporter: SupporterRow): void {
   }
   const issue = getIdCardError(supporter.idCard, false)
   if (issue) ElMessage.warning(issue)
+  deriveRowHealth(supporter) // 年龄变化 → 身体状况重算（年龄≥60 档）
 }
 
 const duplicateIdCards = computed<Set<string>>(() => {
@@ -444,11 +512,13 @@ function handleMemberIdBlur(member: ApplicationFormMember): void {
   syncIdentityFromIdCard(member)
   const issue = memberIdIssue(member)
   if (issue) ElMessage.warning(issue)
+  deriveRowHealth(member) // 年龄变化 → 身体状况重算（年龄≥60 档）
 }
 
 function handleBirthDateChange(member: ApplicationFormMember): void {
   const age = ageFromBirthDate(member.birthDate)
   if (age !== null) member.age = age
+  deriveRowHealth(member) // 程序化写年龄 → 身体状况重算
 }
 
 function memberIdIssue(member: ApplicationFormMember): string {
@@ -698,6 +768,7 @@ onMounted(() => {
                   placeholder="岁"
                   :disabled="isReadonly"
                   @update:model-value="member.age = $event ?? null"
+                  @change="deriveRowHealth(member)"
                 />
               </label>
 
@@ -912,6 +983,7 @@ onMounted(() => {
                   placeholder="无残疾可留空"
                   clearable
                   :disabled="isReadonly"
+                  @change="handleMemberDisabilityCertChange(member)"
                 />
               </label>
 
@@ -946,6 +1018,7 @@ onMounted(() => {
                   clearable
                   placeholder="请选择或输入一级疾病"
                   :disabled="isReadonly"
+                  @change="deriveRowHealth(member)"
                 >
                   <el-option
                     v-for="item in DISEASE_CATEGORY_OPTIONS"
@@ -1267,6 +1340,7 @@ onMounted(() => {
                   placeholder="无残疾可留空"
                   clearable
                   :disabled="isReadonly"
+                  @change="handleSupporterDisabilityCertChange(supporter)"
                 />
               </label>
             </div>
@@ -1346,6 +1420,7 @@ onMounted(() => {
                   clearable
                   placeholder="无残疾可留空"
                   :disabled="isReadonly"
+                  @change="deriveRowHealth(supporter)"
                 >
                   <el-option
                     v-for="item in DISABILITY_TYPE_OPTIONS"
@@ -1363,6 +1438,7 @@ onMounted(() => {
                   clearable
                   placeholder="无残疾可留空"
                   :disabled="isReadonly"
+                  @change="deriveRowHealth(supporter)"
                 >
                   <el-option
                     v-for="item in DISABILITY_LEVEL_OPTIONS"
@@ -1404,6 +1480,7 @@ onMounted(() => {
                   clearable
                   placeholder="请选择或输入一级疾病"
                   :disabled="isReadonly"
+                  @change="deriveRowHealth(supporter)"
                 >
                   <el-option
                     v-for="item in DISEASE_CATEGORY_OPTIONS"

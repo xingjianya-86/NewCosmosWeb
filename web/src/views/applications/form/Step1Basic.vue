@@ -18,6 +18,7 @@ import {
   POLITICAL_STATUS_OPTIONS,
 } from './options'
 import type { ApplicationFormBasic, ApplicationFormModel } from './types'
+import { deriveHealthStatus, parseDisabilityCertificate } from './healthStatus'
 import { getIdCardError, isBasicValid, parseIdCard } from './validation'
 
 const props = defineProps<{
@@ -289,6 +290,32 @@ const ageDisplay = computed(() =>
     : String(idCardInfo.value.age),
 )
 
+// ── 身体状况即时派生（残疾证号 / 疾病分类 / 重病勾选 / 年龄）────────
+// 与 Core HealthStatusDeriver 同口径（见 healthStatus.ts）；
+// 只读态不派生（展示后端已派生的值）；历史值由覆盖守卫保留。
+
+/** 重算身体状况并写回 basic.healthStatus（派生规则见 healthStatus.ts）。 */
+function deriveApplicantHealthStatus(): void {
+  if (isLocked.value) return
+  basic.value.healthStatus = deriveHealthStatus({
+    diseaseCategory: diseaseCategory.value,
+    disabilityType: basic.value.disabilityType,
+    disabilityLevel: basic.value.disabilityLevel,
+    age: idCardInfo.value?.age ?? null,
+    isSevereDisease: isSevereDisease.value,
+    currentHealthStatus: basic.value.healthStatus,
+  })
+}
+
+/** 残疾证号变化：解析类型/等级后重算（清空证号 → 类型等级清空 → 身体状况回落）。 */
+function handleDisabilityCardChange(): void {
+  if (isLocked.value) return
+  const parsed = parseDisabilityCertificate(basic.value.disabilityCardNo)
+  basic.value.disabilityType = parsed.type
+  basic.value.disabilityLevel = parsed.level
+  deriveApplicantHealthStatus()
+}
+
 const rules: FormRules = {
   applicantName: [{ required: true, message: '请输入申请人姓名', trigger: 'blur' }],
   applicantIdCard: [
@@ -303,7 +330,7 @@ const rules: FormRules = {
   ],
 }
 
-/** 身份证变化时自动带出性别；年龄由身份证实时计算，不落库。 */
+/** 身份证变化时自动带出性别；年龄由身份证实时计算，不落库。年龄变化同步重算身体状况。 */
 watch(
   () => props.form.basic.applicantIdCard,
   (value) => {
@@ -311,8 +338,14 @@ watch(
     if (info) {
       props.form.basic.gender = info.gender
     }
+    deriveApplicantHealthStatus()
   },
 )
+
+// 一级疾病（AI 编码回填 handleDiseaseCodeChange 程序化赋值）与是否重病
+// （AI applyAiJudgment/费用口径自动勾选）都是程序化写值，@change 不触发 → 统一走 watch。
+watch(diseaseCategory, () => deriveApplicantHealthStatus())
+watch(isSevereDisease, () => deriveApplicantHealthStatus())
 
 // 注：原 `watch(diseaseCode)` 在编码变化时直接置 IsSevereDisease=true，绕过
 // ISevereDiseaseAdviceService.ShouldAutoCheck 闸门（目录外编码也会被勾上），
@@ -388,168 +421,182 @@ defineExpose({ validate })
         class="basic-form"
         @submit.prevent
       >
-        <div class="field-grid">
-          <el-form-item label="申请人姓名" prop="applicantName">
-            <el-input
-              v-model="basic.applicantName"
-              maxlength="30"
-              placeholder="请输入姓名"
-              clearable
-              :disabled="isLocked"
-            />
-          </el-form-item>
-
-          <el-form-item label="身份证号" prop="applicantIdCard">
-            <el-input
-              v-model="basic.applicantIdCard"
-              maxlength="18"
-              placeholder="请输入 18 位身份证号"
-              clearable
-              :disabled="isLocked"
-            />
-          </el-form-item>
-
-          <el-form-item label="残疾证号" prop="disabilityCardNo">
-            <el-input
-              v-model="basic.disabilityCardNo"
-              maxlength="30"
-              placeholder="无残疾可留空"
-              clearable
-              :disabled="isLocked"
-            />
-          </el-form-item>
-
-          <el-form-item label="性别" prop="gender">
-            <el-input
-              :model-value="basic.gender"
-              readonly
-              placeholder="身份证自动带出"
-              :disabled="isLocked"
-            />
-          </el-form-item>
-
-          <el-form-item label="年龄">
-            <el-input :model-value="ageDisplay" readonly placeholder="身份证自动计算" :disabled="isLocked">
-              <template #suffix>岁</template>
-            </el-input>
-          </el-form-item>
-
-          <el-form-item label="联系电话" prop="phone">
-            <el-input
-              v-model="basic.phone"
-              maxlength="20"
-              placeholder="请输入手机号或固定电话"
-              clearable
-              :disabled="isLocked"
-            />
-          </el-form-item>
-
-          <el-form-item label="民族" prop="ethnicity">
-            <el-select
-              v-model="basic.ethnicity"
-              filterable
-              allow-create
-              default-first-option
-              placeholder="请选择或输入民族"
-              :disabled="isLocked"
-            >
-              <el-option
-                v-for="item in ETHNICITY_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
+        <section class="field-group">
+          <h3 class="field-group__title">基本身份信息</h3>
+          <div class="field-grid">
+            <el-form-item label="申请人姓名" prop="applicantName">
+              <el-input
+                v-model="basic.applicantName"
+                maxlength="30"
+                placeholder="请输入姓名"
+                clearable
+                :disabled="isLocked"
               />
-            </el-select>
-          </el-form-item>
+            </el-form-item>
 
-          <el-form-item label="婚姻状况" prop="maritalStatus">
-            <el-select
-              v-model="basic.maritalStatus"
-              filterable
-              allow-create
-              default-first-option
-              clearable
-              placeholder="请选择或输入婚姻状况"
-              :disabled="isLocked"
-            >
-              <el-option
-                v-for="item in MARITAL_STATUS_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
+            <el-form-item label="身份证号" prop="applicantIdCard">
+              <el-input
+                v-model="basic.applicantIdCard"
+                maxlength="18"
+                placeholder="请输入 18 位身份证号"
+                clearable
+                :disabled="isLocked"
               />
-            </el-select>
-          </el-form-item>
+            </el-form-item>
 
-          <el-form-item label="户口性质" prop="hukouType">
-            <el-select v-model="basic.hukouType" placeholder="请选择户口性质" :disabled="isLocked">
-              <el-option
-                v-for="item in HUKOU_TYPE_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
+            <el-form-item label="性别" prop="gender">
+              <el-input
+                :model-value="basic.gender"
+                readonly
+                placeholder="身份证自动带出"
+                :disabled="isLocked"
               />
-            </el-select>
-          </el-form-item>
+            </el-form-item>
 
-          <el-form-item label="文化程度" prop="educationLevel">
-            <el-select
-              v-model="basic.educationLevel"
-              filterable
-              allow-create
-              default-first-option
-              clearable
-              placeholder="请选择或输入文化程度"
-              :disabled="isLocked"
-            >
-              <el-option
-                v-for="item in EDUCATION_LEVEL_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
+            <el-form-item label="年龄">
+              <el-input :model-value="ageDisplay" readonly placeholder="身份证自动计算" :disabled="isLocked">
+                <template #suffix>岁</template>
+              </el-input>
+            </el-form-item>
+
+            <el-form-item label="残疾证号" prop="disabilityCardNo">
+              <el-input
+                v-model="basic.disabilityCardNo"
+                maxlength="30"
+                placeholder="无残疾可留空"
+                clearable
+                :disabled="isLocked"
+                @change="handleDisabilityCardChange"
               />
-            </el-select>
-          </el-form-item>
+            </el-form-item>
+          </div>
+        </section>
 
-          <el-form-item label="政治面貌" prop="politicalStatus">
-            <el-select
-              v-model="basic.politicalStatus"
-              filterable
-              allow-create
-              default-first-option
-              clearable
-              placeholder="请选择或输入政治面貌"
-              :disabled="isLocked"
-            >
-              <el-option
-                v-for="item in POLITICAL_STATUS_OPTIONS"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
+        <section class="field-group">
+          <h3 class="field-group__title">联系方式与社会属性</h3>
+          <div class="field-grid">
+            <el-form-item label="联系电话" prop="phone">
+              <el-input
+                v-model="basic.phone"
+                maxlength="20"
+                placeholder="请输入手机号或固定电话"
+                clearable
+                :disabled="isLocked"
               />
-            </el-select>
-          </el-form-item>
+            </el-form-item>
 
-          <el-form-item label="开户行" prop="bankName">
-            <el-input
-              v-model="basic.bankName"
-              maxlength="60"
-              placeholder="请输入银行卡开户行"
-              clearable
-              :disabled="isLocked"
-            />
-          </el-form-item>
+            <el-form-item label="民族" prop="ethnicity">
+              <el-select
+                v-model="basic.ethnicity"
+                filterable
+                allow-create
+                default-first-option
+                placeholder="请选择或输入民族"
+                :disabled="isLocked"
+              >
+                <el-option
+                  v-for="item in ETHNICITY_OPTIONS"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
 
-          <el-form-item label="银行卡号" prop="bankAccount">
-            <el-input
-              v-model="basic.bankAccount"
-              maxlength="32"
-              placeholder="请输入银行卡号"
-              clearable
-              :disabled="isLocked"
-            />
-          </el-form-item>
-        </div>
+            <el-form-item label="婚姻状况" prop="maritalStatus">
+              <el-select
+                v-model="basic.maritalStatus"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                placeholder="请选择或输入婚姻状况"
+                :disabled="isLocked"
+              >
+                <el-option
+                  v-for="item in MARITAL_STATUS_OPTIONS"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item label="户口性质" prop="hukouType">
+              <el-select v-model="basic.hukouType" placeholder="请选择户口性质" :disabled="isLocked">
+                <el-option
+                  v-for="item in HUKOU_TYPE_OPTIONS"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item label="文化程度" prop="educationLevel">
+              <el-select
+                v-model="basic.educationLevel"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                placeholder="请选择或输入文化程度"
+                :disabled="isLocked"
+              >
+                <el-option
+                  v-for="item in EDUCATION_LEVEL_OPTIONS"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item label="政治面貌" prop="politicalStatus">
+              <el-select
+                v-model="basic.politicalStatus"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                placeholder="请选择或输入政治面貌"
+                :disabled="isLocked"
+              >
+                <el-option
+                  v-for="item in POLITICAL_STATUS_OPTIONS"
+                  :key="item.value"
+                  :label="item.label"
+                  :value="item.value"
+                />
+              </el-select>
+            </el-form-item>
+          </div>
+        </section>
+
+        <section class="field-group field-group--bank">
+          <h3 class="field-group__title">银行卡信息</h3>
+          <div class="field-grid">
+            <el-form-item label="开户行" prop="bankName">
+              <el-input
+                v-model="basic.bankName"
+                maxlength="60"
+                placeholder="请输入银行卡开户行"
+                clearable
+                :disabled="isLocked"
+              />
+            </el-form-item>
+
+            <el-form-item label="银行卡号" prop="bankAccount">
+              <el-input
+                v-model="basic.bankAccount"
+                maxlength="32"
+                placeholder="请输入银行卡号"
+                clearable
+                :disabled="isLocked"
+              />
+            </el-form-item>
+          </div>
+        </section>
       </el-form>
     </NcCard>
 
@@ -718,6 +765,29 @@ defineExpose({ validate })
   width: 100%;
 }
 
+/* 申请人信息分组（基本身份 / 联系方式与社会属性 / 银行卡）：
+   组标题 + 组间细分隔线，与 Step5Classification 分隔线、月报 group-title 同款视觉。 */
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.field-group + .field-group {
+  margin-top: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--nc-line-faint);
+}
+
+.field-group__title {
+  margin: 0;
+  color: var(--nc-ink);
+  font-family: var(--nc-font-serif);
+  font-size: var(--nc-text-base);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -783,6 +853,11 @@ defineExpose({ validate })
 @media (min-width: 1440px) {
   .field-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  /* 银行卡组仅 2 字段：≥1440px 仍固定 2 列，避免按 3 列栅格换行（窄屏随默认 2/1 列走）。 */
+  .field-group--bank .field-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
