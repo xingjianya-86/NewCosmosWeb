@@ -52,6 +52,8 @@ public sealed record PrinterBindingsResponse(IReadOnlyList<PrinterBindingDto> Bi
 /// 可选设备：只暴露公开 ID/机器名/上报打印机，不暴露 deviceKey。
 /// <c>Capabilities</c> 为该设备心跳上报的本机操作能力码（font / zerotier …），
 /// 老 Agent 未上报时为空数组，前端据此判断是否展示字体安装 / ZeroTier 入口。
+/// <c>AgentVersion</c> 为心跳上报的 Agent 版本（如 2.0.20261128），老 Agent 为 null，
+/// 前端据此与版本清单比对，旧版本标红提示（仅观测，不做升级操作）。
 /// </summary>
 public sealed record PrinterDeviceDto(
     long Id,
@@ -59,7 +61,8 @@ public sealed record PrinterDeviceDto(
     bool Online,
     DateTime? LastSeenAt,
     IReadOnlyList<string> Printers,
-    IReadOnlyList<string> Capabilities);
+    IReadOnlyList<string> Capabilities,
+    string? AgentVersion = null);
 
 /// <summary>打印机绑定输出模型。属性名保持 PascalCase，Core 的反射映射按列名/蛇形列名匹配。</summary>
 public sealed class PrinterBindingDto

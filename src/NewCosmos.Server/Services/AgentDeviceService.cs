@@ -74,7 +74,7 @@ public sealed class AgentDeviceService(IDatabaseService database)
         CancellationToken ct = default)
     {
         return await database.QueryAsync<PrinterDeviceRow>(
-            @"SELECT id, machine_name, printers_json::text AS printers_json,
+            @"SELECT id, machine_name, agent_version, printers_json::text AS printers_json,
                      capabilities_json::text AS capabilities_json, last_seen_at,
                      (last_seen_at IS NOT NULL
                       AND last_seen_at >= now() - make_interval(secs => $1)) AS online
@@ -97,6 +97,9 @@ public sealed class PrinterDeviceRow
 
     /// <summary>本机操作能力码数组 JSON（nc_sys_print_devices.capabilities_json）。</summary>
     public string CapabilitiesJson { get; set; } = "[]";
+
+    /// <summary>心跳上报的 Agent 版本（nc_sys_print_devices.agent_version）；老 Agent 为空。</summary>
+    public string? AgentVersion { get; set; }
 
     public DateTime? LastSeenAt { get; set; }
     public bool Online { get; set; }

@@ -45,6 +45,8 @@ export interface PrinterDevice {
   printers: string[]
   /** 本机操作能力码（font / zerotier …）；老 Agent 未上报时缺省。 */
   capabilities?: string[]
+  /** 心跳上报的 Agent 版本（如 2.0.20261128）；老 Agent 未上报时为 null。 */
+  agentVersion?: string | null
 }
 
 export interface BindPrinterRequest {

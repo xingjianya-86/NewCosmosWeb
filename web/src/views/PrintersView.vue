@@ -12,6 +12,8 @@ import {
   Timer,
 } from '@element-plus/icons-vue'
 import { getErrorMessage } from '@/api/http'
+import { compareAgentVersions, getAgentRelease } from '@/api/agentRelease'
+import type { AgentRelease } from '@/api/agentRelease'
 import {
   bindPrinter,
   generatePrinterBindCode,
@@ -59,15 +61,50 @@ const rules: FormRules<typeof form> = {
 const selectedDevice = computed(() => devices.value.find((device) => device.id === form.deviceId))
 const printerOptions = computed(() => selectedDevice.value?.printers ?? [])
 
-/** 设备下拉标签：附上心跳上报的本机操作能力码（font / zerotier …），便于判断能否下发本机操作。 */
+/** 设备下拉标签：附上心跳上报的本机操作能力码（font / zerotier …）与 Agent 版本，便于判断能否下发本机操作。 */
 function deviceLabel(device: PrinterDevice): string {
   const caps = device.capabilities ?? []
   const tag = caps.length > 0 ? ` · ${caps.join(' · ')}` : ''
-  return `${device.machineName}${device.online ? '（在线）' : '（离线）'}${tag}`
+  const version = device.agentVersion ? ` · v${device.agentVersion}` : ''
+  return `${device.machineName}${device.online ? '（在线）' : '（离线）'}${version}${tag}`
 }
 
 const onlineCount = computed(() => items.value.filter((item) => item.online).length)
 const defaultPrinter = computed(() => items.value.find((item) => item.isDefault)?.printerName ?? '未设置')
+
+/* ── Agent 版本观测（只读，不做升级操作） ───────────────────────── */
+const agentRelease = ref<AgentRelease | null>(null)
+
+/** 设备 id → 心跳上报的 Agent 版本；老 Agent 未上报则不出现在映射中。 */
+const deviceVersions = computed(() => {
+  const map = new Map<number, string>()
+  for (const device of devices.value) {
+    const version = device.agentVersion?.trim()
+    if (version) map.set(device.id, version)
+  }
+  return map
+})
+
+function versionOf(deviceId: number): string | null {
+  return deviceVersions.value.get(deviceId) ?? null
+}
+
+const latestVersionTitle = computed(() =>
+  agentRelease.value?.version ? `最新版本 ${agentRelease.value.version}` : '',
+)
+
+/** 版本比 release 旧时标红；拿不到清单、版本相同或无法比较时按普通文本展示。 */
+function isVersionOutdated(deviceId: number): boolean {
+  const version = versionOf(deviceId)
+  const latest = agentRelease.value?.version
+  if (!version || !latest) return false
+  return compareAgentVersions(version, latest) < 0
+}
+
+/** 清单拉取自身已容错（404/断网 → null），这里静默处理即可。 */
+async function loadAgentRelease(): Promise<void> {
+  agentRelease.value = await getAgentRelease()
+}
 
 /* ── 本机绑定码 ─────────────────────────────────────────────────── */
 const bindCodeVisible = ref(false)
@@ -112,13 +149,15 @@ async function load(options: { silent?: boolean } = {}): Promise<void> {
   }
 }
 
-async function loadDevices(): Promise<void> {
+async function loadDevices(options: { silent?: boolean } = {}): Promise<void> {
   devicesLoading.value = true
   try {
     devices.value = await listDevices()
   } catch (error) {
     devices.value = []
-    ElMessage.error(getErrorMessage(error, '设备列表加载失败'))
+    if (!options.silent) {
+      ElMessage.error(getErrorMessage(error, '设备列表加载失败'))
+    }
   } finally {
     devicesLoading.value = false
   }
@@ -315,6 +354,9 @@ async function handleUnbind(row: PrinterBinding): Promise<void> {
 
 onMounted(() => {
   void load()
+  // 版本列依赖设备列表与版本清单：静默加载，失败不打扰用户（版本列显示 —）。
+  void loadDevices({ silent: true })
+  void loadAgentRelease()
 })
 
 onBeforeUnmount(() => {
@@ -410,6 +452,20 @@ onBeforeUnmount(() => {
               </template>
             </el-table-column>
 
+            <el-table-column label="版本" width="110" align="center">
+              <template #default="{ row }">
+                <el-tag
+                  v-if="isVersionOutdated(row.deviceId)"
+                  type="danger"
+                  size="small"
+                  :title="latestVersionTitle"
+                >
+                  {{ versionOf(row.deviceId) }}
+                </el-tag>
+                <span v-else>{{ versionOf(row.deviceId) || '—' }}</span>
+              </template>
+            </el-table-column>
+
             <el-table-column label="最近在线" width="150">
               <template #default="{ row }">{{ formatTime(row.lastSeenAt) }}</template>
             </el-table-column>
@@ -458,6 +514,18 @@ onBeforeUnmount(() => {
                 <NcStatusDot v-if="row.isDefault" status="default" label="默认" />
               </div>
 
+              <p class="card-meta">
+                Agent 版本：
+                <el-tag
+                  v-if="isVersionOutdated(row.deviceId)"
+                  type="danger"
+                  size="small"
+                  :title="latestVersionTitle"
+                >
+                  {{ versionOf(row.deviceId) }}
+                </el-tag>
+                <span v-else>{{ versionOf(row.deviceId) || '—' }}</span>
+              </p>
               <p class="card-meta">最近在线：{{ formatTime(row.lastSeenAt) }}</p>
 
               <div class="card-actions">
