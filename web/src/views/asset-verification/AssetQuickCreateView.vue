@@ -2,11 +2,13 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Clock, Delete, Plus } from '@element-plus/icons-vue'
+import { ArrowLeft, Camera, Clock, Delete, Plus } from '@element-plus/icons-vue'
 import {
   createQuickAssetCheck,
   getAssetCheckHistory,
   getAssetOperatorContext,
+  recognizeAssetCheckIdCard,
+  type AssetCheckIdCardOcrResult,
   type AssetHistoryTaskItem,
   type AssetOperatorContext,
   type QuickAssetCheckCreated,
@@ -104,6 +106,155 @@ function addApplicant(): void {
     relationship: '配偶',
     isHead: false,
   })
+}
+
+// ── 扫描导入（身份证 OCR 回填授权人行）──────────────────────────
+// 回填规则移植桌面 QuickAssetVerificationViewModel.OcrAssign.cs +
+// OcrAssignmentPlanner.SuggestTarget：
+// a. 识别结果按 idCard（忽略大小写）精确匹配现有行 → 再按 name 精确匹配；
+// b. 命中行只填空；非空且与识别值不同 → 确认「覆盖 / 仅填空」；
+// c. 未命中 → 追加新授权人行（必须在数组末尾，buildPayload 用 index===0 判户主）；
+// d. name/idCard 皆空 → 跳过并提示；
+// e. 证号非 18 位 → 识别阶段先警告（提交时 validate 仍会拦截）。
+
+const scanInputRef = ref<HTMLInputElement | null>(null)
+const scanning = ref(false)
+
+function triggerScan(): void {
+  if (scanning.value) return
+  scanInputRef.value?.click()
+}
+
+/** 单张识别结果回填：返回 filled（命中行）/ added（新增行）/ skipped（跳过）。 */
+async function applyOcrResult(
+  result: AssetCheckIdCardOcrResult,
+  label: string,
+): Promise<'filled' | 'added' | 'skipped'> {
+  const name = (result.name ?? '').trim()
+  const idCard = (result.idCard ?? '').trim()
+
+  // d. 姓名与证号皆空：跳过并提示。
+  if (!name && !idCard) {
+    ElMessage.warning(`${label}未识别到姓名或身份证号，已跳过`)
+    return 'skipped'
+  }
+
+  // e. 证号非 18 位先警告（提交时 validate 会拦截，这里不中断回填）。
+  if (idCard && idCard.length !== 18) {
+    ElMessage.warning(`${label}识别到的身份证号不是 18 位（${idCard}），提交时将被校验拦截，请核对`)
+  }
+
+  // a. 证号精确命中优先（OCR 姓名可能误识，证号带校验更可靠），再按姓名精确命中。
+  let targetIndex = -1
+  if (idCard) {
+    targetIndex = applicants.value.findIndex(
+      (row) => row.idCard.trim().toLowerCase() === idCard.toLowerCase(),
+    )
+  }
+  if (targetIndex < 0 && name) {
+    targetIndex = applicants.value.findIndex((row) => row.name.trim() === name)
+  }
+
+  // c. 未命中 → 追加数组末尾（绝不插到最前，首行才是户主）。
+  if (targetIndex < 0) {
+    applicants.value.push({
+      name,
+      idType: 'ResidentIdCard',
+      idCard,
+      relationship: '儿子',
+      isHead: false,
+    })
+    ElMessage.success(`${label}未在名单中找到，已新增授权人行「${name || idCard}」`)
+    return 'added'
+  }
+
+  // b. 命中行：只填空；非空且与识别值不同 → 确认「覆盖 / 仅填空」。
+  const row = applicants.value[targetIndex]
+  const rowName = row.name.trim()
+  const rowIdCard = row.idCard.trim()
+  const nameConflict = Boolean(name && rowName && rowName !== name)
+  const idCardConflict = Boolean(
+    idCard && rowIdCard && rowIdCard.toLowerCase() !== idCard.toLowerCase(),
+  )
+
+  let overwrite = false
+  if (nameConflict || idCardConflict) {
+    const changes: string[] = []
+    if (nameConflict) changes.push(`姓名 ${rowName} → ${name}`)
+    if (idCardConflict) changes.push(`身份证号 ${rowIdCard} → ${idCard}`)
+    try {
+      await ElMessageBox.confirm(
+        `第 ${targetIndex + 1} 行已有内容与识别结果不一致：${changes.join('；')}。` +
+          '覆盖将改写已有值，仅填空只补空白字段。',
+        '识别结果不一致',
+        {
+          type: 'warning',
+          confirmButtonText: '覆盖',
+          cancelButtonText: '仅填空',
+          distinguishCancelAndClose: true,
+        },
+      )
+      overwrite = true
+    } catch {
+      overwrite = false // 取消/关闭 = 仅填空
+    }
+  }
+
+  const writes: string[] = []
+  if (name && (!rowName || (overwrite && nameConflict))) {
+    row.name = name
+    writes.push('姓名')
+  }
+  if (idCard && (!rowIdCard || (overwrite && idCardConflict))) {
+    row.idCard = idCard
+    writes.push('身份证号')
+  }
+
+  if (writes.length > 0) {
+    ElMessage.success(`${label}已回填第 ${targetIndex + 1} 行（${writes.join('、')}）`)
+  } else if ((nameConflict || idCardConflict) && !overwrite) {
+    ElMessage.info(`${label}已保留第 ${targetIndex + 1} 行原值（仅填空，无空白字段可写）`)
+  } else {
+    ElMessage.info(`${label}第 ${targetIndex + 1} 行已有相同信息，无需修改`)
+  }
+  return 'filled'
+}
+
+/** 逐张串行识别；单张失败不中断后续。 */
+async function handleScanFiles(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (files.length === 0) return
+
+  scanning.value = true
+  let filled = 0
+  let added = 0
+  let skipped = 0
+  const multiple = files.length > 1
+  try {
+    for (let i = 0; i < files.length; i++) {
+      const label = multiple ? `第 ${i + 1}/${files.length} 张：` : ''
+      if (multiple) {
+        ElMessage.info(`正在识别${label}${files[i].name}`)
+      }
+      try {
+        const result = await recognizeAssetCheckIdCard(files[i])
+        const outcome = await applyOcrResult(result, label)
+        if (outcome === 'filled') filled++
+        else if (outcome === 'added') added++
+        else skipped++
+      } catch (error) {
+        skipped++
+        ElMessage.error(`${label}识别失败：${getErrorMessage(error, '身份证识别失败')}`)
+      }
+    }
+    if (multiple) {
+      ElMessage.success(`扫描导入完成：回填 ${filled} 行、新增 ${added} 行、跳过 ${skipped} 张`)
+    }
+  } finally {
+    scanning.value = false
+  }
 }
 
 function removeApplicant(row: ApplicantRow): void {
@@ -393,6 +544,16 @@ onMounted(() => {
     <NcCard title="授权人信息（家庭成员）">
       <template #actions>
         <el-button :icon="Plus" @click="addApplicant">添加授权人</el-button>
+        <el-button :icon="Camera" :loading="scanning" @click="triggerScan">扫描导入</el-button>
+        <input
+          ref="scanInputRef"
+          type="file"
+          accept="image/*"
+          multiple
+          capture="environment"
+          class="hidden-file"
+          @change="handleScanFiles"
+        />
       </template>
 
       <div class="applicant-head">
@@ -618,6 +779,10 @@ onMounted(() => {
   margin: 12px 0 0;
   color: var(--nc-muted);
   font-size: var(--nc-text-sm);
+}
+
+.hidden-file {
+  display: none;
 }
 
 .agent-head {

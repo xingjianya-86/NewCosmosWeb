@@ -119,6 +119,27 @@ export function createQuickAssetCheck(
     .then((response) => response.data)
 }
 
+/** 身份证 OCR 识别结果（服务端契约 ElderlyOcrResponse：姓名/证号/性别/出生日期/住址 + 原始字段表）。 */
+export interface AssetCheckIdCardOcrResult {
+  name: string
+  idCard: string
+  gender: string
+  birthDate: string | null
+  address: string
+  fields: Record<string, string>
+}
+
+/** 扫描导入：单张身份证图片 OCR（multipart file，服务端权限 ASSET_CREATE）。 */
+export function recognizeAssetCheckIdCard(file: File): Promise<AssetCheckIdCardOcrResult> {
+  const form = new FormData()
+  form.append('file', file)
+  return apiHttp
+    .post<AssetCheckIdCardOcrResult>('/asset-verification/ocr/idcard', form, {
+      timeout: 120_000,
+    })
+    .then((response) => response.data)
+}
+
 /** 按身份证号查询历史核查记录（日期、状态、地址，最多 20 条）。 */
 export interface AssetHistoryTaskItem {
   id: number

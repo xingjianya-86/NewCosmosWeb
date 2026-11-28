@@ -7,6 +7,7 @@ using NewCosmos.Models.Results;
 using NewCosmos.Server.Contracts;
 using NewCosmos.Server.Infrastructure;
 using NewCosmos.Server.Services;
+using NewCosmos.Services.Core;
 using NewCosmos.Services.Database;
 using NewCosmos.Services.Domain.AssetVerification;
 using NewCosmos.Services.Domain.Reporting;
@@ -17,10 +18,17 @@ namespace NewCosmos.Server.Endpoints;
 
 /// <summary>
 /// 家庭经济状况核对只读接口：首页统计、任务列表、详情、月度审核。
-/// 所有端点先校验登录会话与 ASSET_VIEW 权限，再在查询服务内叠加数据范围。
+/// 所有端点先校验登录会话与 ASSET_VIEW 权限，再在查询服务内叠加数据范围；
+/// 写接口（创建核查、身份证 OCR 扫描导入）使用 ASSET_CREATE。
 /// </summary>
 public static class AssetVerificationEndpoints
 {
+    /// <summary>OCR 上传图片大小上限（与照片/高龄端点一致 10MB）。</summary>
+    private const long MaxOcrUploadBytes = 10L * 1024 * 1024;
+
+    /// <summary>OCR 请求体上限：文件 10MB + multipart 头开销。</summary>
+    private const long MaxOcrRequestBodyBytes = MaxOcrUploadBytes + 1024 * 1024;
+
     public static IEndpointRouteBuilder MapAssetVerificationEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapGet("/api/asset-verification/summary", GetSummaryAsync);
@@ -30,6 +38,11 @@ public static class AssetVerificationEndpoints
         app.MapGet("/api/asset-verification/monthly", ListMonthlyAsync);
         app.MapGet("/api/asset-verification/operator-context", GetOperatorContextAsync);
         app.MapPost("/api/asset-verification/checks", CreateCheckAsync);
+
+        // 身份证 OCR（multipart file；请求体上限略大于 10MB，端点再按文件大小拦截）
+        app.MapPost("/api/asset-verification/ocr/idcard", RecognizeIdCardAsync)
+            .DisableAntiforgery()
+            .WithMetadata(new Microsoft.AspNetCore.Mvc.RequestSizeLimitAttribute(MaxOcrRequestBodyBytes));
         return app;
     }
 
@@ -447,6 +460,74 @@ public static class AssetVerificationEndpoints
             batchId,
             count = submitResult.Value,
         });
+    }
+
+    // ───────────────────────────── OCR ─────────────────────────────
+
+    /// <summary>
+    /// POST /api/asset-verification/ocr/idcard（multipart: file）→ 身份证 OCR 扫描导入。
+    /// 权限用 ASSET_CREATE（与创建核查同口径）：资产核查账号通常无 ARCHIVE_VIEW/ELDERLY_VIEW/TEMP_VIEW。
+    /// </summary>
+    private static async Task<IResult> RecognizeIdCardAsync(
+        HttpContext context,
+        INewPermissionService permissions,
+        ILoggerService logger,
+        CancellationToken ct,
+        IFormFile? file)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.ASSET_CREATE, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (file is null || file.Length <= 0)
+        {
+            return InvalidRequest(context, "请选择要识别的身份证图片");
+        }
+
+        if (file.Length > MaxOcrUploadBytes)
+        {
+            return InvalidRequest(context, "身份证图片不能超过 10MB");
+        }
+
+        if (string.IsNullOrWhiteSpace(file.ContentType)
+            || !file.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            return InvalidRequest(context, "仅支持图片文件");
+        }
+
+        // 与 PhotoEndpoints/TempReliefEndpoints 同法：按请求构造（服务无状态，避免跨请求共享）。
+        var ocr = new ElderlyOcrService(logger);
+        await using var stream = file.OpenReadStream();
+        var result = await ocr.RecognizeIdCardAsync(stream, ct);
+        if (result.IsFailure || result.Value is null)
+        {
+            return MapOcrResult(context, result);
+        }
+
+        // 契约复用 ElderlyOcrResponse：name/idCard/gender/birthDate/address/fields 完整回传。
+        return Results.Json(result.Value);
+    }
+
+    /// <summary>OCR 错误映射（照 PhotoEndpoints.MapOcrResult）：服务未配置 503、图片问题 400、识别/超时 502。</summary>
+    private static IResult MapOcrResult(HttpContext context, Result result)
+    {
+        var status = result.ErrorCode switch
+        {
+            ErrorCodes.OCR_SERVICE_UNREACHABLE => StatusCodes.Status503ServiceUnavailable,
+            ErrorCodes.OCR_IMAGE_INVALID or ErrorCodes.OCR_NO_FIELD => StatusCodes.Status400BadRequest,
+            ErrorCodes.OCR_TIMEOUT or ErrorCodes.OCR_RECOGNIZE_FAILED => StatusCodes.Status502BadGateway,
+            ErrorCodes.CANCELLED => StatusCodes.Status408RequestTimeout,
+            _ => StatusCodes.Status502BadGateway,
+        };
+
+        return ApiErrors.Write(
+            context,
+            status,
+            result.ErrorCode ?? ApiErrorCodes.InternalError,
+            result.Message);
     }
 
     private static async Task<Result<OperatorContext>> LoadOperatorContextAsync(
