@@ -1,3 +1,4 @@
+import type { AssetTaskDetail } from '@/types/assetVerification'
 import type {
   ApplicationFormClassification,
   ApplicationFormModel,
@@ -41,6 +42,16 @@ function formUrl(id: number | string): string {
 /** 读取五步表单（编辑模式）。 */
 export function getApplicationForm(id: number | string): Promise<ApplicationFormModel> {
   return apiHttp.get<ApplicationFormModel>(formUrl(id)).then((response) => response.data)
+}
+
+/**
+ * 五步表单右侧「来源数据」：按资产核对记录 ID 取详情（含同批次家庭成员）。
+ * 与核对模块的 /asset-verification/tasks/{id} 同构，但走表单侧 INCOME_VIEW 端点
+ * （表单用户无 ASSET_VIEW）。
+ */
+export function getAssetSource(assetCheckId: number | string): Promise<AssetTaskDetail> {
+  const url = `/applications/asset-source/${encodeURIComponent(String(assetCheckId))}`
+  return apiHttp.get<AssetTaskDetail>(url).then((response) => response.data)
 }
 
 /** 新建草稿（id=0 时走此接口）。 */

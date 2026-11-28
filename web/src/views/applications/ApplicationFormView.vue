@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Delete, Document, FolderOpened, Refresh } from '@element-plus/icons-vue'
+import { ArrowLeft, Delete, Document, Refresh } from '@element-plus/icons-vue'
 import {
   classifyApplication,
   createApplicationForm,
@@ -12,6 +12,7 @@ import {
   updateApplicationForm,
 } from '@/api/applicationForm'
 import { getErrorMessage } from '@/api/http'
+import SourceFieldPanel from './form/SourceFieldPanel.vue'
 import Step1Basic from './form/Step1Basic.vue'
 import Step2Members from './form/Step2Members.vue'
 import Step3Economy from './form/Step3Economy.vue'
@@ -516,33 +517,12 @@ onMounted(() => {
         </template>
       </section>
 
-      <aside class="form-aside" aria-label="来源数据">
-        <div class="aside-head">
-          <el-icon :size="18"><FolderOpened /></el-icon>
-          <strong>来源数据</strong>
-        </div>
-
-        <div class="aside-body">
-          <p v-if="assetCheckId" class="aside-note">已关联资产核对记录 #{{ assetCheckId }}</p>
-          <div class="aside-empty">
-            <el-icon :size="38"><FolderOpened /></el-icon>
-            <span>{{ assetCheckId ? '来源字段待接入' : '暂无来源数据' }}</span>
-          </div>
-        </div>
-
-        <div class="aside-actions">
-          <strong class="aside-subtitle">字段选择</strong>
-          <el-button plain disabled title="资产核对字段选择暂未接入 Web 端">全选</el-button>
-          <el-button type="primary" disabled title="资产核对字段选择暂未接入 Web 端">
-            填充选中
-          </el-button>
-          <div class="aside-divider" aria-hidden="true" />
-          <strong class="aside-subtitle">家庭成员</strong>
-          <el-button type="primary" disabled title="暂无可导入的家庭成员来源">
-            导入全部家庭成员
-          </el-button>
-        </div>
-      </aside>
+      <SourceFieldPanel
+        :asset-check-id="assetCheckId"
+        :form="form"
+        :disabled="isReadonly || loading"
+        @goto-step="goToStep"
+      />
     </div>
 
     <!-- 底部按钮栏：放弃申请 / 保存草稿 / 上一步 / 下一步 / 提交 -->
@@ -866,85 +846,7 @@ onMounted(() => {
   background-color: var(--nc-paper-2);
 }
 
-/* ── 右侧来源数据栏（旧版 320px） ─────────────────────────────── */
-.form-aside {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  border-left: 1px solid var(--nc-line);
-  background-color: #fff;
-}
-
-.aside-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--nc-line);
-  background-color: var(--nc-paper-soft);
-  color: var(--nc-seal);
-}
-
-.aside-head strong {
-  color: var(--nc-ink);
-  font-size: 17px;
-  font-weight: 700;
-}
-
-.aside-body {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.aside-note {
-  margin: 0;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--nc-line-faint);
-  background-color: var(--nc-seal-wash);
-  color: var(--nc-seal-dark);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.aside-empty {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 40px 20px;
-  color: var(--nc-disabled);
-  font-size: 14px;
-}
-
-.aside-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 16px;
-  border-top: 1px solid var(--nc-line-faint);
-}
-
-.aside-actions :deep(.el-button) {
-  width: 100%;
-  margin-left: 0;
-}
-
-.aside-divider {
-  height: 1px;
-  margin: 4px 0;
-  background-color: var(--nc-line);
-}
-
-.aside-subtitle {
-  margin-top: 4px;
-  color: var(--nc-ink);
-  font-size: 16px;
-  font-weight: 700;
-}
+/* ── 右侧来源数据栏：内容与样式在 form/SourceFieldPanel.vue（栅格位由 .form-body 提供） ── */
 
 /* ── 底部按钮栏 ───────────────────────────────────────────────── */
 .form-actions {
@@ -1007,12 +909,9 @@ onMounted(() => {
 
 /* ── 响应式 ───────────────────────────────────────────────────── */
 @media (max-width: 1100px) {
+  /* 单列时来源数据栏显示在内容下方（样式与滚动见 SourceFieldPanel.vue）。 */
   .form-body {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .form-aside {
-    display: none;
   }
 }
 

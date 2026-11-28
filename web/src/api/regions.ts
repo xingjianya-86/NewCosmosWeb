@@ -1,4 +1,4 @@
-import { apiHttp } from './http'
+import { ApiError, apiHttp } from './http'
 
 /** 行政区划下拉选项（省/市/县/镇/村统一结构）。 */
 export interface RegionOption {
@@ -117,6 +117,33 @@ export function getTowns(countyId: number): Promise<RegionOption[]> {
 export function getVillages(townId: number): Promise<RegionOption[]> {
   if (!townId) return Promise.resolve([])
   return getRegionOptions(`/regions/villages?townId=${encodeURIComponent(String(townId))}`)
+}
+
+/** 按村编码反查的村/社区（含所属乡镇名），供「社区=村编码」的来源数据回填级联。 */
+export interface VillageByCode {
+  id: number
+  townId: number
+  villageName: string
+  villageCode: string
+  townName: string
+}
+
+/**
+ * 按村编码查村/社区与所属乡镇（资产核对 community 列存的是村编码，级联需要名称）。
+ * 查无此村返回 null（404 降级），网络/服务端错误照常抛出由调用方提示。
+ */
+export async function getVillageByCode(code: string): Promise<VillageByCode | null> {
+  const normalized = (code ?? '').trim()
+  if (!normalized) return null
+  try {
+    const response = await apiHttp.get<VillageByCode>(
+      `/regions/villages/by-code?code=${encodeURIComponent(normalized)}`,
+    )
+    return response.data ?? null
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
 }
 
 /* ───────────────────────── 管理页 ───────────────────────── */

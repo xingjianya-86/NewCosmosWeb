@@ -1,9 +1,12 @@
 using System.Globalization;
+using Microsoft.Extensions.DependencyInjection;
 using NewCosmos.Constants;
 using NewCosmos.Models.Results;
 using NewCosmos.Server.Contracts;
 using NewCosmos.Server.Infrastructure;
 using NewCosmos.Server.Services;
+using NewCosmos.Services.Database;
+using NewCosmos.Services.Domain.Reporting;
 using NewCosmos.Services.Domain.SocialAssistance;
 using NewCosmos.Services.UserManagement;
 
@@ -19,6 +22,7 @@ public static class ApplicationFormEndpoints
     public static IEndpointRouteBuilder MapApplicationFormEndpoints(this IEndpointRouteBuilder app)
     {
         app.MapGet("/api/applications/{id}/form", GetFormAsync);
+        app.MapGet("/api/applications/asset-source/{assetCheckId}", GetAssetSourceAsync);
         app.MapPost("/api/applications/form", CreateAsync);
         app.MapPut("/api/applications/{id}/form", UpdateAsync);
         app.MapPost("/api/applications/{id}/classify", ClassifyAsync);
@@ -62,6 +66,42 @@ public static class ApplicationFormEndpoints
         var result = await forms.GetFormAsync(applicationId, userId, ct);
         return result.IsFailure
             ? MapResult(context, result)
+            : Results.Json(result.Value);
+    }
+
+    /// <summary>
+    /// 五步表单右侧「来源数据」：按资产核对记录 ID 取详情（含同批次家庭成员）。
+    /// 核对模块的 <c>/api/asset-verification/tasks/{id}</c> 要求 ASSET_VIEW，而表单用户只有
+    /// INCOME_*，故在此新增表单侧端点，权限用 <see cref="PermissionCodes.INCOME_VIEW"/>；
+    /// 查询本身复用 <see cref="AssetVerificationQueryService.GetDetailAsync"/>（其数据范围
+    /// 仍按 AssetChecks 口径，越权/不存在统一 404），不在此重抄 SQL。
+    /// </summary>
+    private static async Task<IResult> GetAssetSourceAsync(
+        string assetCheckId,
+        HttpContext context,
+        INewPermissionService permissions,
+        CancellationToken ct)
+    {
+        var denied = await EndpointSecurity.RequirePermissionAsync(
+            context, permissions, PermissionCodes.INCOME_VIEW, ct);
+        if (denied is not null)
+        {
+            return denied;
+        }
+
+        if (context.GetUserId() is not { } userId)
+        {
+            return Unauthorized(context);
+        }
+
+        if (ParseId(assetCheckId) is not { } checkId)
+        {
+            return InvalidRequest(context, "资产核对记录 ID 无效");
+        }
+
+        var result = await CreateAssetQueryService(context).GetDetailAsync(userId, checkId, ct);
+        return result.IsFailure
+            ? ApiErrors.FromResult(context, result)
             : Results.Json(result.Value);
     }
 
@@ -527,6 +567,19 @@ public static class ApplicationFormEndpoints
 
     private static long? ParseId(string id)
         => long.TryParse(id, out var value) && value > 0 ? value : null;
+
+    /// <summary>
+    /// AssetVerificationQueryService 未注册进 DI（核对模块按请求从 RequestServices 组合），
+    /// 表单侧沿用同一组合方式，避免为单个端点改共享注册。
+    /// </summary>
+    private static AssetVerificationQueryService CreateAssetQueryService(HttpContext context)
+    {
+        var services = context.RequestServices;
+        return new AssetVerificationQueryService(
+            services.GetRequiredService<IDatabaseService>(),
+            services.GetRequiredService<IStatisticsService>(),
+            services.GetRequiredService<DataScopeFilterBuilder>());
+    }
 
     /// <summary>操作人一律取会话中的登录用户名，不接受前端传入。</summary>
     private static string OperatorName(UserDto user)

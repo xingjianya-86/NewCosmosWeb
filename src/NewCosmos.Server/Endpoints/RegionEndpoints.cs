@@ -27,6 +27,7 @@ public static class RegionEndpoints
         group.MapGet("/counties", GetCountiesAsync);
         group.MapGet("/towns", GetTownsAsync);
         group.MapGet("/villages", GetVillagesAsync);
+        group.MapGet("/villages/by-code", GetVillageByCodeAsync);
 
         group.MapPost("/cities", CreateCityAsync);
         group.MapPut("/cities/{id:int}", UpdateCityAsync);
@@ -283,6 +284,65 @@ public static class RegionEndpoints
             : Results.Json(result.Value
                 .Select(x => new RegionOption(x.Id, x.VillageName))
                 .ToList());
+    }
+
+    /// <summary>
+    /// 按村编码反查村/社区（含所属乡镇名）：资产核对等表的 community 列存的是**村编码**，
+    /// 而表单 AddressCascader 按名称级联，需要镇/村名称才能选中。
+    /// 只读口径与本文件其它级联一致（登录即可）；查无此村返回 404，由前端按“解析失败”降级。
+    /// </summary>
+    private static async Task<IResult> GetVillageByCodeAsync(
+        string? code,
+        HttpContext context,
+        IRegionService regions,
+        CancellationToken ct)
+    {
+        if (RequireLogin(context) is { } denied)
+        {
+            return denied;
+        }
+
+        var normalized = code?.Trim() ?? string.Empty;
+        if (normalized.Length == 0)
+        {
+            return Invalid(context, "村/社区编码不能为空");
+        }
+
+        var villageResult = await regions.GetVillageByCodeAsync(normalized, ct);
+        if (villageResult.IsFailure)
+        {
+            return Failure(context, villageResult.ErrorCode, villageResult.Message);
+        }
+
+        var village = villageResult.Value;
+        if (village is null)
+        {
+            return ApiErrors.Write(
+                context,
+                StatusCodes.Status404NotFound,
+                ApiErrorCodes.NotFound,
+                "未找到对应的村/社区");
+        }
+
+        // 镇名查不到不阻断：村名仍可用于回填，前端按空镇名处理。
+        var townName = string.Empty;
+        if (village.TownId > 0)
+        {
+            var townResult = await regions.GetTownByIdAsync(village.TownId, ct);
+            if (townResult.IsSuccess && townResult.Value is not null)
+            {
+                townName = townResult.Value.TownName ?? string.Empty;
+            }
+        }
+
+        return Results.Json(new
+        {
+            id = village.Id,
+            townId = village.TownId,
+            villageName = village.VillageName,
+            villageCode = village.VillageCode,
+            townName,
+        });
     }
 
     // ───────────────────────────── 地级市维护 ─────────────────────────────
