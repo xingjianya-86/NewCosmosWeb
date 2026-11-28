@@ -7,6 +7,7 @@
     <Project Path="src/NewCosmos.Shell/NewCosmos.Shell.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/NewCosmos.Agent.Tests/NewCosmos.Agent.Tests.csproj" />
     <Project Path="tests/NewCosmos.Core.Tests/NewCosmos.Core.Tests.csproj" />
   </Folder>
 </Solution>

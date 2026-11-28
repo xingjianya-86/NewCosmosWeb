@@ -83,7 +83,9 @@ Name: "{autodesktop}\NewCosmos Agent"; Filename: "{app}\NewCosmos.Agent.exe"; Wo
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "NewCosmos.Agent"; ValueData: """{app}\NewCosmos.Agent.exe"""; Tasks: autostart; Flags: uninsdeletevalue
 
 [Run]
-Filename: "{app}\NewCosmos.Agent.exe"; Description: "启动 NewCosmos Agent 托盘"; Flags: nowait postinstall skipifsilent
+; 自动升级所需：去掉 skipifsilent，让 /SILENT 静默安装完成后也自动启动新版 Agent
+; （Agent 的自动更新以 /SILENT 调用本安装包；交互安装行为不变，完成页仍显示"运行"复选框）。
+Filename: "{app}\NewCosmos.Agent.exe"; Description: "启动 NewCosmos Agent 托盘"; Flags: nowait postinstall
 
 [UninstallDelete]
 ; 清理运行日志等安装目录内的残留；%APPDATA%\NewCosmos 下的用户配置不删

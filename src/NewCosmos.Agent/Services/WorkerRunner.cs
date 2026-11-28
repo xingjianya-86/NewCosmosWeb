@@ -1,5 +1,6 @@
 using NewCosmos.Agent.Configuration;
 using NewCosmos.Agent.Security;
+using NewCosmos.Agent.Services.Update;
 using NewCosmos.Services.Core;
 
 namespace NewCosmos.Agent.Services;
@@ -12,7 +13,8 @@ public static class WorkerRunner
         string configFilePath,
         IAgentJobClient client,
         ILoggerService logger,
-        CancellationToken ct)
+        CancellationToken ct,
+        AgentUpdateGate? updateGate = null)
     {
         if (string.IsNullOrWhiteSpace(settings.ServerBaseUrl))
         {
@@ -63,7 +65,8 @@ public static class WorkerRunner
             settings.ServerBaseUrl,
             deviceKey,
             TimeSpan.FromSeconds(settings.JobPollSeconds),
-            templates);
+            templates,
+            updateGate);
 
         AgentConsole.Info($"任务目录: {settings.PrintJobsDirectory}");
         AgentConsole.Info($"输出目录: {settings.OutputRoot}（批量保存按 分类\\期间 组织）");
@@ -86,12 +89,13 @@ public static class AgentServiceRunner
         IAgentClient agentClient,
         IAgentJobClient jobClient,
         ILoggerService logger,
-        CancellationTokenSource cts)
+        CancellationTokenSource cts,
+        AgentUpdateGate? updateGate = null)
     {
         var ct = cts.Token;
 
         var heartbeatTask = HeartbeatRunner.RunAsync(settings, configFilePath, agentClient, once: false, logger, ct);
-        var workerTask = WorkerRunner.RunAsync(settings, configFilePath, jobClient, logger, ct);
+        var workerTask = WorkerRunner.RunAsync(settings, configFilePath, jobClient, logger, ct, updateGate);
 
         var first = await Task.WhenAny(heartbeatTask, workerTask).ConfigureAwait(false);
 

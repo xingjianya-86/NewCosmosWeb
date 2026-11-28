@@ -1,4 +1,5 @@
 using NewCosmos.Agent.Models;
+using NewCosmos.Agent.Services.Update;
 using NewCosmos.Models.Results;
 using NewCosmos.Services.Core;
 
@@ -83,6 +84,7 @@ public sealed class JobWorker : IJobWorker
     private readonly string _serverBaseUrl;
     private readonly string _deviceKey;
     private readonly TimeSpan _pollInterval;
+    private readonly AgentUpdateGate? _gate;
 
     public JobWorker(
         IAgentJobClient client,
@@ -91,7 +93,8 @@ public sealed class JobWorker : IJobWorker
         string serverBaseUrl,
         string deviceKey,
         TimeSpan pollInterval,
-        TemplateCache? templates = null)
+        TemplateCache? templates = null,
+        AgentUpdateGate? gate = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _executor = executor ?? throw new ArgumentNullException(nameof(executor));
@@ -100,6 +103,8 @@ public sealed class JobWorker : IJobWorker
         _serverBaseUrl = serverBaseUrl ?? string.Empty;
         _deviceKey = deviceKey ?? string.Empty;
         _pollInterval = pollInterval <= TimeSpan.Zero ? TimeSpan.FromSeconds(3) : pollInterval;
+        // 可选注入：不传门控行为完全不变（零回归），接入自动升级的宿主才传入共享实例。
+        _gate = gate;
     }
 
     public async Task<int> RunAsync(CancellationToken ct)
@@ -117,6 +122,22 @@ public sealed class JobWorker : IJobWorker
 
         while (!ct.IsCancellationRequested)
         {
+            // 自动升级空闲门控：暂停期间不再 claim 新任务，只短延时等待。
+            // 已在执行的任务不受影响（由 gate 的 in-flight 计数等待归零），下轮升级据此判断能否安全安装。
+            if (_gate is { IsPauseRequested: true })
+            {
+                try
+                {
+                    await Task.Delay(AgentUpdateDefaults.PausePollMilliseconds, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+
+                continue;
+            }
+
             var claimed = false;
 
             try
@@ -194,7 +215,24 @@ public sealed class JobWorker : IJobWorker
         return 0;
     }
 
+    /// <summary>
+    /// 任务执行入口：in-flight 计数必须覆盖整个任务生命周期（含失败回写），
+    /// 否则升级方会误判"已空闲"而覆盖正在执行任务的程序目录。
+    /// </summary>
     private async Task ProcessJobAsync(AgentJob job, CancellationToken ct)
+    {
+        _gate?.BeginJob();
+        try
+        {
+            await ProcessJobCoreAsync(job, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate?.EndJob();
+        }
+    }
+
+    private async Task ProcessJobCoreAsync(AgentJob job, CancellationToken ct)
     {
         var jobNo = string.IsNullOrWhiteSpace(job.JobNo) ? $"job-{job.Id}" : job.JobNo.Trim();
 

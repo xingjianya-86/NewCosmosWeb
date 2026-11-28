@@ -107,6 +107,10 @@ public sealed class CliOptions
                     if (!SetCommand(options, "probe-office", ref commandSet, out error)) return false;
                     break;
 
+                case "--check-update":
+                    if (!SetCommand(options, "check-update", ref commandSet, out error)) return false;
+                    break;
+
                 case "--bind-code":
                     if (!SetCommand(options, "bind-code", ref commandSet, out error)) return false;
                     if (!TryReadValue(args, ref i, inlineValue, arg, out var bindCode, out error)) return false;
@@ -188,7 +192,7 @@ public sealed class CliOptions
                     // 允许直接写命令名（register / heartbeat / worker / render ...）
                     var tokenCommand = arg.ToLowerInvariant();
                     if (tokenCommand is "register" or "heartbeat" or "heartbeat-once" or "worker" or "render" or "printers" or "probe-office"
-                        or "bind-code" or "tray" or "install-autostart" or "uninstall-autostart")
+                        or "bind-code" or "tray" or "install-autostart" or "uninstall-autostart" or "check-update")
                     {
                         if (!SetCommand(options, tokenCommand, ref commandSet, out error)) return false;
 
@@ -230,6 +234,7 @@ NewCosmos.Agent — Windows 固定 PC 的文档/照片打印代理
   --printers            列出本机打印机（默认打印机标 [默认]）
   --bind-code <code>    绑定本机打印机；首次使用会自动注册本机
   --probe-office        探测 Microsoft Office / WPS 可用性
+  --check-update        立即检查一次更新（成功走完下载/校验/静默升级后退出，便于部署机验证）
   --render              用 Office 模板渲染一次 PDF（真实 COM）
 
 渲染选项:

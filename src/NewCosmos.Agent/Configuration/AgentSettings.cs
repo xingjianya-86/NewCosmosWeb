@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using NewCosmos.Agent.Services.Update;
 
 namespace NewCosmos.Agent.Configuration;
 
@@ -51,6 +52,28 @@ public sealed class AgentSettings
     /// <summary>服务端注册返回的设备 ID（仅用于展示/排障）。</summary>
     public int? DeviceId { get; set; }
 
+    /// <summary>
+    /// 是否自动检查并安装更新（L2 全自动），默认 true。
+    /// 置 false 时后台循环跳过；托盘「立即检查更新」与 --check-update 也受此开关约束（直接返回"已关闭"）。
+    /// </summary>
+    public bool AutoUpdate { get; set; } = true;
+
+    /// <summary>
+    /// 更新清单地址（{version,url,sha256,notes,publishedAt}，由 write-update-manifest.ps1 生成）。
+    /// 留空时 <see cref="Normalize"/> 按 ServerBaseUrl 回退到 {ServerBaseUrl}/downloads/windows/agent-latest.json；
+    /// ServerBaseUrl 也为空时保持空 —— UpdateService 记 Debug 后跳过检查（不报错，兼容未接线的环境）。
+    /// </summary>
+    public string UpdateManifestUrl { get; set; } = string.Empty;
+
+    /// <summary>更新检查间隔（小时，1–168），默认 6。</summary>
+    public int UpdateCheckIntervalHours { get; set; } = 6;
+
+    /// <summary>
+    /// 启动后首次更新检查的延迟（秒，0–3600），默认 120：
+    /// 给注册/心跳留出启动窗口，也避免开机自启瞬间与安装器/网络抢资源。
+    /// </summary>
+    public int UpdateFirstCheckDelaySeconds { get; set; } = 120;
+
     /// <summary>DPAPI(CurrentUser) 加密后的设备密钥（Base64）。与配置文件同路径时使用。</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? DeviceKeyProtected { get; set; }
@@ -81,6 +104,18 @@ public sealed class AgentSettings
         HeartbeatSeconds = Math.Clamp(HeartbeatSeconds <= 0 ? 30 : HeartbeatSeconds, 5, 3600);
         JobPollSeconds = Math.Clamp(JobPollSeconds <= 0 ? 3 : JobPollSeconds, 2, 300);
         PreviewKeepCount = Math.Clamp(PreviewKeepCount <= 0 ? 10 : PreviewKeepCount, 1, 100);
+
+        // 自动更新：0/负数回退默认 6 小时；上限 7 天，防止配置错误导致长期不检查。
+        UpdateCheckIntervalHours = Math.Clamp(UpdateCheckIntervalHours <= 0 ? 6 : UpdateCheckIntervalHours, 1, 168);
+        // 首查延迟允许 0（启动即查），只对负数回退默认值。
+        UpdateFirstCheckDelaySeconds = Math.Clamp(
+            UpdateFirstCheckDelaySeconds < 0 ? 120 : UpdateFirstCheckDelaySeconds, 0, 3600);
+        // 清单地址：显式配置优先；留空则按 ServerBaseUrl 推导（两者都空 = 跳过自动检查）。
+        UpdateManifestUrl = string.IsNullOrWhiteSpace(UpdateManifestUrl)
+            ? (ServerBaseUrl.Length == 0
+                ? string.Empty
+                : ServerBaseUrl + AgentUpdateDefaults.ManifestPathSuffix)
+            : UpdateManifestUrl.Trim();
 
         var printJobsDirectory = string.IsNullOrWhiteSpace(PrintJobsDirectory)
             ? Path.Combine(Path.GetTempPath(), "NewCosmos", "PrintJobs")

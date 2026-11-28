@@ -354,13 +354,41 @@ $cms.CheckSignature($true)
 
 `CheckSignature($true)` 只验证签名本身；证书链是否受信任由客户端按自己的策略另查。
 
+### 6.3 生成 Agent 更新清单（`agent-latest.json`）
+
+Agent 走**独立清单**（`agent-latest.json`），不复用 Shell 的 `latest.json`——
+这样"只装了 Agent 的机器"和"Shell + Agent 同机"各自升级，互不干扰：
+
+```powershell
+powershell -File deploy\scripts\write-update-manifest.ps1 `
+  -InstallerPath publish\installers\NewCosmosAgentSetup_2.0.20261130.exe `
+  -Version 2.0.20261130 `
+  -OutputPath deploy\update\agent-latest.json `
+  -Notes 'Agent 自动更新上线。' [-Sign]
+```
+
+- `-OutputPath` 必须是 `agent-latest.json`（默认输出名 `latest.json` 是给 Shell 的）；
+- `-Sign` 会额外生成 `agent-latest.json.sig`（与 exe 的 Authenticode 是两套签名，需成对上传）；
+- 上传到 `.2`：
+
+  ```powershell
+  scp .\publish\installers\NewCosmosAgentSetup_2.0.20261130.exe `
+      root@10.110.0.2:/www/wwwroot/cosmos-static.sua17.cn/downloads/windows/
+
+  scp .\deploy\update\agent-latest.json `
+      root@10.110.0.2:/www/wwwroot/cosmos-static.sua17.cn/downloads/windows/agent-latest.json
+  ```
+
+- Agent 侧用 `?t=<毫秒>` 穿透 nginx 的 1 小时缓存（见 §8 注意事项）。
+
 > Shell 托盘菜单已内置“检查更新”（`src/NewCosmos.Shell/Services/UpdateService.cs`）：
 > - 读取 `%APPDATA%\NewCosmos\shell.json` 的 `updateManifestUrl`；未配置时只提示，不会自动升级。
 > - 示例：`{ "updateManifestUrl": "https://cosmos-static.sua17.cn:20000/downloads/windows/latest.json" }`
 > - 比较清单 `version` 与当前 `InformationalVersion`；下载后校验 SHA256，再以
 >   `/SILENT /NORESTART` 启动 Inno 安装包。
-> - Agent 没有独立更新检查；Windows 端通常由 Shell 托盘更新（安装包已捆绑 Agent）
->   或运维直接覆盖安装。
+> - **Agent 已有独立自动更新**（`agent-latest.json`，见 §6.3 与 `src/NewCosmos.Agent/README.md` §13）：
+>   后台按 `updateCheckIntervalHours` 轮询，SHA256 + Authenticode 双校验后静默升级并自重启；
+>   托盘「立即检查更新」与 `--check-update` 可手工触发。
 
 ---
 
@@ -492,13 +520,23 @@ curl -sSI https://cosmos-static.sua17.cn:20000/downloads/windows/NewCosmosShellS
      -Version <版本> -Notes '...' -Sign
    ```
 
-   Agent-only 机器可另生成指向 `NewCosmosAgentSetup_<版本>.exe` 的清单，或直接覆盖安装。
+   Agent 自动更新另需一份指向 `NewCosmosAgentSetup_<版本>.exe` 的清单（§6.3）：
 
-4. 上传安装包 + `latest.json` + `latest.json.sig`。
+   ```powershell
+   powershell -File deploy\scripts\write-update-manifest.ps1 `
+     -InstallerPath .\publish\installers\NewCosmosAgentSetup_<版本>.exe `
+     -Version <版本> -OutputPath deploy\update\agent-latest.json -Notes '...' [-Sign]
+   ```
+
+4. 上传安装包 + `latest.json` + `latest.json.sig`（Shell 清单），以及
+   `agent-latest.json` + `agent-latest.json.sig`（Agent 清单，上传路径见 §6.3）。
 5. 终端升级：运行新安装包，安装到同一 `%LOCALAPPDATA%` 目录，覆盖 exe/依赖；
    `%APPDATA%\NewCosmos\agent.json`、设备密钥和 HKCU 自启项保留。
-   Agent 没有独立更新检查；同机 Shell 配置了 `updateManifestUrl` 时，可用托盘
-   “检查更新”走 Shell+Agent 一起升级。
+   Agent 已有独立自动更新：上传 `agent-latest.json` 后，各 Windows 机会在
+   `updateCheckIntervalHours`（默认 6 小时，首查延迟 120 秒）内自行完成
+   下载 → SHA256/Authenticode 校验 → 空闲门控 → 静默升级 → 自重启；
+   也可在终端用 `NewCosmos.Agent.exe --check-update` 立即触发一次。
+   同机 Shell 配置了 `updateManifestUrl` 时，可用托盘“检查更新”走 Shell+Agent 一起升级。
 6. 静默升级（运维脚本）：
 
    ```powershell
@@ -578,6 +616,7 @@ curl -sSI https://cosmos-static.sua17.cn:20000/downloads/windows/NewCosmosShellS
 [ ] Agent 自启项写入/删除正确（HKCU Run）
 [ ] Shell 在无 WebView2 的机器上有明确引导
 [ ] latest.json 的 version/url/sha256 与实际文件一致
+[ ] agent-latest.json 的 version/url/sha256 与实际文件一致，且已上传到 downloads/windows/
 [ ] 上传后 curl 能下载，sha256sum 与清单一致
 [ ] 保留上一版安装包和清单，便于回滚
 ```
@@ -586,8 +625,11 @@ curl -sSI https://cosmos-static.sua17.cn:20000/downloads/windows/NewCosmosShellS
 
 ## 12. 已知限制
 
-- Shell 只有托盘菜单“检查更新”，不是后台自动轮询；Agent 没有独立更新检查。
+- Shell 只有托盘菜单“检查更新”，不是后台自动轮询；**Agent 是后台自动轮询**（`agent-latest.json`，
+  默认 6 小时一次，见 §6.3 与 `src/NewCosmos.Agent/README.md` §13）。
   `latest.json` 同时可供 Web 页面提示或其他客户端复用。
+- Agent 自动更新要求安装包已签名且机器已导入 `NewCosmosCodeSign.cer`（§2.2）：
+  未导入信任的机器 SHA256 能过但 Authenticode 校验会失败，该机会拒绝升级（记 Warn 日志）。
 - 自签名证书需要逐台导入信任，且不能消除 SmartScreen 的信誉提示。
 - Inno Setup 7.1.1 编译输出提示 `Non-commercial use only`，商用前需确认授权。
 - Shell 安装包默认捆绑 Agent；已单独部署 Agent 的机器应在安装时取消该任务，避免重复。

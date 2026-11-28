@@ -1,5 +1,6 @@
 using NewCosmos.Agent.Configuration;
 using NewCosmos.Agent.Services;
+using NewCosmos.Agent.Services.Update;
 using NewCosmos.Helpers;
 using NewCosmos.Services.Core;
 
@@ -175,6 +176,9 @@ internal static class Program
             case "probe-office":
                 return ProbeOffice(logger);
 
+            case "check-update":
+                return RunCheckUpdateCommand(settings, logger, cts.Token);
+
             case "render":
                 return TemplateRenderService
                     .RunAsync(
@@ -278,6 +282,38 @@ internal static class Program
         if (!info.HasWord || !info.HasExcel)
             AgentConsole.Warn("Word/Excel 至少一项不可用；文书渲染与 PDF 导出会失败。");
 
+        return 0;
+    }
+
+    /// <summary>
+    /// --check-update：部署机手工验证自动升级链路（检查清单 → 下载 → SHA256/Authenticode 校验
+    /// → 空闲门控 → 静默安装 → 退出）。只跑一次就返回；发现新版本时安装器已启动，
+    /// 本进程随后自然退出，新版由安装脚本 [Run] 段拉起。
+    /// </summary>
+    private static int RunCheckUpdateCommand(AgentSettings settings, ILoggerService logger, CancellationToken ct)
+    {
+        var service = new AgentUpdateService(
+            settings,
+            logger,
+            new AgentUpdateGate(), // CLI 没有任务循环，门控只是占位（不会有 claim 发生）
+            ProcessAgentInstaller.Launch,
+            notify: (level, message) =>
+            {
+                if (level == UpdateNotifyLevel.Warning)
+                    AgentConsole.Warn(message);
+                else
+                    AgentConsole.Info(message);
+            },
+            requestExit: null); // CLI 命令返回后进程即退出，无需托盘式让位
+
+        var result = service.CheckOnceAsync(ct).ConfigureAwait(false).GetAwaiter().GetResult();
+        if (result.IsFailure)
+        {
+            AgentConsole.Error($"检查更新失败: {result.Message}");
+            return 3;
+        }
+
+        AgentConsole.Success(result.Message);
         return 0;
     }
 }

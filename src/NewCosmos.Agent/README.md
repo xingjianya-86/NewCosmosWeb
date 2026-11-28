@@ -62,7 +62,10 @@ dotnet publish src\NewCosmos.Agent\NewCosmos.Agent.csproj -c Release -r win-x64 
   "jobPollSeconds": 3,
   "printJobsDirectory": "%TEMP%\\NewCosmos\\PrintJobs",
   "previewKeepCount": 10,
-  "machineName": "MZ-01"
+  "machineName": "MZ-01",
+  "autoUpdate": true,
+  "updateManifestUrl": "",
+  "updateCheckIntervalHours": 6
 }
 ```
 
@@ -76,6 +79,10 @@ dotnet publish src\NewCosmos.Agent\NewCosmos.Agent.csproj -c Release -r win-x64 
 | `printJobsDirectory` | 打印任务临时目录（模板/渲染源/预览 PDF），支持 `%TEMP%` | `%TEMP%\NewCosmos\PrintJobs` |
 | `previewKeepCount` | 预览 PDF 保留最近 N 个 | `10` |
 | `machineName` | 上报机器名 | `Environment.MachineName` |
+| `autoUpdate` | 是否自动检查并安装更新（见 §13） | `true` |
+| `updateManifestUrl` | 更新清单地址；空则回退 `{serverBaseUrl}/downloads/windows/agent-latest.json` | 空（回退后非空） |
+| `updateCheckIntervalHours` | 更新检查间隔（小时），1–168 | `6` |
+| `updateFirstCheckDelaySeconds` | 启动后首次更新检查延迟（秒），0–3600 | `120` |
 
 优先级（高 → 低）：
 
@@ -382,10 +389,15 @@ NewCosmos.Agent.exe
 - 批量模板任务（TemplateBatch：预览合并/打印/保存/打开目录）、索引槽分页、打印记录回传
 - 本机操作执行器（LocalOp）：公文字体检查/一键安装、ZeroTier 状态/安装/接入/退出；
   结构化结果经完成消息 `RESULT:` 前缀回传，失败走既有 fail 通道；心跳能力改为真实探测（5 分钟缓存）
+- 自动更新（L2 全自动）：清单检查 → 下载 → SHA256 + Authenticode 校验 → 空闲门控 → 静默升级自重启
+  （见 §13）
 
 未实现 / 后续：
 
-- 自动更新、安装包签名与升级回滚。
+- 升级失败的**版本回退**：安装失败会由 cmd 兜底拉起旧版（Agent 不会变砖），但不会自动重装上一版；
+  回滚需按 `deploy/RELEASE_CLIENTS.md` §10 手工覆盖安装。
+- 签名证书信任的**自动分发**：Authenticode 校验要求机器已导入 `NewCosmosCodeSign.cer`
+  （`deploy/RELEASE_CLIENTS.md` §2.2），未导入的机器会拒绝升级——证书仍需逐台/组策略下发。
 - Windows 服务（Session 0）宿主：Office COM 与打印机队列依赖登录用户会话，不建议也不计划支持。
 - 照片云端二次处理（如水印）由服务端/采集端负责，Agent 只按下发字节打印。
 
@@ -409,6 +421,13 @@ NewCosmos.Agent.exe
       缺 `Resources\ZeroTier\*.msi` 时明确回传「缺少离线安装包，请手动安装」。
 - [ ] 网页设置页「公文字体」检测出缺失清单 → 一键安装 → 重启应用与 Word 后复检无缺失；
       安装部分失败时错误信息带 x/n 与逐条原因。
+- [ ] 本地起 http 服务放 `agent-latest.json`（指向本地高版本安装包 + 正确 sha256），
+      把 `updateManifestUrl` 指过去 → 托盘气泡出现「发现新版本 …，正在升级…」→
+      Agent 退出 → 静默安装 → 新版自动拉起，`--version` 变成新版本。
+- [ ] 同上但把清单里的 `sha256` 改错 → 气泡提示「升级失败: 安装包 SHA256 校验失败…」，
+      `%TEMP%\NewCosmos\Updates` 下不留残留文件，任务轮询继续正常认领（门控已恢复）。
+- [ ] 升级前正有一个打印任务在执行 → 气泡提示「任务执行中，推迟升级」，
+      任务照常完成，下一轮检查（或托盘「立即检查更新」）再继续升级。
 
 ## 12. 本机操作指令通道（LocalOp）
 
@@ -527,3 +546,73 @@ Content-Type: application/json
    重写默认角色映射；③ 前端权限矩阵 UI 由 `GET /api/system/permissions` 数据驱动，不依赖具体码。
    详见 `LocalOpEndpoints.cs` 权限注释。
 3. 结构化结果若继续膨胀（如完整字体族名清单），再评估独立 result 端点 + `AnonymousPaths` 白名单。
+
+## 13. 自动更新（L2 全自动）
+
+Agent 自行检查清单并完成**无人值守升级**：不弹确认框、不需要人点「安装」，
+但升级前必须保证没有任务在跑，且安装包必须通过哈希与签名校验。
+
+### 13.1 清单与配置
+
+- 清单地址：`{serverBaseUrl}/downloads/windows/agent-latest.json`
+  （`updateManifestUrl` 留空时在 `Normalize()` 回退；两者都空 → 记 Debug 后跳过检查）。
+- 清单由 `deploy/scripts/write-update-manifest.ps1` 生成，字段
+  `{version,url,sha256,notes,publishedAt}`，与 Shell 的 `latest.json` 分开、互不影响。
+- 配置项：`autoUpdate`（默认 `true`）、`updateManifestUrl`、`updateCheckIntervalHours`（1–168，默认 6）、
+  `updateFirstCheckDelaySeconds`（0–3600，默认 120，给启动期留窗口）。
+- 请求带 `?t=<毫秒时间戳>`：`/downloads/` 有 1 小时缓存，否则刚发布的清单可能拿不到。
+
+### 13.2 校验链（全部通过才允许安装）
+
+1. 清单解析：非法 JSON / 缺 `version|url|sha256` / `url` 非 http(s) 绝对地址 → 放弃本轮；
+2. 版本比较：`CompareVersion(manifest.version, AgentRuntime.Version) <= 0` → 已是最新（Debug）；
+3. **SHA256**：下载到 `%TEMP%\NewCosmos\Updates\NewCosmosAgentSetup_{version}.exe`
+   （本地已有且哈希匹配则复用，不重复下载）；不匹配 → 删文件 → Warn → 放弃本轮；
+4. **Authenticode**：`X509Certificate.CreateFromSignedFile` + `X509Chain.Build` 必须有效
+   （信任锚 = 机器已导入的 `NewCosmosCodeSign.cer`，见 `deploy/RELEASE_CLIENTS.md` §2.2）；
+   未签名/链不通过 → 删文件 → Warn → 放弃本轮。
+   只有 SHA256 挡不住"清单和安装包一起被换"，签名链才把发布者收敛到受信证书。
+
+### 13.3 空闲门控（为什么不会打断打印）
+
+`AgentUpdateGate` 是任务轮询与更新流程共享的开关（`JobWorker` 构造可选注入，不传 = 行为不变）：
+
+```text
+更新线程                     JobWorker 轮询                    在执行的任务
+────────                    ──────────────                   ────────────
+RequestPause() ──────────►  IsPauseRequested=true
+                            不再 claim，500ms 短延时
+WaitForIdleAsync(60s) ───►  （in-flight 计数 = Begin/EndJob）  任务继续跑完
+   ├─ 归零 ─► 返回 true     └─ EndJob() ─► 计数归零 ─────────►  结束
+   └─ 超时 ─► Resume() + Warn「任务执行中，推迟升级」→ 下轮再试
+气泡「发现新版本 …」→ 启动安装器 → cts.Cancel（先停心跳/任务循环）→ 进程退出
+```
+
+- 暂停只影响**新任务认领**，在执行任务照常完成并回写状态；
+- 任何失败路径都会 `Resume()`，不会出现"Agent 在线却不接活"的卡死；
+- `ProcessJobAsync` 用 try/finally 配对 `BeginJob/EndJob`，计数覆盖失败回写全过程。
+
+### 13.4 安装与自重启（含失败兜底）
+
+安装用 `cmd.exe /c` 包装（无窗口）：
+
+```text
+start /wait "" "<setup>" /SILENT /NORESTART & if errorlevel 1 start "" "<当前 Agent.exe>"
+```
+
+- 安装成功 → 由 `deploy/installer/NewCosmosAgent.iss` 的 `[Run]` 段启动**新版**
+  （已去掉 `skipifsilent`，所以 `/SILENT` 静默装完也会自动启动；交互安装的完成页仍显示"运行"复选框）；
+- 安装失败（errorlevel ≥ 1，旧文件未被替换）→ cmd 把**旧版**拉起来，Agent 不会变砖；
+- 启动安装器后 Agent 主动退出（先 `cts.Cancel` 停心跳与任务循环，再退消息循环）：
+  安装器 `CloseApplications=yes` 会在 Agent 未退净时接管关闭，主动退出只是让 exe 尽早解锁。
+
+### 13.5 失败兜底与手动检查
+
+- 任何失败：`Resume()` + Warn 日志 + 气泡「升级失败: {原因}，将稍后重试」，下个周期自动重试；
+- 404（尚无清单）、网络不通、清单非法都**不会**中断心跳/任务轮询——更新是旁路功能；
+- 托盘右键「立即检查更新」：立即跑一次（结果用气泡提示）；
+- 命令行（部署机验证用，跑一次就退出）：
+
+```powershell
+NewCosmos.Agent.exe --check-update          # 退出码 0=无需升级/已启动升级，3=检查失败
+```

@@ -6,5 +6,8 @@
   "jobPollSeconds": 3,
   "printJobsDirectory": "%TEMP%\\NewCosmos\\PrintJobs",
   "previewKeepCount": 10,
-  "machineName": ""
+  "machineName": "",
+  "autoUpdate": true,
+  "updateManifestUrl": "",
+  "updateCheckIntervalHours": 6
 }

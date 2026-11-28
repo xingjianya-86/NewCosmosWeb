@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Runtime.InteropServices;
 using NewCosmos.Agent.Configuration;
 using NewCosmos.Agent.Security;
+using NewCosmos.Agent.Services.Update;
 using NewCosmos.Services.Core;
 using Forms = System.Windows.Forms;
 
@@ -22,9 +23,19 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
     private readonly HttpAgentClient _client;
     private readonly ILoggerService _logger;
     private readonly CancellationTokenSource _cts;
+    private readonly AgentUpdateGate _updateGate;
+    private readonly AgentUpdateService _updateService;
 
     private readonly Forms.NotifyIcon _notifyIcon;
     private readonly Icon _icon;
+
+    /// <summary>
+    /// UI 线程封送锚点：在托盘构造（消息循环线程）上创建并持有窗口句柄，
+    /// 升级回调（线程池触发）用它回到 UI 线程。
+    /// ApplicationContext.ExitThread 只能在消息循环线程调用，后台线程直接调会挂死退出流程。
+    /// </summary>
+    private readonly Forms.Control _uiInvoker;
+
     private Task<int>? _serviceTask;
     private bool _disposed;
 
@@ -42,6 +53,12 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
         _cts = cts ?? throw new ArgumentNullException(nameof(cts));
 
         _icon = LoadTrayIcon();
+
+        // 先建 UI 封送锚点（必须在消息循环线程上），再启动后台服务：
+        // 后台的升级回调可能立刻要回到 UI 线程弹气泡/退出。
+        _uiInvoker = new Forms.Control { Visible = false, Size = Size.Empty };
+        _ = _uiInvoker.Handle;
+
         _notifyIcon = new Forms.NotifyIcon
         {
             Icon = _icon,
@@ -50,6 +67,16 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
             ContextMenuStrip = BuildMenu()
         };
         _notifyIcon.DoubleClick += (_, _) => OpenLogDirectory();
+
+        // 自动更新与任务轮询共享同一个门控实例：升级前"停新活、等旧活"。
+        _updateGate = new AgentUpdateGate();
+        _updateService = new AgentUpdateService(
+            _settings,
+            _logger,
+            _updateGate,
+            ProcessAgentInstaller.Launch,
+            notify: NotifyUpdate,
+            requestExit: RequestExitFromUpdate);
 
         // 已注册：立即启动心跳/任务轮询；未注册：等用户用网页绑定码完成自动注册后再启动，
         // 避免后台循环因缺少 deviceKey 立即退出。
@@ -75,10 +102,31 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
             return;
 
         // 线程池执行：不捕获 WinForms 同步上下文。
-        _serviceTask = Task.Run(() => AgentServiceRunner.RunHeartbeatAndWorkerAsync(
-            _settings, _configFilePath, _client, _client, _logger, _cts));
+        // 自动更新循环与心跳/任务轮询共用同一个 cts：任一退出即全部停止
+        // （AgentServiceRunner 收尾时会 Cancel，更新循环最迟在下一次 HTTP/延时处被取消）。
+        _serviceTask = Task.Run(async () =>
+        {
+            var updateTask = _updateService.RunAsync(_cts.Token);
+            var code = await AgentServiceRunner.RunHeartbeatAndWorkerAsync(
+                _settings, _configFilePath, _client, _client, _logger, _cts).ConfigureAwait(false);
+
+            try
+            {
+                await updateTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // 正常退出
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"[Update] 更新循环退出异常: {ex.Message}");
+            }
+
+            return code;
+        });
         _ = ObserveServiceAsync(_serviceTask);
-        _logger.Info("[Tray] 后台心跳/任务轮询已启动");
+        _logger.Info("[Tray] 后台心跳/任务轮询/自动更新已启动");
     }
 
     /// <summary>启动后提示一次：未绑定设备时引导用户输入网页绑定码，而不是要求先 --register。</summary>
@@ -116,6 +164,9 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
         var openConfig = new Forms.ToolStripMenuItem("打开配置文件");
         openConfig.Click += (_, _) => OpenConfigFile();
 
+        var checkUpdate = new Forms.ToolStripMenuItem("立即检查更新");
+        checkUpdate.Click += async (_, _) => await CheckUpdateOnceAsync().ConfigureAwait(true);
+
         var exit = new Forms.ToolStripMenuItem("退出");
         exit.Click += (_, _) => RequestExit();
 
@@ -124,9 +175,79 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
         menu.Items.Add(bindPrinters);
         menu.Items.Add(openOutput);
         menu.Items.Add(openConfig);
+        menu.Items.Add(checkUpdate);
         menu.Items.Add(new Forms.ToolStripSeparator());
         menu.Items.Add(exit);
         return menu;
+    }
+
+    /// <summary>
+    /// 托盘菜单：立即检查一次更新（不阻塞 UI）。
+    /// 失败提示由 AgentUpdateService 的 notify 回调统一给出（<see cref="NotifyUpdate"/>），
+    /// 这里只补成功/跳过类结果，避免同一个失败弹两次气泡。
+    /// </summary>
+    private async Task CheckUpdateOnceAsync()
+    {
+        try
+        {
+            ShowBalloon("自动更新", "正在检查更新…", Forms.ToolTipIcon.Info);
+
+            var result = await _updateService.CheckOnceAsync(_cts.Token).ConfigureAwait(true);
+            if (result.IsSuccess)
+                ShowBalloon("自动更新", result.Message, Forms.ToolTipIcon.Info);
+        }
+        catch (OperationCanceledException)
+        {
+            // Agent 正在退出
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"[Tray] 手动检查更新异常: {ex.Message}");
+            ShowBalloon("自动更新", $"升级失败: {ex.Message}，将稍后重试", Forms.ToolTipIcon.Warning);
+        }
+    }
+
+    /// <summary>升级提示（线程池线程触发）：封送回 UI 线程再弹气泡。</summary>
+    private void NotifyUpdate(UpdateNotifyLevel level, string message)
+    {
+        RunOnUiThread(() => ShowBalloon(
+            "自动更新",
+            message,
+            level == UpdateNotifyLevel.Warning ? Forms.ToolTipIcon.Warning : Forms.ToolTipIcon.Info));
+    }
+
+    /// <summary>升级成功后让位退出：先 cts.Cancel 停心跳与任务轮询，再退出消息循环。</summary>
+    private void RequestExitFromUpdate() => RunOnUiThread(RequestExit);
+
+    /// <summary>把操作封送到 UI 线程执行（句柄不可用时降级为直接执行并留痕）。</summary>
+    private void RunOnUiThread(Action action)
+    {
+        void SafeInvoke()
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn($"[Tray] UI 操作失败: {ex.Message}");
+            }
+        }
+
+        try
+        {
+            if (_uiInvoker.IsHandleCreated)
+            {
+                _uiInvoker.BeginInvoke((Action)SafeInvoke);
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Warn($"[Tray] 封送到 UI 线程失败: {ex.Message}");
+        }
+
+        SafeInvoke();
     }
 
     private async Task SendHeartbeatOnceAsync()
@@ -356,6 +477,7 @@ public sealed class TrayApplicationContext : Forms.ApplicationContext
             try { _notifyIcon.Visible = false; } catch { /* 忽略 */ }
             _notifyIcon.Dispose();
             _icon.Dispose();
+            try { _uiInvoker.Dispose(); } catch { /* 忽略 */ }
             _cts.Dispose();
         }
 
