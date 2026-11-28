@@ -12,6 +12,11 @@ namespace NewCosmos.Services.Domain.Printing;
 
 public class PrintExecuteService : BaseService, IPrintExecuteService
 {
+    static PrintExecuteService()
+    {
+        PdfSharpLicenseBootstrap.EnsureLoaded();
+    }
+
     protected override string ServiceName => "PrintExecuteService";
 
     /// <summary>

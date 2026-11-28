@@ -1,0 +1,68 @@
+{
+    "generatedAt":  "2026-11-28T07:10:42+08:00",
+    "webVersion":  "2.0.20261128",
+    "codeVersion":  "2.0.20261128",
+    "pageUrl":  "https://cosmos.sua17.cn/",
+    "entries":  [
+                    {
+                        "id":  "web",
+                        "terminal":  "T2",
+                        "name":  "天璇 · 云阙",
+                        "platform":  "浏览器",
+                        "version":  "",
+                        "url":  "https://cosmos.sua17.cn/",
+                        "isDownload":  false,
+                        "note":  "免安装，电脑浏览器直接打开"
+                    },
+                    {
+                        "id":  "shell",
+                        "terminal":  "T5",
+                        "name":  "玉衡 · 星阁",
+                        "platform":  "Windows",
+                        "version":  "2.0.20261128",
+                        "url":  "https://cosmos-static.sua17.cn:20000/downloads/windows/NewCosmosShellSetup_2.0.20261128.exe",
+                        "isDownload":  true,
+                        "note":  "桌面壳 · 托盘常驻 · 打印代理随装"
+                    },
+                    {
+                        "id":  "agent",
+                        "terminal":  "",
+                        "name":  "打印代理 Agent",
+                        "platform":  "Windows",
+                        "version":  "2.0.20261128",
+                        "url":  "https://cosmos-static.sua17.cn:20000/downloads/windows/NewCosmosAgentSetup_2.0.20261128.exe",
+                        "isDownload":  true,
+                        "note":  "固定 PC 打印 / 文书代理（可选组件）"
+                    },
+                    {
+                        "id":  "android-shell",
+                        "terminal":  "T6",
+                        "name":  "开阳 · 星使",
+                        "platform":  "Android",
+                        "version":  "2.0.20261128",
+                        "url":  "https://cosmos-static.sua17.cn:20000/downloads/android/newcosmos-2.0.20261128.apk",
+                        "isDownload":  true,
+                        "note":  "移动壳 · 装机即用"
+                    },
+                    {
+                        "id":  "code-win",
+                        "terminal":  "T1",
+                        "name":  "天枢 · 御座",
+                        "platform":  "Windows",
+                        "version":  "2.0.20261128",
+                        "url":  "https://update.sua17.cn:20000/newcosmos/stable/NewCosmosSetup_2.0.20261128.exe",
+                        "isDownload":  true,
+                        "note":  "独立应用端 · 全功能办理 / 打印 / Office"
+                    },
+                    {
+                        "id":  "code-apk",
+                        "terminal":  "T3",
+                        "name":  "天玑 · 行杖",
+                        "platform":  "Android",
+                        "version":  "2.0.20261128",
+                        "url":  "https://update.sua17.cn:20000/newcosmos/android/NewCosmosSetup_2.0.20261128.apk",
+                        "isDownload":  true,
+                        "note":  "独立应用端 · 入户采集 / 现场录入"
+                    }
+                ]
+}

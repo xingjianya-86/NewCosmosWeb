@@ -182,6 +182,10 @@ function Invoke-Publish {
         '-c', $Configuration,
         '-r', $Runtime,
         '--self-contained', 'true',
+        # 不用 PublishSingleFile：.NET 单文件自带 deflate 压缩，Inno 的 lzma2 再压不动，
+        # 实测安装包反而变大（Shell 98.6→127.1MB、Agent 49.3→61.8MB）。
+        # 保持散文件夹，让 lzma2 直接压原始 IL，压缩率最高。
+        '-p:PublishDocumentationFiles=false',
         '-p:DebugType=None',
         '-p:DebugSymbols=false',
         '-o', $OutDir

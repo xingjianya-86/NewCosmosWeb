@@ -14,6 +14,7 @@
 - 高龄老人信息变更：变更申请、审核流转、列表查询。
 - 认证报表 PDF 支持内置中文字体（Noto Sans），不依赖服务器系统字体包。
 - 顶栏右上角新增「北斗终端」入口：点击用系统浏览器打开随包发布的终端序列页（`web/public/terminal/index.html`），覆盖浏览器桌面/移动、Windows 壳、Android 壳。
+- 新增**客户端下载页** `https://cosmos.sua17.cn/download.html`：网页端 / Windows 桌面壳 / 打印代理 / Android 移动壳 / 独立应用端 Windows 与 Android，**每个软件一个下载按钮**；版本与地址由发布脚本生成同源 `download-data.json`（`.2` 的 `/downloads/` 无 CORS，页面跨域读不到清单），并内置兜底数据。
 
 ### 变更
 
@@ -29,6 +30,9 @@
 
 - 修复从 `C:\Projects` Junction 构建 Vue 时 Vite 报 `index.html` 绝对路径的问题。
 - 消除 NuGet 漏洞审计警告 NU1902/NU1903：显式 pin `System.Security.Cryptography.Pkcs` / `System.Security.Cryptography.Xml` 10.0.15、`Microsoft.Build.Tasks.Git` 10.0.404；移除 Agent 多余 PackageReference 消除 NU1510。
+- **修复发布脚本漏传静态文件**：原逻辑只把 `index.html` 发到 `.1`、只把 `assets/` 发到 `.2`，导致 `download.html`、`terminal/`、`images/`、`splash/` 线上 404 或被 `.1` 的 SPA 兜底吞成 `index.html`；现改为 `.1` 收根目录所有文件、`.2` 收所有静态资源目录，并逐文件 SHA256 校验。
+- **回退 Agent/Shell 单文件压缩**：`PublishSingleFile + EnableCompressionInSingleFile` 反而使安装包变大（Shell 98.6→127.1MB、Agent 49.3→61.8MB，.NET 单文件自带压缩后 lzma2 已压不动），恢复散文件夹 + Inno `lzma2/max`，仅保留 `PublishDocumentationFiles=false`。
+- **消除编译警告**：删除 Office 侧重复的 `IArchivePhotoService`（CS0436 ×3，且同名类型分叉会让 Agent 未来触发 CS0433 硬错误）、`HukouType.Normalize` 参数改可空（CS8604）、`RemoteAssistanceRules.Resolve` 调用点补空值（CS8620）；Web 构建现为 **0 警告 0 错误**。
 
 ---
 

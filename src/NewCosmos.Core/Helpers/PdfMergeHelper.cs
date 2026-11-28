@@ -9,6 +9,11 @@ namespace NewCosmos.Helpers;
 /// </summary>
 public static class PdfMergeHelper
 {
+    static PdfMergeHelper()
+    {
+        PdfSharpLicenseBootstrap.EnsureLoaded();
+    }
+
     public static byte[] Merge(IReadOnlyList<byte[]> pdfs)
     {
         if (pdfs.Count == 0)

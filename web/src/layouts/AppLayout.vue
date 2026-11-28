@@ -5,6 +5,7 @@ import type { Component } from 'vue'
 import {
   Calendar,
   Coin,
+  Compass,
   Connection,
   DataBoard,
   Document,
@@ -217,6 +218,27 @@ function goSettings(): void {
   void router.push('/settings')
 }
 
+/**
+ * 北斗终端序列页：点顶栏右上角按钮用系统浏览器打开。
+ * - 页面发在 .1 同源根（.1 只放行 .html 与目录内页面；.2 的 nginx 只放行
+ *   /assets/ /images/ /splash/ /downloads/ /api/，所以 terminal/ 必须在 .1）。
+ * - 浏览器（T2/T4）：window.open 新标签 = 系统浏览器界面
+ * - Windows 壳（T5）：WebView2 把新窗口请求转交系统浏览器
+ * - Android 壳（T6）：同域 window.open 会在壳内打开，必须走原生桥 openExternal
+ */
+function openTerminalGuide(): void {
+  const url = new URL('/terminal/index.html', window.location.origin).toString()
+  if (/NewCosmosAndroid\//.test(navigator.userAgent)) {
+    const bridge = (window as unknown as { NcShellNative?: { openExternal?: (u: string) => void } })
+      .NcShellNative
+    if (bridge && typeof bridge.openExternal === 'function') {
+      bridge.openExternal(url)
+      return
+    }
+  }
+  window.open(url, '_blank')
+}
+
 async function handleLogout(): Promise<void> {
   try {
     await ElMessageBox.confirm('确定要退出登录吗', '确认', {
@@ -292,6 +314,16 @@ onBeforeUnmount(() => {
               <el-icon :size="20"><UserFilled /></el-icon>
               <span class="user-badge-name">{{ auth.displayName }}</span>
             </div>
+
+            <button
+              class="icon-button"
+              type="button"
+              aria-label="北斗终端"
+              title="北斗终端序列"
+              @click="openTerminalGuide"
+            >
+              <el-icon :size="18"><Compass /></el-icon>
+            </button>
 
             <button class="icon-button" type="button" aria-label="系统设置" @click="goSettings">
               <el-icon :size="18"><Setting /></el-icon>

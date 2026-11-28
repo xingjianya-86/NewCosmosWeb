@@ -26,16 +26,20 @@
     <PackageReference Include="Serilog" Version="4.4.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
     <PackageReference Include="Serilog.Sinks.Async" Version="2.1.0" />
-    <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="Npgsql" Version="10.0.4" />
     <PackageReference Include="BCrypt.Net-Next" Version="4.2.1" />
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
-    <PackageReference Include="EPPlus" Version="8.6.3" />
+    <PackageReference Include="EPPlus" Version="8.7.3" />
     <PackageReference Include="ExcelDataReader" Version="3.9.0" />
     <PackageReference Include="ExcelDataReader.DataSet" Version="3.9.0" />
     <PackageReference Include="TinyPinyin" Version="1.1.0" />
-    <PackageReference Include="NPOI" Version="2.8.0" />
-    <PackageReference Include="PDFsharp" Version="6.1.1" />
-    <PackageReference Include="SkiaSharp" Version="3.119.2" />
+    <PackageReference Include="NPOI" Version="2.8.1" />
+    <!-- 与 NewCosmosCode 同步：EPPlus/NPOI 传递引入的加密包显式提升到已修补版本，消除 NU1902/NU1903 -->
+    <PackageReference Include="Microsoft.Build.Tasks.Git" Version="10.0.404" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.15" />
+    <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.15" />
+    <PackageReference Include="PDFsharp" Version="6.5.0" />
+    <PackageReference Include="SkiaSharp" Version="3.119.4" />
   </ItemGroup>
 
 </Project>

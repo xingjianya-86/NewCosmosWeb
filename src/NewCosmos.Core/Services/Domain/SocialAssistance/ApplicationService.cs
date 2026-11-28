@@ -379,7 +379,7 @@ public class ApplicationService : BaseService, IApplicationService
         }
 
         var gate = RemoteAssistanceRules.Resolve(
-            (statusResult.Value ?? []).Select(row => row.Status));
+            (statusResult.Value ?? []).Select(row => row.Status ?? string.Empty));
         switch (gate)
         {
             case RemoteAssistanceGate.BlockedActive:

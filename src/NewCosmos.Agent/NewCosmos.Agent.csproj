@@ -22,10 +22,8 @@
     <ProjectReference Include="..\NewCosmos.Office\NewCosmos.Office.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.10" />
-    <PackageReference Include="System.Drawing.Common" Version="10.0.10" />
-  </ItemGroup>
+  <!-- System.Security.Cryptography.ProtectedData / System.Drawing.Common 由 net10.0-windows + UseWindowsForms
+       框架自带，显式 PackageReference 会触发 NU1510，已移除（代码中的 ProtectedData / System.Drawing.Printing 照常可用）。 -->
 
   <ItemGroup>
     <!-- 托盘图标：嵌入 legacy appicon.png（无 .ico，运行时用 GDI+ 生成 Icon）。 -->

@@ -37,6 +37,9 @@ using NewCosmos.Services.Platform;
 using NewCosmos.Services.System;
 using NewCosmos.Services.UserManagement;
 using NewCosmos.Services.Utilities;
+using NewCosmos.Helpers;
+
+PdfSharpLicenseBootstrap.EnsureLoaded();
 
 var serverOptions = ServerEnvironmentOptions.Load();
 

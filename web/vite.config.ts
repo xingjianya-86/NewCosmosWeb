@@ -177,6 +177,10 @@ export default defineConfig(({ mode }) => {
   },
   build: {
     target: 'es2020',
+    // 显式压缩：JS/CSS 走 esbuild 压缩，去掉第三方 license 注释（减少体积与首屏解析）。
+    minify: 'esbuild',
+    cssMinify: 'esbuild',
+    esbuild: { legalComments: 'none' },
     cssCodeSplit: true,
     sourcemap: false,
     // 首屏预算意识：路由级分包 + 依赖分包。

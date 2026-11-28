@@ -26,6 +26,11 @@ public sealed class ElderlyCertificationPdfOptions
 /// </summary>
 public static class ElderlyCertificationPdfRenderer
 {
+    static ElderlyCertificationPdfRenderer()
+    {
+        PdfSharpLicenseBootstrap.EnsureLoaded();
+    }
+
     private const double PageMargin = 26;
     private const double TitleTop = 20;
     private const double TitleHeight = 22;

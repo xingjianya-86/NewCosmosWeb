@@ -24,6 +24,17 @@
 C:\Projects\publish-all.ps1
 ```
 
+双击 `C:\Projects\publish-all.bat`（或不带参数运行 `.ps1`）进入**预设菜单**：
+
+```text
+1) Web 全量发布   2) Code 全量发布   3) All 全量发布
+4) Web 仅构建     5) Code 仅构建      6) 自定义步骤
+7) 清理           8) DryRun 体检      9) 查看版本与产物   0) 退出
+```
+
+选完再问版本号与更新说明；预检含 **NuGet 漏洞阻断**（有已知漏洞即中止，`-SkipVulnerabilityCheck` 可跳过）。
+CI 用 `-NonInteractive` 关闭菜单，`-Menu` 可强制进入。
+
 ```powershell
 # 完整发布 Web（API + 页面 + 安装包 + APK）
 powershell -NoProfile -ExecutionPolicy Bypass -File C:\Projects\publish-all.ps1 -Project Web -All
@@ -41,7 +52,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Projects\publish-all.ps1 
 - 文件自带配置区（服务器地址、SSH 密钥、签名证书、清理保留数），不再依赖本仓库的 `deploy.local.ps1`；
 - `.1` 与 `.2` 可使用不同密钥：配置区的 `Web.EdgeSshKey` / `Web.AppSshKey`（留空则回退 `Web.SshKey`）；
 - `.1` 首次接入：把发布公钥（默认 `%USERPROFILE%\.ssh\id_ed25519_newcosmos.pub`）追加到 `.1` 的 `/root/.ssh/authorized_keys`，否则预检会报 `Permission denied`；
-- 所有功能都是选项：`-Only` / `-Skip` 控制步骤，`-Cleanup` 控制清理，`-NoSign` 关闭签名，`-SkipGit` / `-SkipPush` 控制提交；
+- 所有功能都是选项：`-Only` / `-Skip` 控制步骤，`-Cleanup` 控制清理，`-NoSign` 关闭签名，`-SkipGit` / `-SkipPush` 控制提交，`-SkipDownloadVerify` 跳过回环下载校验；
+- **Verify 步骤含回环下载校验**：把刚上传的 Windows 安装包 / Android APK 从服务器拉回，与清单、本地文件三方比对 SHA256；
 - **数据库 SQL 不再由发布工具执行**。Schema 在开发期随 `src/NewCosmos.Server/Migrations` 与 `Resources/Schema` 维护；
 - 本目录下的 `deploy-server.ps1`、`deploy-web-split.ps1`、`build-installers.ps1`、`build-apk.ps1` 仍作为底层执行器保留，可单独使用。
 

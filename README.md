@@ -34,3 +34,12 @@ cd web; npm install; npm run dev
 - `docs/PRINTER_BINDING.md`
 - `docs/KNOWN_ISSUES.md`
 
+## 开源许可
+
+[GPL-3.0](LICENSE)。
+
+第三方依赖许可：`PDFsharp` 6.5.0 起为 **AGPL-3.0 / 商业双许可**，本项目按 AGPL 使用
+（服务端 / Agent / 测试启动时由 `PdfSharpLicenseBootstrap.EnsureLoaded()` 显式加载）；
+GPLv3 与 AGPLv3 兼容，组合分发按 GPLv3。其余依赖（EPPlus、NPOI、SkiaSharp、Npgsql 等）
+许可见各包自带 LICENSE。
+

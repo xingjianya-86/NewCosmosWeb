@@ -1,5 +1,6 @@
 using NewCosmos.Agent.Configuration;
 using NewCosmos.Agent.Services;
+using NewCosmos.Helpers;
 using NewCosmos.Services.Core;
 
 namespace NewCosmos.Agent;
@@ -14,6 +15,7 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        PdfSharpLicenseBootstrap.EnsureLoaded();
         ILoggerService? logger = null;
 
         try

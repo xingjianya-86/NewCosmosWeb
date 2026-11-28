@@ -36,6 +36,7 @@ mobile/android/local.properties
 # Runtime
 logs/
 Logs/
+backup/
 backups/
 Backups/
 output/

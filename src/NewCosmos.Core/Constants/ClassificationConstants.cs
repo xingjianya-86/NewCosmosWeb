@@ -382,7 +382,7 @@ public static class ClassificationConstants
         public static bool IsHukouRural(string hukouType) =>
             !string.IsNullOrEmpty(hukouType) && RuralTypes.Contains(hukouType);
 
-        public static string Normalize(string hukouType)
+        public static string Normalize(string? hukouType)
         {
             if (string.IsNullOrWhiteSpace(hukouType)) return RURAL;
             return IsHukouUrban(hukouType) ? URBAN : RURAL;

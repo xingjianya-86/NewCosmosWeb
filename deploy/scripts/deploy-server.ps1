@@ -93,9 +93,17 @@ function Invoke-Remote {
     )
     $sshArgs = Get-SshBaseArgs -TargetHost $TargetHost
     $sshArgs += $Command
-    & ssh @sshArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "远程命令失败（host=$TargetHost, exit=$LASTEXITCODE）。"
+    # SSH 横幅写到 stderr，Stop 模式会误判；临时放宽，用退出码判定。
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        & ssh @sshArgs
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldEap
+    }
+    if ($exitCode -ne 0) {
+        throw "远程命令失败（host=$TargetHost, exit=$exitCode）。"
     }
 }
 
@@ -106,11 +114,27 @@ function Invoke-RemoteCapture {
     )
     $sshArgs = Get-SshBaseArgs -TargetHost $TargetHost
     $sshArgs += $Command
-    $output = & ssh @sshArgs 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "远程命令失败（host=$TargetHost, exit=$LASTEXITCODE）：$Command`n$output"
+    $errFile = [IO.Path]::GetTempFileName()
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        $output = & ssh @sshArgs 2> $errFile
+        $code = $LASTEXITCODE
+        $text = ($output | Out-String).Trim()
+        $errText = ''
+        if (Test-Path -LiteralPath $errFile) {
+            $errText = [IO.File]::ReadAllText($errFile, [Text.Encoding]::Default).Trim()
+        }
     }
-    return (($output | Out-String).Trim())
+    finally {
+        $ErrorActionPreference = $oldEap
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
+    if ($code -ne 0) {
+        throw "远程命令失败（host=$TargetHost, exit=$code）：$Command`n$errText"
+    }
+    # 成功时只返回 stdout；SSH 登录横幅在 stderr，不能混进哈希/输出。
+    return $text
 }
 
 function Copy-ToRemote {
@@ -129,9 +153,18 @@ function Copy-ToRemote {
     )
     if ($Recurse) { $scpArgs += "-r" }
     $scpArgs += @($LocalPath, "$RemoteUser@${TargetHost}:$RemotePath")
-    & scp @scpArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "上传失败（host=$TargetHost, path=$RemotePath, exit=$LASTEXITCODE）。"
+    # SSH/scp 的服务器横幅写在 stderr，PowerShell Stop 模式会误判为终止错误；
+    # 临时放宽，真正失败由 $LASTEXITCODE 判定。
+    $oldEap = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        & scp @scpArgs
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldEap
+    }
+    if ($exitCode -ne 0) {
+        throw "上传失败（host=$TargetHost, path=$RemotePath, exit=$exitCode）。"
     }
 }
 

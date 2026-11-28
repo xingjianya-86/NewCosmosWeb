@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="帝皇权杖 δ-me13 民政社会救助管理系统 · 客户端下载中心" />
+<title>客户端下载 · 帝皇权杖 δ-me13</title>
+<style>
+:root{
+  color-scheme: light;
+  --paper:#f2ece1; --paper2:#f8f3e9; --paper3:#e9e1d1; --paper4:#dfd5c2;
+  --ink:#171310; --ink2:#4c4237; --muted:#8b7f6c; --muted2:#6d6354;
+  --seal:#ab3227; --line:rgba(23,19,16,.16); --line-strong:rgba(23,19,16,.32); --line-faint:rgba(23,19,16,.07);
+  --serif:'Noto Serif SC','Source Han Serif SC','Songti SC',STSong,SimSun,Georgia,serif;
+  --sans:'Noto Sans SC','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Segoe UI',Arial,sans-serif;
+  --mono:'DM Mono','JetBrains Mono','Cascadia Mono',Consolas,'Courier New',monospace;
+  --r:2px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.7;-webkit-font-smoothing:antialiased}
+h1,h2,h3{margin:0;font-family:var(--serif);font-weight:700;letter-spacing:.06em}
+a{color:inherit;text-decoration:none}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* ── 顶栏 ── */
+.topbar{display:flex;align-items:center;gap:13px;height:58px;padding:0 clamp(16px,4vw,40px);background:var(--paper2);border-bottom:1px solid var(--line-strong)}
+.topbar::before{content:'';width:4px;height:24px;background:var(--seal);border-radius:1px}
+.topbar h1{font-size:16px}
+.topbar .kicker{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.24em;color:var(--muted2);text-transform:uppercase}
+.topbar .spacer{flex:1}
+.topbar .go{font-family:var(--mono);font-size:11.5px;letter-spacing:.08em;color:var(--seal);border:1px solid var(--line);padding:6px 12px;border-radius:var(--r);transition:.16s}
+.topbar .go:hover{background:var(--seal);color:#fff;border-color:var(--seal)}
+
+/* ── Hero：北斗 ── */
+.hero{position:relative;overflow:hidden;padding:clamp(30px,5vw,54px) clamp(16px,4vw,40px);background:repeating-linear-gradient(0deg,transparent 0 34px,rgba(23,19,16,.04) 34px 35px),var(--paper3);border-bottom:1px solid var(--line-strong)}
+.hero-in{display:grid;grid-template-columns:minmax(280px,1fr) minmax(300px,1.1fr);gap:clamp(20px,4vw,48px);align-items:center;max-width:1200px;margin:0 auto}
+.kick{display:inline-flex;align-items:center;gap:9px;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.24em;color:var(--muted2);text-transform:uppercase}
+.kick::before{content:'';width:7px;height:7px;background:var(--seal);border-radius:1px}
+.hero h2{margin-top:16px;font-size:clamp(26px,3.6vw,42px);line-height:1.3}
+.hero h2 em{font-style:normal;color:var(--seal)}
+.hero p{margin-top:14px;max-width:46ch;color:var(--ink2);font-size:13.5px;line-height:1.95}
+.stats{display:flex;flex-wrap:wrap;gap:10px;margin-top:24px}
+.stat{padding:9px 14px;background:var(--paper2);border:1px solid var(--line);border-radius:var(--r)}
+.stat b{display:block;font-family:var(--mono);font-size:18px;letter-spacing:.04em}
+.stat span{font-size:11px;color:var(--muted);letter-spacing:.1em}
+.dipper{background:#0e1116;border:1px solid #262d38;border-radius:var(--r);box-shadow:0 14px 32px rgba(14,17,22,.35);overflow:hidden;position:relative}
+.dipper::after{content:'';position:absolute;inset:0;background:radial-gradient(120% 90% at 78% 8%,rgba(201,162,74,.18),transparent 60%);pointer-events:none}
+.dipper-h{display:flex;align-items:center;gap:9px;padding:11px 16px;border-bottom:1px solid rgba(233,226,214,.12);color:#8b8577;font-family:var(--mono);font-size:10px;letter-spacing:.2em;text-transform:uppercase}
+.dipper-h::before{content:'';width:6px;height:6px;border-radius:50%;background:#c9a24a;box-shadow:0 0 8px #c9a24a}
+.dipper svg{display:block;width:100%;height:auto}
+.star{fill:#e9e2d6;filter:drop-shadow(0 0 6px rgba(201,162,74,.85));animation:tw 3.4s ease-in-out infinite}
+.star.g{fill:#c9a24a;animation-duration:2.6s}
+.link{stroke:rgba(201,162,74,.55);stroke-width:1.1;fill:none;stroke-dasharray:700;stroke-dashoffset:700;animation:dr 2.2s ease forwards}
+.slab{fill:#9a9384;font-family:var(--mono);font-size:11px;letter-spacing:.12em}
+.sname{fill:#e9e2d6;font-family:var(--serif);font-size:13px;letter-spacing:.14em}
+@keyframes tw{0%,100%{opacity:.55}50%{opacity:1}}
+@keyframes dr{to{stroke-dashoffset:0}}
+
+/* ── 区块 ── */
+main{max-width:1200px;margin:0 auto;padding:clamp(30px,5vw,56px) clamp(16px,4vw,40px)}
+.group+.group{margin-top:clamp(30px,4vw,46px);padding-top:clamp(26px,4vw,40px);border-top:1px solid var(--line-faint)}
+.g-head{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+.g-head h2{font-size:clamp(19px,2.2vw,24px)}
+.g-head .n{font-family:var(--mono);font-size:11px;letter-spacing:.18em;color:var(--muted2);text-transform:uppercase}
+.g-head .hint{font-size:12.5px;color:var(--muted2);margin-left:auto}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(288px,1fr));gap:16px}
+.cards.wide{grid-template-columns:1fr}
+
+/* ── 卡片 ── */
+.card{--acc:var(--seal);position:relative;display:flex;flex-direction:column;gap:11px;padding:19px 20px 18px;background:var(--paper2);border:1px solid var(--line);border-radius:var(--r);box-shadow:0 2px 8px rgba(23,19,16,.07);transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease}
+.card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--acc)}
+.card:hover{transform:translateY(-2px);box-shadow:0 14px 32px rgba(23,19,16,.14);border-color:rgba(23,19,16,.28)}
+.c-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.term{font-family:var(--mono);font-size:11.5px;font-weight:700;letter-spacing:.14em;color:var(--acc);border:1px solid color-mix(in srgb,var(--acc) 35%,transparent);padding:2px 8px;border-radius:var(--r);background:color-mix(in srgb,var(--acc) 8%,transparent)}
+.plat{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;color:var(--muted2);text-transform:uppercase}
+.card h3{font-size:19px;letter-spacing:.1em}
+.card .en{font-family:var(--mono);font-size:10.5px;letter-spacing:.2em;color:var(--muted);text-transform:uppercase;margin-top:-6px}
+.card .note{font-size:12.5px;color:var(--ink2);line-height:1.8;min-height:44px}
+.meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px;color:var(--muted2);letter-spacing:.05em}
+.meta .v{color:var(--ink2);background:var(--paper3);border:1px solid var(--line);padding:2px 8px;border-radius:var(--r)}
+.btn{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:2px;padding:12px 16px;background:var(--acc);border-radius:var(--r);color:#fff;font-family:var(--serif);font-size:15px;letter-spacing:.24em;transition:.16s;cursor:pointer}
+.btn:hover{filter:brightness(.92)}
+.btn.ghost{background:transparent;color:var(--acc);border:1px solid var(--acc);letter-spacing:.18em}
+.btn.ghost:hover{background:var(--acc);color:#fff;filter:none}
+.btn .sz{font-family:var(--mono);font-size:11px;letter-spacing:.06em;opacity:.85}
+
+/* ── 选择指南 ── */
+.guide{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;margin-top:clamp(30px,4vw,46px);padding-top:clamp(26px,4vw,40px);border-top:1px solid var(--line-faint)}
+.guide .g{padding:17px 18px;background:var(--paper2);border:1px solid var(--line);border-top:3px solid var(--acc,var(--seal));border-radius:var(--r)}
+.guide h4{margin:0 0 8px;font-family:var(--serif);font-size:15.5px;letter-spacing:.08em}
+.guide p{margin:0;font-size:12.5px;color:var(--ink2);line-height:1.85}
+.guide code{font-family:var(--mono);font-size:11.5px;background:var(--paper3);padding:1px 5px;border-radius:1px}
+
+.notice{margin-top:20px;padding:13px 16px;background:var(--seal-soft,#f2dcd9);border:1px solid rgba(171,50,39,.3);border-left:3px solid var(--seal);border-radius:var(--r);font-size:12.5px;color:#7f231b}
+footer{padding:24px clamp(16px,4vw,40px) 40px;border-top:1px solid var(--line-strong);color:var(--muted);font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-align:center}
+footer .row{max-width:1200px;margin:0 auto;display:flex;flex-wrap:wrap;gap:14px;justify-content:space-between;text-align:left}
+@media (max-width:860px){
+  .hero-in{grid-template-columns:1fr}
+  .card .note{min-height:0}
+  .g-head .hint{margin-left:0;flex-basis:100%}
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <h1>帝皇权杖 δ-me13</h1>
+  <span class="kicker">Download Center</span>
+  <span class="spacer"></span>
+  <a class="go" href="./">进入系统 →</a>
+</header>
+
+<section class="hero">
+  <div class="hero-in">
+    <div>
+      <span class="kick">NewCosmos · Clients</span>
+      <h2>七枚终端，<em>一套身份</em><br/>按岗位选，装完即用</h2>
+      <p>网页端免安装、桌面壳带打印代理、独立应用端走完整业务链路。同一账号在各端之间按端族互踢，不会重复登录。</p>
+      <div class="stats">
+        <div class="stat"><b>6</b><span>可下载客户端</span></div>
+        <div class="stat"><b>2</b><span>端族配额</span></div>
+        <div class="stat"><b>SHA256</b><span>回环校验</span></div>
+      </div>
+    </div>
+    <div class="dipper">
+      <div class="dipper-h">Beidou · Terminal Map</div>
+      <svg viewBox="0 0 360 178" role="img" aria-label="北斗终端星图">
+        <path class="link" d="M56,124 L112,140 L172,132 L214,100 L258,68 L296,38 L330,14" />
+        <g class="star"><circle cx="56" cy="124" r="4.4"/></g>
+        <g class="star"><circle cx="112" cy="140" r="4.4"/></g>
+        <g class="star"><circle cx="172" cy="132" r="4.4"/></g>
+        <g class="star"><circle cx="214" cy="100" r="4.4"/></g>
+        <g class="star"><circle cx="258" cy="68" r="4.4"/></g>
+        <g class="star"><circle cx="296" cy="38" r="4.4"/></g>
+        <g class="star g"><circle cx="330" cy="14" r="5.4"/></g>
+        <text class="slab" x="44" y="146">T1</text><text class="sname" x="34" y="164">御座</text>
+        <text class="slab" x="100" y="162">T2</text><text class="sname" x="90" y="176">云阙</text>
+        <text class="slab" x="160" y="154">T3</text><text class="sname" x="150" y="170">行杖</text>
+        <text class="slab" x="202" y="86">T4</text><text class="sname" x="192" y="74">轻舟</text>
+        <text class="slab" x="246" y="56">T5</text><text class="sname" x="236" y="44">星阁</text>
+        <text class="slab" x="284" y="28">T6</text><text class="sname" x="274" y="16">星使</text>
+        <text class="slab" x="322" y="40" style="fill:#c9a24a">T7</text><text class="sname" x="312" y="56" style="fill:#c9a24a">天鉴</text>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<main>
+  <div id="status" class="notice" hidden></div>
+
+  <section class="group">
+    <div class="g-head">
+      <span class="n">01</span>
+      <h2>立即使用 · 免安装</h2>
+      <span class="hint">电脑浏览器直接打开，无需下载</span>
+    </div>
+    <div class="cards" id="g-open"></div>
+  </section>
+
+  <section class="group">
+    <div class="g-head">
+      <span class="n">02</span>
+      <h2>Windows 客户端</h2>
+      <span class="hint">Windows 10 / 11 · 64 位</span>
+    </div>
+    <div class="cards" id="g-win"></div>
+  </section>
+
+  <section class="group">
+    <div class="g-head">
+      <span class="n">03</span>
+      <h2>Android 客户端</h2>
+      <span class="hint">Android 7.0 及以上</span>
+    </div>
+    <div class="cards" id="g-and"></div>
+  </section>
+
+  <section class="guide">
+    <div class="g" style="--acc:#2f4a63">
+      <h4>只是查数据、办业务</h4>
+      <p>用 <b>网页端</b> 就够了，浏览器打开即用；需要经常在固定电脑打印文书，再装 <b>桌面壳</b>，打印代理会随装。</p>
+    </div>
+    <div class="g" style="--acc:#ab3227">
+      <h4>要完整功能与离线打印</h4>
+      <p>装 <b>独立应用端</b>（<code>T1 御座</code> / <code>T3 行杖</code>）：Office 直出、批量打印、导入导出全链路，功能与网页端同源。</p>
+    </div>
+    <div class="g" style="--acc:#8a4b2a">
+      <h4>下村入户、现场采集</h4>
+      <p>手机装 <b>移动壳</b>（<code>T6 星使</code>）或 <b>独立应用端安卓版</b>（<code>T3 行杖</code>），拍照、OCR、签名都能在手机上完成。</p>
+    </div>
+  </section>
+
+  <div class="notice">
+    安装包均由发布流程做 <b>回环下载校验</b>（从服务器拉回后与清单、本地文件三方比对 SHA256）。
+    同一账号在各端之间按端族互踢：网页与桌面同族、手机网页与安卓应用同族，避免重复登录。
+  </div>
+</main>
+
+<footer>
+  <div class="row">
+    <span id="foot-ver">版本信息加载中…</span>
+    <span>© 2026 帝皇权杖δ-me13 社会救助管理系统 · 政务内网专用</span>
+  </div>
+</footer>
+
+<script>
+// 内置兜底数据：download-data.json 拉取失败时按钮仍可用
+var FALLBACK = {
+  generatedAt: '2026-11-28T01:40:00+08:00',
+  webVersion: '2.0.20261128',
+  codeVersion: '1.2.20261124',
+  pageUrl: 'https://cosmos.sua17.cn/',
+  entries: [
+    { id:'web', terminal:'T2', name:'天璇 · 云阙', platform:'浏览器', version:'', url:'https://cosmos.sua17.cn/', isDownload:false, note:'免安装，电脑浏览器直接打开', en:'Skyhold' },
+    { id:'shell', terminal:'T5', name:'玉衡 · 星阁', platform:'Windows', version:'2.0.20261128', url:'https://cosmos-static.sua17.cn:20000/downloads/windows/NewCosmosShellSetup_2.0.20261128.exe', isDownload:true, note:'桌面壳 · 托盘常驻 · 打印代理随装', en:'Pavilion' },
+    { id:'agent', terminal:'', name:'打印代理 Agent', platform:'Windows', version:'2.0.20261128', url:'https://cosmos-static.sua17.cn:20000/downloads/windows/NewCosmosAgentSetup_2.0.20261128.exe', isDownload:true, note:'固定 PC 打印 / 文书代理（可选组件）', en:'Agent' },
+    { id:'code-win', terminal:'T1', name:'天枢 · 御座', platform:'Windows', version:'1.2.20261124', url:'https://update.sua17.cn:20000/newcosmos/stable/NewCosmosSetup_1.2.20261124.exe', isDownload:true, note:'独立应用端 · 全功能办理 / 打印 / Office', en:'Throne' },
+    { id:'android-shell', terminal:'T6', name:'开阳 · 星使', platform:'Android', version:'2.0.20261128', url:'https://cosmos-static.sua17.cn:20000/downloads/android/newcosmos-2.0.20261128.apk', isDownload:true, note:'移动壳 · 装机即用', en:'Envoy' },
+    { id:'code-apk', terminal:'T3', name:'天玑 · 行杖', platform:'Android', version:'1.2.20261124', url:'https://update.sua17.cn:20000/newcosmos/android/NewCosmosSetup_1.2.20261124.apk', isDownload:true, note:'独立应用端 · 入户采集 / 现场录入', en:'Wayfarer' }
+  ]
+};
+
+var COLORS = { web:'#2f4a63', shell:'#5a4a72', agent:'#6d6354', 'android-shell':'#8a4b2a', 'code-win':'#ab3227', 'code-apk':'#96681c' };
+var GROUPS = { open:['web'], win:['shell','agent','code-win'], and:['android-shell','code-apk'] };
+var ORDER = ['shell','agent','code-win','android-shell','code-apk'];
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+
+function card(e){
+  var color = COLORS[e.id] || '#ab3227';
+  var badge = e.terminal ? '<span class="term">'+esc(e.terminal)+'</span>' : '<span class="term" style="opacity:.55">组件</span>';
+  var ver = e.version ? '<span class="v">v'+esc(e.version)+'</span>' : '<span>无需安装</span>';
+  var btn = e.isDownload
+    ? '<a class="btn" href="'+esc(e.url)+'" download>下 载<span class="sz">'+esc(e.platform)+'</span></a>'
+    : '<a class="btn ghost" href="'+esc(e.url)+'" target="_blank" rel="noopener">立即打开</a>';
+  return '<article class="card" style="--acc:'+color+'">'+
+    '<div class="c-top">'+badge+'<span class="plat">'+esc(e.platform)+'</span></div>'+
+    '<h3>'+esc(e.name)+'</h3>'+
+    (e.en ? '<div class="en">'+esc(e.en)+'</div>' : '')+
+    '<p class="note">'+esc(e.note)+'</p>'+
+    '<div class="meta">'+ver+'</div>'+
+    btn+
+  '</article>';
+}
+
+function render(data){
+  var byId = {};
+  (data.entries||[]).forEach(function(e){ byId[e.id]=e; });
+
+  function fill(elId, ids){
+    var html = '';
+    ids.forEach(function(id){ if(byId[id]) html += card(byId[id]); });
+    document.getElementById(elId).innerHTML = html;
+  }
+  fill('g-open', GROUPS.open);
+  fill('g-win', GROUPS.win);
+  fill('g-and', GROUPS.and);
+
+  document.getElementById('foot-ver').textContent =
+    'Web '+(data.webVersion||'-')+' · 独立应用端 '+(data.codeVersion||'-')+' · 数据更新 '+(data.generatedAt||'-');
+}
+
+render(FALLBACK);
+
+// 拉取同源最新数据（发布脚本在版本步骤生成），失败则保留兜底
+// data/download.json 与页面同源（.1 的 nginx 会404掉根级 .json，必须放子目录）
+fetch('./data/download.json', { cache:'no-store' })
+  .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+  .then(function(d){ if(d && d.entries && d.entries.length) render(d); })
+  .catch(function(err){
+    var s = document.getElementById('status');
+    s.hidden = false;
+    s.textContent = '未能读取最新版本信息（'+err.message+'），当前显示最近一次发布的下载地址。';
+  });
+</script>
+</body>
+</html>
