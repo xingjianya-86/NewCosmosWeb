@@ -1,6 +1,6 @@
 {
-    "generatedAt":  "2026-11-28T07:10:42+08:00",
-    "webVersion":  "2.0.20261128",
+    "generatedAt":  "2026-11-28T16:21:04+08:00",
+    "webVersion":  "2.0.20261129",
     "codeVersion":  "2.0.20261128",
     "pageUrl":  "https://cosmos.sua17.cn/",
     "entries":  [
@@ -19,8 +19,8 @@
                         "terminal":  "T5",
                         "name":  "玉衡 · 星阁",
                         "platform":  "Windows",
-                        "version":  "2.0.20261128",
-                        "url":  "https://cosmos-static.sua17.cn:20000/downloads/windows/NewCosmosShellSetup_2.0.20261128.exe",
+                        "version":  "2.0.20261129",
+                        "url":  "https://cosmos-static.sua17.cn:20000/downloads/windows/NewCosmosShellSetup_2.0.20261129.exe",
                         "isDownload":  true,
                         "note":  "桌面壳 · 托盘常驻 · 打印代理随装"
                     },
@@ -29,8 +29,8 @@
                         "terminal":  "",
                         "name":  "打印代理 Agent",
                         "platform":  "Windows",
-                        "version":  "2.0.20261128",
-                        "url":  "https://cosmos-static.sua17.cn:20000/downloads/windows/NewCosmosAgentSetup_2.0.20261128.exe",
+                        "version":  "2.0.20261129",
+                        "url":  "https://cosmos-static.sua17.cn:20000/downloads/windows/NewCosmosAgentSetup_2.0.20261129.exe",
                         "isDownload":  true,
                         "note":  "固定 PC 打印 / 文书代理（可选组件）"
                     },
@@ -39,8 +39,8 @@
                         "terminal":  "T6",
                         "name":  "开阳 · 星使",
                         "platform":  "Android",
-                        "version":  "2.0.20261128",
-                        "url":  "https://cosmos-static.sua17.cn:20000/downloads/android/newcosmos-2.0.20261128.apk",
+                        "version":  "2.0.20261129",
+                        "url":  "https://cosmos-static.sua17.cn:20000/downloads/android/newcosmos-2.0.20261129.apk",
                         "isDownload":  true,
                         "note":  "移动壳 · 装机即用"
                     },

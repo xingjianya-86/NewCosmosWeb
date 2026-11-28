@@ -71,7 +71,7 @@ public sealed class ServerEnvironmentOptions
                     .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?
                     .InformationalVersion
                 ?? typeof(ServerEnvironmentOptions).Assembly.GetName().Version?.ToString(3)
-                ?? "2.0.20261128"),
+                ?? "2.0.20261129"),
             ApplicationName = GetString("NC_APP_NAME", "NewCosmos"),
             WindowTitle = "NewCosmos Server"
         };

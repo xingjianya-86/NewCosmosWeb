@@ -1,6 +1,6 @@
 {
   "name": "newcosmos-mobile",
-  "version": "2.0.20261128",
+  "version": "2.0.20261129",
   "private": true,
   "description": "NewCosmos Android shell - Capacitor WebView wrapper around the existing Vue web app",
   "scripts": {
